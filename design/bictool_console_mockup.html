@@ -1,0 +1,623 @@
+<title>BICTool Console</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --desktop:#0a0c0f;
+    --bg:#11151a;
+    --titlebar:#1b2027;
+    --surface:#181d23;
+    --surface-raised:#20262d;
+    --surface-sunken:#0c0f13;
+    --border:#2b323a;
+    --border-soft:#232a31;
+    --text:#e7eaed;
+    --text-muted:#8d96a0;
+    --text-faint:#5c6570;
+    --accent:#49c8de;
+    --accent-soft:rgba(73,200,222,0.14);
+    --accent-2:#d98bd8;
+    --accent-2-soft:rgba(217,139,216,0.14);
+    --good:#5fbf83;
+    --good-soft:rgba(95,191,131,0.14);
+    --warn:#dba63f;
+    --critical:#e0685c;
+    --critical-soft:rgba(224,104,92,0.14);
+    --font-ui:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+    --font-mono:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+  }
+  *{box-sizing:border-box;}
+  body{background:var(--desktop); color:var(--text); font-family:var(--font-ui); -webkit-font-smoothing:antialiased; font-size:12.5px;}
+  h1,h2,h3,h4{text-wrap:balance; margin:0; font-weight:600;}
+  p{margin:0;}
+  @media (prefers-reduced-motion: reduce){ *{animation-duration:0.001ms !important; transition-duration:0.001ms !important;} }
+
+  .desktop{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:26px 16px;}
+
+  .window{
+    width:100%; max-width:1180px;
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:10px;
+    box-shadow:0 24px 60px rgba(0,0,0,0.55);
+    overflow:hidden;
+  }
+
+  /* ---------- title bar ---------- */
+  .titlebar{
+    display:flex; align-items:center; justify-content:space-between;
+    background:var(--titlebar); border-bottom:1px solid var(--border);
+    padding:0 6px 0 12px; height:38px;
+  }
+  .tb-left{display:flex; align-items:center; gap:14px; height:100%;}
+  .tb-brand{display:flex; align-items:center; gap:6px;}
+  .tb-brand .mark{color:var(--accent); font-family:var(--font-mono); font-size:12px;}
+  .tb-brand .name{font-size:13px; font-weight:700; letter-spacing:0.01em;}
+  .menubar{display:flex; height:100%;}
+  .menu-item{
+    background:none; border:none; color:var(--text-muted); font-family:var(--font-ui); font-size:12px;
+    padding:0 11px; height:100%; cursor:pointer;
+  }
+  .menu-item:hover{background:var(--surface-raised); color:var(--text);}
+
+  .tb-right{display:flex; align-items:center; gap:10px;}
+  .tb-status{display:flex; align-items:center; gap:8px; padding-right:4px;}
+  .tb-status .mono{font-family:var(--font-mono); font-size:11px; color:var(--text-muted);}
+
+  .pill{display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:99px; font-size:10.5px; font-weight:500; border:1px solid transparent; white-space:nowrap;}
+  .pill-good{background:var(--good-soft); color:var(--good); border-color:rgba(95,191,131,0.3);}
+  .pill-warn{background:rgba(219,166,63,0.14); color:var(--warn); border-color:rgba(219,166,63,0.3);}
+  .pill-neutral{background:var(--surface-raised); color:var(--text-muted); border-color:var(--border);}
+
+  .icon-btn{width:24px; height:24px; border-radius:6px; border:1px solid var(--border); background:var(--surface-raised); color:var(--text-muted); font-size:12px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+  .icon-btn:hover{color:var(--text); border-color:var(--text-faint);}
+
+  .winctl{display:flex; gap:2px; margin-left:4px;}
+  .wc{width:30px; height:28px; border:none; background:none; color:var(--text-faint); font-size:12px; cursor:pointer; border-radius:4px;}
+  .wc:hover{background:var(--surface-raised); color:var(--text);}
+  .wc-close:hover{background:var(--critical); color:#20090a;}
+
+  /* ---------- workspace ---------- */
+  .workspace{display:grid; grid-template-columns:minmax(0,1.5fr) 372px; gap:1px; background:var(--border);}
+  .viewer-panel{background:var(--bg); display:flex; flex-direction:column; padding:14px;}
+  .viewer-toolbar{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; gap:10px; flex-wrap:wrap;}
+  .viewer-toolbar .legend{display:flex; gap:14px; font-size:11px; color:var(--text-muted);}
+  .viewer-toolbar .legend span{display:flex; align-items:center; gap:5px;}
+  .swatch{display:inline-block; width:8px; height:8px; border-radius:2px;}
+
+  .seg-tabs{display:flex; gap:2px; background:var(--surface-sunken); border:1px solid var(--border); border-radius:7px; padding:2px;}
+  .seg-tab{background:none; border:none; color:var(--text-muted); font-family:var(--font-ui); font-size:11.5px; font-weight:500; padding:5px 12px; border-radius:5px; cursor:pointer;}
+  .seg-tab:hover{color:var(--text);}
+  .seg-tab.active{background:var(--surface-raised); color:var(--text);}
+  .seg-tab:disabled{opacity:0.4; cursor:not-allowed;}
+  .seg-tab:disabled:hover{color:var(--text-muted);}
+
+  .view-pane{display:none; flex:1; flex-direction:column; min-height:0;}
+  .view-pane.active{display:flex;}
+
+  /* ---------- results view (in main pane) ---------- */
+  .score-strip{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; padding:12px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface); margin-bottom:12px;}
+  .score-strip .left{display:flex; align-items:baseline; gap:10px;}
+  .score-strip .left .label{font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.03em;}
+  .score-strip .left .verdict{font-size:15px; font-weight:700; color:var(--good);}
+  .score-strip .decision{font-family:var(--font-mono); font-size:11px; color:var(--text-muted);}
+  .score-strip .right{display:flex; align-items:center; gap:10px;}
+  .study-bar-mini{width:120px; height:6px; border-radius:99px; background:var(--surface-sunken); overflow:hidden; border:1px solid var(--border-soft);}
+  .study-bar-mini .fill{height:100%; background:var(--good); width:92.5%;}
+
+  .charts-row{display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px;}
+  .chart-box{flex:1; min-width:280px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden;}
+  .chart-box .chart-title{font-size:11px; font-weight:600; color:var(--text-muted); padding:9px 12px; border-bottom:1px solid var(--border-soft);}
+  .chart-box .chart-wrap{padding:8px 10px; overflow-x:auto;}
+  svg.chart text{fill:var(--text-faint); font-family:var(--font-mono);}
+  svg.chart .grid{stroke:var(--border-soft); stroke-width:1;}
+  svg.chart .axis{stroke:var(--border); stroke-width:1;}
+  svg.chart .curve{fill:none; stroke-width:2;}
+  svg.chart .endpoint{stroke:var(--bg); stroke-width:1.5;}
+
+  .feature-panel{border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden;}
+  .feature-panel .chart-title{font-size:11px; font-weight:600; color:var(--text-muted); padding:9px 12px; border-bottom:1px solid var(--border-soft);}
+  .feature-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:2px; background:var(--border-soft); padding:1px;}
+  .feature-grid .fcell{display:flex; justify-content:space-between; gap:10px; background:var(--surface); padding:8px 12px; font-family:var(--font-mono); font-size:11px;}
+  .feature-grid .fcell .k{color:var(--text-muted);}
+  .feature-grid .fcell .v{color:var(--text);}
+
+  .viewport{position:relative; flex:1; border-radius:8px; overflow:hidden; background:#05070a; border:1px solid var(--border); min-height:420px;}
+  .viewport canvas{width:100%; height:100%; display:block; object-fit:cover; position:absolute; inset:0;}
+  .roi-box{position:absolute; border:1.5px solid var(--accent); background:var(--accent-soft); border-radius:2px;}
+  .roi-box.roi-2{border-color:var(--accent-2); background:var(--accent-2-soft);}
+  .roi-tag{position:absolute; top:-18px; left:-1.5px; font-family:var(--font-mono); font-size:9.5px; padding:1px 5px; border-radius:3px; white-space:nowrap; background:var(--accent); color:#08181c; font-weight:600;}
+  .roi-box.roi-2 .roi-tag{background:var(--accent-2); color:#25062a;}
+  .slice-strip{position:absolute; left:0; right:0; bottom:0; padding:9px 11px; background:linear-gradient(to top, rgba(0,0,0,0.78), transparent); display:flex; align-items:center; gap:9px;}
+  .slice-strip input[type=range]{flex:1; accent-color:var(--accent);}
+  .slice-strip .count{font-family:var(--font-mono); font-size:11px; color:#dfe3e6;}
+
+  /* ---------- sidebar ---------- */
+  .sidebar{background:var(--bg); display:flex; flex-direction:column; gap:1px; background:var(--border); overflow:hidden;}
+  .panel{background:var(--bg);}
+  .panel-head{display:flex; align-items:center; justify-content:space-between; padding:9px 13px; border-bottom:1px solid var(--border-soft); gap:8px;}
+  .panel-head h3{font-size:11.5px; font-weight:600; letter-spacing:0.02em; text-transform:uppercase; color:var(--text-muted);}
+  .panel-body{padding:12px 13px;}
+
+  button{font-family:var(--font-ui); cursor:pointer;}
+  .btn{display:inline-flex; align-items:center; gap:6px; padding:6px 11px; border-radius:6px; border:1px solid var(--border); background:var(--surface-raised); color:var(--text); font-size:11.5px; font-weight:500;}
+  .btn:hover{border-color:var(--text-faint);}
+  .btn:disabled{opacity:0.4; cursor:not-allowed;}
+  .btn:disabled:hover{border-color:var(--border);}
+  .btn-accent{background:var(--accent); border-color:var(--accent); color:#08181c; font-weight:600;}
+  .btn-accent:hover{filter:brightness(1.08);}
+  .btn-accent:disabled{background:var(--surface-raised); color:var(--text-faint); border-color:var(--border);}
+  .btn-ghost{background:none; border-color:transparent; color:var(--accent); padding:4px 6px; font-size:11px;}
+  .btn-ghost:hover{text-decoration:underline;}
+  .btn:focus-visible, .menu-item:focus-visible, .icon-btn:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+  .kv-grid{display:grid; grid-template-columns:auto 1fr; gap:6px 12px; font-size:11.5px;}
+  .kv-grid .k{color:var(--text-faint);}
+  .kv-grid .v{color:var(--text); text-align:right;}
+  .mono{font-family:var(--font-mono); font-variant-numeric:tabular-nums;}
+
+  .row2{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border);}
+  .row2 .panel{min-width:0;}
+
+  .chip-col{display:flex; flex-wrap:wrap; gap:5px;}
+  .chip{padding:4px 9px; border-radius:99px; font-size:10.5px; border:1px solid var(--border); background:var(--surface-raised); color:var(--text-muted);}
+  .chip.on{border-color:rgba(73,200,222,0.4); background:var(--accent-soft); color:var(--text);}
+
+  .roi-readout .row{display:flex; justify-content:space-between; align-items:center; padding:5px 0; font-family:var(--font-mono); font-size:11px;}
+  .roi-readout .row .k{color:var(--text-muted); display:flex; align-items:center; gap:5px;}
+  .roi-readout .row .v{color:var(--text);}
+  .confirm-row{display:flex; align-items:center; gap:6px; margin-top:8px; font-size:11px; color:var(--text-muted);}
+  .confirm-row input{accent-color:var(--accent); width:13px; height:13px;}
+  .redetect-undo{font-size:10.5px; margin-top:6px; color:var(--text-faint);}
+  .redetect-undo a{color:var(--accent); text-decoration:underline;}
+
+  .metrics-panel{flex:1;}
+  .metric-rows{display:flex; flex-direction:column;}
+  .metric-row{display:flex; align-items:center; gap:9px; padding:8px 0; border-bottom:1px solid var(--border-soft);}
+  .metric-row:last-child{border-bottom:none;}
+  .mini-run{width:20px; height:20px; border-radius:5px; border:1px solid var(--border); background:var(--surface-raised); color:var(--text-muted); font-size:9.5px; flex-shrink:0;}
+  .mini-run:hover{color:var(--accent); border-color:rgba(73,200,222,0.4);}
+  .metric-row.err .mini-run:hover{color:var(--critical); border-color:rgba(224,104,92,0.4);}
+  .mname{font-size:12px; font-weight:500; width:88px; flex-shrink:0;}
+  .status-chip{font-family:var(--font-mono); font-size:9.5px; padding:2px 7px; border-radius:99px; border:1px solid var(--border); color:var(--text-faint); white-space:nowrap; cursor:default;}
+  .status-chip.running{color:var(--accent); border-color:rgba(73,200,222,0.35); background:var(--accent-soft);}
+  .status-chip.done{color:var(--good); border-color:rgba(95,191,131,0.35); background:var(--good-soft);}
+  .status-chip.error{color:var(--critical); border-color:rgba(224,104,92,0.4); background:var(--critical-soft);}
+  .mresult{margin-left:auto; font-size:11.5px; color:var(--text);}
+  .mresult .u{font-size:9.5px; color:var(--text-muted); margin-left:2px;}
+
+  .result-strip{display:flex; align-items:center; gap:9px; margin-top:12px; padding-top:12px; border-top:1px solid var(--border-soft);}
+  .result-strip .decision{color:var(--text-muted); font-size:10.5px;}
+  .result-strip .btn{margin-left:auto;}
+
+  /* ---------- modal ---------- */
+  .modal-backdrop{position:fixed; inset:0; background:rgba(4,6,8,0.6); display:none; align-items:center; justify-content:center; z-index:50; padding:20px;}
+  .modal-backdrop.open{display:flex;}
+  .modal{width:100%; max-width:480px; background:var(--bg); border:1px solid var(--border); border-radius:10px; box-shadow:0 24px 60px rgba(0,0,0,0.55); overflow:hidden;}
+  .modal-head{display:flex; align-items:center; justify-content:space-between; padding:13px 16px; border-bottom:1px solid var(--border-soft);}
+  .modal-head h3{font-size:13px;}
+  .modal-body{padding:16px;}
+  .format-list{display:flex; flex-direction:column; gap:8px; margin-bottom:16px;}
+  .format-opt{display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--surface); cursor:pointer;}
+  .format-opt.selected{border-color:rgba(73,200,222,0.4); background:var(--accent-soft);}
+  .format-opt input{accent-color:var(--accent);}
+  .format-opt .ico{font-family:var(--font-mono); font-size:10px; color:var(--accent); width:28px; height:28px; border-radius:6px; background:var(--surface-sunken); display:flex; align-items:center; justify-content:center; flex-shrink:0; border:1px solid var(--border-soft);}
+  .format-opt .fname{font-size:12.5px; font-weight:500;}
+  .format-opt .fdesc{font-size:10.5px; color:var(--text-faint); margin-top:1px;}
+  .field-label{font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:6px; display:block;}
+  .field input[type=text]{width:100%; padding:8px 10px; background:var(--surface-sunken); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono); font-size:11.5px;}
+  .field-hint{font-size:10.5px; color:var(--text-faint); margin-top:5px;}
+  .note{margin-top:14px; padding:9px 11px; background:var(--surface-sunken); border:1px solid var(--border-soft); border-radius:7px; font-size:10.5px; color:var(--text-muted); line-height:1.6;}
+  .modal-foot{display:flex; justify-content:flex-end; gap:8px; padding:13px 16px; border-top:1px solid var(--border-soft);}
+
+  /* ---------- help popover ---------- */
+  .help-pop{position:absolute; top:34px; right:6px; width:250px; background:var(--surface-raised); border:1px solid var(--border); border-radius:9px; padding:13px 14px; box-shadow:0 12px 28px rgba(0,0,0,0.45); z-index:30; display:none;}
+  .help-pop.open{display:block;}
+  .help-pop h4{font-size:11.5px; margin-bottom:7px;}
+  .help-pop ul{margin:0; padding-left:15px; display:flex; flex-direction:column; gap:5px;}
+  .help-pop li{font-size:11px; color:var(--text-muted); line-height:1.5;}
+
+  /* ---------- toast ---------- */
+  .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(8px); opacity:0; background:var(--surface-raised); border:1px solid rgba(95,191,131,0.4); color:var(--text); padding:9px 15px; border-radius:8px; font-size:11.5px; z-index:60; transition:opacity .2s ease, transform .2s ease; pointer-events:none;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+</style>
+
+<div class="desktop">
+  <div class="window">
+    <div class="titlebar">
+      <div class="tb-left">
+        <div class="tb-brand"><span class="mark">◆</span><span class="name">BICTool</span></div>
+        <nav class="menubar" aria-label="Menu">
+          <button class="menu-item">File</button>
+          <button class="menu-item">Study</button>
+          <button class="menu-item">View</button>
+          <button class="menu-item" id="export-open-menu">Export</button>
+        </nav>
+      </div>
+      <div class="tb-right">
+        <div class="tb-status">
+          <span class="mono">STU-2026-0091</span>
+          <span class="pill pill-good">● De-identified</span>
+          <span class="pill pill-neutral">mockup</span>
+        </div>
+        <div style="position:relative;">
+          <button class="icon-btn" id="help-btn" aria-label="Help" title="Help">?</button>
+          <div class="help-pop" id="help-pop">
+            <h4>Tips</h4>
+            <ul>
+              <li>ROIs are proposed automatically — tick "Confirmed" once checked to enable "Run All".</li>
+              <li>Any single metric can be re-run with its own ▶, without repeating the others.</li>
+              <li>Export is always reachable from the menu bar, once results exist.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="winctl">
+          <button class="wc" title="Minimize">&#x2212;</button>
+          <button class="wc" title="Maximize">&#x25A1;</button>
+          <button class="wc wc-close" title="Close">&#x2715;</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="workspace">
+      <div class="viewer-panel">
+        <div class="viewer-toolbar">
+          <div class="seg-tabs">
+            <button class="seg-tab active" data-view="viewer">Viewer</button>
+            <button class="seg-tab" data-view="results" id="results-tab-btn" disabled title="Run metrics to see results">Results</button>
+          </div>
+          <div class="legend" id="viewer-toolbar-right">
+            <span><span class="swatch" style="background:var(--accent);"></span>ROI 1 · Structured</span>
+            <span><span class="swatch" style="background:var(--accent-2);"></span>ROI 2 · Homogeneous</span>
+          </div>
+          <button class="btn" id="redetect-btn">Re-detect ROIs</button>
+        </div>
+
+        <div class="view-pane active" id="view-viewer">
+          <div class="viewport">
+            <canvas id="ct-canvas-review" width="640" height="640"></canvas>
+            <div class="roi-box" style="left:44%; top:33%; width:15%; height:17%;"><span class="roi-tag">ROI 1</span></div>
+            <div class="roi-box roi-2" style="left:31%; top:56%; width:16%; height:15%;"><span class="roi-tag">ROI 2</span></div>
+            <div class="slice-strip">
+              <span class="count">Slice</span>
+              <input type="range" min="1" max="180" value="94" aria-label="Slice index">
+              <span class="count">094 / 180</span>
+            </div>
+          </div>
+          <div class="redetect-undo" id="redetect-undo" style="display:none;">Re-detected from segmentation. <a href="#" id="undo-redetect">Undo</a></div>
+        </div>
+
+        <div class="view-pane" id="view-results">
+          <div class="score-strip">
+            <div class="left">
+              <span class="label">Slice 094</span>
+              <span class="verdict">Diagnostic</span>
+              <span class="decision">decision +1.42</span>
+            </div>
+            <div class="right">
+              <span class="label">Study rating</span>
+              <div class="study-bar-mini"><div class="fill"></div></div>
+              <span class="mono">37/40 · 92.5%</span>
+            </div>
+          </div>
+
+          <div class="charts-row">
+            <div class="chart-box">
+              <div class="chart-title">MTF curve — ROI1 <span class="pill pill-neutral" style="margin-left:6px;">sample data</span></div>
+              <div class="chart-wrap"><svg class="chart" id="chart-mtf" width="360" height="190" viewBox="0 0 360 190"></svg></div>
+            </div>
+            <div class="chart-box">
+              <div class="chart-title">NPS curve — ROI1 <span class="pill pill-neutral" style="margin-left:6px;">sample data</span></div>
+              <div class="chart-wrap"><svg class="chart" id="chart-nps" width="360" height="190" viewBox="0 0 360 190"></svg></div>
+            </div>
+          </div>
+
+          <div class="feature-panel">
+            <div class="chart-title">Feature vector — classify_quality input</div>
+            <div class="feature-grid">
+              <div class="fcell"><span class="k">mtf_area</span><span class="v">0.418</span></div>
+              <div class="fcell"><span class="k">nps_homo (ROI2 var_nps)</span><span class="v">0.00142</span></div>
+              <div class="fcell"><span class="k">nps_struct (ROI1 var_nps)</span><span class="v">0.00187</span></div>
+              <div class="fcell"><span class="k">var_struct (ROI1 var_measured)</span><span class="v">12.4</span></div>
+              <div class="fcell"><span class="k">ratio_lf_hf</span><span class="v">1.86</span></div>
+              <div class="fcell"><span class="k">slope_avg</span><span class="v">-0.031</span></div>
+              <div class="fcell"><span class="k">loc_max</span><span class="v">0.34</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="panel">
+          <div class="panel-head"><h3>Study Information</h3><button class="btn-ghost">Open…</button></div>
+          <div class="panel-body">
+            <div class="kv-grid">
+              <div class="k">Patient</div><div class="v mono">ANON-04471</div>
+              <div class="k">Acquired</div><div class="v mono">2026-08-22</div>
+              <div class="k">Slices</div><div class="v mono">180</div>
+              <div class="k">Reconstruction</div><div class="v">FBP</div>
+              <div class="k">CTDIvol</div><div class="v mono">42.3 mGy</div>
+              <div class="k">DLP</div><div class="v mono">758 mGy·cm</div>
+              <div class="k">Pixel spacing</div><div class="v mono">0.488 mm</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div class="panel">
+            <div class="panel-head"><h3>Segmentation</h3></div>
+            <div class="panel-body">
+              <div class="chip-col">
+                <span class="chip on">Skull</span>
+                <span class="chip on">Brain</span>
+                <span class="chip on">Ventricles</span>
+                <span class="chip">Vessels</span>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>ROI Selection</h3></div>
+            <div class="panel-body">
+              <div class="roi-readout">
+                <div class="row"><span class="k"><span class="swatch" style="background:var(--accent);"></span>ROI1</span><span class="v">142–181 · 96–135</span></div>
+                <div class="row"><span class="k"><span class="swatch" style="background:var(--accent-2);"></span>ROI2</span><span class="v">210–249 · 140–179</span></div>
+              </div>
+              <label class="confirm-row"><input type="checkbox" id="confirm-rois">Confirmed</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel metrics-panel">
+          <div class="panel-head"><h3>Run Metrics</h3><button class="btn btn-accent" id="run-all-btn" disabled title="Confirm ROIs to enable">▶ Run All</button></div>
+          <div class="panel-body">
+            <div class="metric-rows" id="metric-rows">
+              <div class="metric-row" data-metric="mtf">
+                <button class="mini-run" title="Run MTF">▶</button>
+                <span class="mname">MTF</span>
+                <span class="status-chip queued">queued</span>
+                <span class="mresult"></span>
+              </div>
+              <div class="metric-row" data-metric="nps">
+                <button class="mini-run" title="Run NPS">▶</button>
+                <span class="mname">NPS</span>
+                <span class="status-chip queued">queued</span>
+                <span class="mresult"></span>
+              </div>
+              <div class="metric-row" data-metric="ratio">
+                <button class="mini-run" title="Run PS/MTF ratio">▶</button>
+                <span class="mname">PS/MTF</span>
+                <span class="status-chip queued">queued</span>
+                <span class="mresult"></span>
+              </div>
+              <div class="metric-row err" data-metric="contrast">
+                <button class="mini-run" id="retry-contrast" title="Retry">&#x21bb;</button>
+                <span class="mname">Contrast</span>
+                <span class="status-chip error" title="ROI2 falls partly outside the reconstruction field of view — move it inward and retry.">error</span>
+                <span class="mresult"></span>
+              </div>
+            </div>
+
+            <div class="result-strip" id="result-strip" style="display:none;">
+              <span class="pill pill-good">Diagnostic</span>
+              <span class="mono decision">+1.42</span>
+              <button class="btn" id="export-open-btn">Export…</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="export-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+    <div class="modal-head"><h3 id="export-modal-title">Export Results</h3><button class="icon-btn" id="export-close-btn" aria-label="Close">&#x2715;</button></div>
+    <div class="modal-body">
+      <span class="field-label">Format</span>
+      <div class="format-list">
+        <label class="format-opt selected" data-ext=".xlsx">
+          <input type="radio" name="fmt" checked><span class="ico">XLS</span>
+          <div><div class="fname">Excel workbook</div><div class="fdesc">Per-slice metrics + study summary</div></div>
+        </label>
+        <label class="format-opt" data-ext=".csv">
+          <input type="radio" name="fmt"><span class="ico">TXT</span>
+          <div><div class="fname">ASCII / CSV</div><div class="fdesc">Plain delimited text</div></div>
+        </label>
+        <label class="format-opt" data-ext=".dcm">
+          <input type="radio" name="fmt"><span class="ico">DCM</span>
+          <div><div class="fname">DICOM structured report</div><div class="fdesc">Attaches to the PACS study record</div></div>
+        </label>
+      </div>
+      <div class="field">
+        <span class="field-label">Destination</span>
+        <input type="text" id="export-path" value="D:\BICTool\exports\STU-2026-0091_results.xlsx">
+        <div class="field-hint" id="export-hint">Extension matches the selected format.</div>
+      </div>
+      <div class="note">Exports contain only de-identified fields (NFR-06, GDPR/BDSG) and are logged for traceability (FR-09).</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="export-cancel-btn">Cancel</button>
+      <button class="btn btn-accent" id="export-confirm-btn">Export</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  // ---- help popover ----
+  var helpBtn = document.getElementById('help-btn'), helpPop = document.getElementById('help-pop');
+  helpBtn.addEventListener('click', function(e){ e.stopPropagation(); helpPop.classList.toggle('open'); });
+  document.addEventListener('click', function(e){ if (!helpPop.contains(e.target) && e.target !== helpBtn) helpPop.classList.remove('open'); });
+
+  // ---- toast ----
+  var toastEl = document.getElementById('toast'), toastTimer;
+  function toast(msg){
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(function(){ toastEl.classList.remove('show'); }, 2600);
+  }
+
+  // ---- viewer / results tabs in the main pane ----
+  var segTabs = document.querySelectorAll('.seg-tab');
+  var viewPanes = {viewer: document.getElementById('view-viewer'), results: document.getElementById('view-results')};
+  var viewerExtras = [document.getElementById('viewer-toolbar-right'), document.getElementById('redetect-btn')];
+  function goToView(name){
+    segTabs.forEach(function(t){ t.classList.toggle('active', t.dataset.view === name); });
+    Object.keys(viewPanes).forEach(function(k){ viewPanes[k].classList.toggle('active', k === name); });
+    viewerExtras.forEach(function(el){ el.style.display = (name === 'viewer') ? '' : 'none'; });
+  }
+  segTabs.forEach(function(t){ t.addEventListener('click', function(){ if (!t.disabled) goToView(t.dataset.view); }); });
+
+  // ---- re-detect ROIs + undo ----
+  var redetectBtn = document.getElementById('redetect-btn'), redetectUndo = document.getElementById('redetect-undo');
+  redetectBtn.addEventListener('click', function(){ redetectUndo.style.display = 'block'; toast('ROIs re-detected from segmentation'); });
+  document.getElementById('undo-redetect').addEventListener('click', function(e){ e.preventDefault(); redetectUndo.style.display = 'none'; toast('Reverted to previous ROIs'); });
+
+  // ---- confirm ROIs gates Run All ----
+  var confirmBox = document.getElementById('confirm-rois'), runAllBtn = document.getElementById('run-all-btn');
+  confirmBox.addEventListener('change', function(){
+    runAllBtn.disabled = !confirmBox.checked;
+    runAllBtn.title = confirmBox.checked ? '' : 'Confirm ROIs to enable';
+  });
+
+  // ---- retry a failed metric ----
+  document.getElementById('retry-contrast').addEventListener('click', function(){
+    var row = document.querySelector('.metric-row[data-metric="contrast"]');
+    row.classList.remove('err');
+    row.querySelector('.mini-run').outerHTML = '<button class="mini-run" title="Run Contrast">▶</button>';
+    var chip = row.querySelector('.status-chip'); chip.textContent = 'done'; chip.className = 'status-chip done'; chip.removeAttribute('title');
+    row.querySelector('.mresult').innerHTML = '812.3<span class="u">HU</span>';
+    toast('Contrast recomputed successfully');
+  });
+
+  // ---- synthetic axial CT slice ----
+  function drawSkull(canvas){
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width, h = canvas.height, cx = w/2, cy = h/2;
+    ctx.fillStyle = '#05070a'; ctx.fillRect(0,0,w,h);
+    ctx.beginPath(); ctx.ellipse(cx,cy,w*0.42,h*0.46,0,0,Math.PI*2); ctx.fillStyle = '#e7eaec'; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx,cy,w*0.375,h*0.415,0,0,Math.PI*2); ctx.fillStyle = '#8d9298'; ctx.fill();
+    ctx.fillStyle = '#4d5257';
+    ctx.beginPath(); ctx.ellipse(cx - w*0.06, cy, w*0.05, h*0.095, -0.25, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx + w*0.06, cy, w*0.05, h*0.095, 0.25, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#b7bbbf'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(cx, cy - h*0.4); ctx.lineTo(cx, cy + h*0.4); ctx.stroke();
+    var img = ctx.getImageData(0,0,w,h), d = img.data;
+    for (var i=0;i<d.length;i+=4){ var n = (Math.random()-0.5)*16; d[i]+=n; d[i+1]+=n; d[i+2]+=n; }
+    ctx.putImageData(img,0,0);
+  }
+  drawSkull(document.getElementById('ct-canvas-review'));
+
+  // ---- run metrics simulation ----
+  var order = ['mtf','nps','ratio'];
+  var values = {
+    mtf:'0.418<span class="u">mm\u207b\u00b9</span>',
+    nps:'0.00142<span class="u">HU\u00b2mm\u00b2</span>',
+    ratio:'1.86<span class="u">LF/HF</span>'
+  };
+  var ran = false;
+  function runAll(){
+    if (ran) return; ran = true;
+    order.forEach(function(m){
+      var row = document.querySelector('.metric-row[data-metric="' + m + '"]');
+      var chip = row.querySelector('.status-chip'); chip.textContent = 'running'; chip.className = 'status-chip running';
+    });
+    order.forEach(function(m, idx){
+      setTimeout(function(){
+        var row = document.querySelector('.metric-row[data-metric="' + m + '"]');
+        var chip = row.querySelector('.status-chip'); chip.textContent = 'done'; chip.className = 'status-chip done';
+        row.querySelector('.mresult').innerHTML = values[m];
+        if (idx === order.length - 1){
+          document.getElementById('result-strip').style.display = 'flex';
+          var resultsTabBtn = document.getElementById('results-tab-btn');
+          resultsTabBtn.disabled = false;
+          resultsTabBtn.title = '';
+          drawCharts();
+          goToView('results');
+          toast('Classification — Diagnostic quality (decision +1.42)');
+        }
+      }, (idx + 1) * 500);
+    });
+  }
+  runAllBtn.addEventListener('click', runAll);
+  document.querySelectorAll('.metric-row:not(.err) .mini-run').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var row = btn.closest('.metric-row'); var m = row.dataset.metric;
+      var chip = row.querySelector('.status-chip'); chip.textContent = 'running'; chip.className = 'status-chip running';
+      setTimeout(function(){ chip.textContent = 'done'; chip.className = 'status-chip done'; row.querySelector('.mresult').innerHTML = values[m]; }, 450);
+    });
+  });
+
+  // ---- export modal ----
+  var modal = document.getElementById('export-modal');
+  function openModal(){ modal.classList.add('open'); modal.setAttribute('aria-hidden','false'); document.getElementById('export-close-btn').focus(); }
+  function closeModal(){ modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); }
+  document.getElementById('export-open-btn').addEventListener('click', openModal);
+  document.getElementById('export-open-menu').addEventListener('click', openModal);
+  document.getElementById('export-close-btn').addEventListener('click', closeModal);
+  document.getElementById('export-cancel-btn').addEventListener('click', closeModal);
+  modal.addEventListener('click', function(e){ if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && modal.classList.contains('open')) closeModal(); });
+
+  var formatOpts = document.querySelectorAll('.format-opt');
+  var pathInput = document.getElementById('export-path'), exportHint = document.getElementById('export-hint');
+  formatOpts.forEach(function(opt){
+    opt.addEventListener('click', function(){
+      formatOpts.forEach(function(o){ o.classList.remove('selected'); });
+      opt.classList.add('selected'); opt.querySelector('input').checked = true;
+      pathInput.value = pathInput.value.replace(/\.[a-z0-9]+$/i, opt.dataset.ext);
+      exportHint.textContent = 'Extension matches the selected format.';
+    });
+  });
+  document.getElementById('export-confirm-btn').addEventListener('click', function(){
+    closeModal(); toast('Exported to ' + pathInput.value);
+  });
+
+  // ---- results charts (drawn once, when results unlock) ----
+  var chartsDrawn = false;
+  function drawChart(svgId, points, opts){
+    var svg = document.getElementById(svgId);
+    var W = 360, H = 190, pad = {l:36, r:12, t:10, b:26};
+    var plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+    var xs = points.map(function(p){return p[0];});
+    var xMax = opts.xMax, yMax = opts.yMax;
+    function X(x){ return pad.l + (x / xMax) * plotW; }
+    function Y(y){ return pad.t + plotH - (y / yMax) * plotH; }
+    var ns = 'http://www.w3.org/2000/svg';
+    function el(tag, attrs){ var e = document.createElementNS(ns, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+    opts.yTicks.forEach(function(v){
+      svg.appendChild(el('line', {class:'grid', x1:pad.l, x2:W-pad.r, y1:Y(v), y2:Y(v)}));
+      var t = el('text', {x:pad.l-7, y:Y(v)+3, 'font-size':9, 'text-anchor':'end'});
+      t.textContent = opts.yFmt ? opts.yFmt(v) : v; svg.appendChild(t);
+    });
+    opts.xTicks.forEach(function(v){
+      var t = el('text', {x:X(v), y:H-7, 'font-size':9, 'text-anchor':'middle'}); t.textContent = v; svg.appendChild(t);
+    });
+    svg.appendChild(el('line', {class:'axis', x1:pad.l, x2:pad.l, y1:pad.t, y2:H-pad.b}));
+    svg.appendChild(el('line', {class:'axis', x1:pad.l, x2:W-pad.r, y1:H-pad.b, y2:H-pad.b}));
+
+    var areaD = 'M' + X(xs[0]) + ' ' + Y(0);
+    points.forEach(function(p){ areaD += ' L' + X(p[0]) + ' ' + Y(p[1]); });
+    areaD += ' L' + X(xs[xs.length-1]) + ' ' + Y(0) + ' Z';
+    var grad = el('linearGradient', {id:svgId+'-grad', x1:0, y1:0, x2:0, y2:1});
+    grad.appendChild(el('stop', {offset:'0%', 'stop-color':opts.color, 'stop-opacity':0.32}));
+    grad.appendChild(el('stop', {offset:'100%', 'stop-color':opts.color, 'stop-opacity':0}));
+    var defs = el('defs', {}); defs.appendChild(grad); svg.appendChild(defs);
+    svg.appendChild(el('path', {d:areaD, fill:'url(#'+svgId+'-grad)'}));
+
+    var lineD = points.map(function(p, i){ return (i===0?'M':'L') + X(p[0]) + ' ' + Y(p[1]); }).join(' ');
+    svg.appendChild(el('path', {class:'curve', d:lineD, stroke:opts.color}));
+
+    var last = points[points.length-1];
+    svg.appendChild(el('circle', {class:'endpoint', cx:X(last[0]), cy:Y(last[1]), r:3.5, fill:opts.color}));
+  }
+  function drawCharts(){
+    if (chartsDrawn) return; chartsDrawn = true;
+    drawChart('chart-mtf', [[0,1.0],[0.1,0.93],[0.2,0.81],[0.3,0.66],[0.4,0.52],[0.5,0.39],[0.6,0.28],[0.7,0.19],[0.8,0.12],[0.9,0.07],[1.0,0.04],[1.1,0.02],[1.2,0.01]],
+      {xMax:1.2, yMax:1.0, xTicks:[0,0.4,0.8,1.2], yTicks:[0,0.5,1.0], color:'#49c8de', yFmt:function(v){return v.toFixed(1);}});
+    drawChart('chart-nps', [[0,0.006],[0.1,0.011],[0.2,0.016],[0.3,0.019],[0.4,0.018],[0.5,0.015],[0.6,0.012],[0.7,0.009],[0.8,0.007],[0.9,0.005],[1.0,0.004],[1.1,0.003],[1.2,0.002]],
+      {xMax:1.2, yMax:0.02, xTicks:[0,0.4,0.8,1.2], yTicks:[0,0.01,0.02], color:'#d98bd8', yFmt:function(v){return v.toFixed(2);}});
+  }
+})();
+</script>

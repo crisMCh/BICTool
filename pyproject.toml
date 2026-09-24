@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bictool"
+version = "0.0.1"
+description = "Objective, automated, quantitative image-quality assessment for head/skull CT DICOM images."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+dependencies = ["numpy>=2.0", "scipy", "openpyxl"]
+
+[project.optional-dependencies]
+dicom = ["pydicom", "pynetdicom", "SimpleITK"]
+science = ["numpy", "scipy", "scikit-image"]
+# PySide6 (Qt6) chosen 2026-09-10 over PySide2 - see architecture/layers_description.md,
+# "User Interface Framework". Requires Windows 10 (1809+); no Windows 7/8 support.
+gui = ["PySide6"]
+# TensorFlow/Keras chosen over the architecture doc's PyTorch (layers_description.md,
+# "Image Processing and Analysis") for FR-02 anatomy segmentation and the stroke-detection
+# module - both available pretrained models (jasonccai/HeadCTSegmentation,
+# Ashly1991/AISD-HeadCT-Transfer-Learning) ship real trained TensorFlow/Keras weights with
+# no PyTorch port; re-porting real trained weights across frameworks is itself a risky,
+# effortful, error-prone undertaking with no real benefit here. See
+# domain/segmentation/_unet_architecture.py and layers_description.md's addendum.
+# `domain/segmentation/_resize.py`'s pad/crop is pure NumPy - no resize
+# library needed there any more (an earlier skimage-based interpolating
+# resize fallback for slices >512px was replaced with an exact per-axis
+# crop, since interpolating/stretching the image measurably distorted
+# segmentation quality - see this project's ML-segmentation memory).
+# dicom2nifti converts a loaded DICOM series to NIfTI (matching
+# `integration/dicom_to_nifti.py`) so segmentation runs on a properly
+# orientation-canonicalized volume, the way the model's own training/
+# reference data was prepared - confirmed empirically (2026-09-17) to be a
+# lossless transpose+flip of the raw DICOM pixel data for a real scan, not
+# a lossy resample. Pulls in python-gdcm (~34MB) as its own dependency.
+ml = ["tensorflow", "dicom2nifti"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["source"]
+
+[tool.setuptools.package-data]
+"bictool.domain.results" = ["*.npz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

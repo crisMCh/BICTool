@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Outputs derived from real patient DICOM data - local validation only,
+# never committed.
+reference/
+reference.zip
+debugs/
+
+# Licensed source PDFs (grant proposal, WP1/WP2 reports) - not ours to
+# redistribute; kept locally only. See requirements/requirements.md for
+# the maintained, committed summary of the same content.
+requirements/*.pdf
