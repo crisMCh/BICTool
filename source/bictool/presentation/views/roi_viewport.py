@@ -1,0 +1,465 @@
+"""Interactive image viewport: draw-then-assign ROI selection, live cursor
+readout, pan/zoom.
+
+Coordinate/cropping math lives in `viewmodels.roi_selection`, clinical
+windowing math in `viewmodels.windowing` (both pure, testable without Qt);
+this widget only turns mouse events into calls into that math and draws the
+result.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsView,
+    QLabel,
+    QWidget,
+)
+
+from bictool.presentation.viewmodels.roi_selection import RoiRect, make_square, normalize_rect
+from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS, apply_window
+
+logger = logging.getLogger(__name__)
+
+_ROI_COLORS = {"roi1": "#49c8de", "roi2": "#d98bd8"}
+# The in-progress/uncommitted rectangle - visually distinct (amber, dashed)
+# from either committed ROI's solid color so "drawn but not yet saved" never
+# looks like it's already ROI1 or ROI2.
+_DRAFT_COLOR = "#f2c94c"
+
+_ZOOM_STEP = 1.15
+_MIN_ZOOM_SCALE = 0.2
+_MAX_ZOOM_SCALE = 20.0
+
+# Screen-space (not scene-space) corner text, matching the standard DICOM
+# viewer convention of overlaying patient/study/series identity directly on
+# the image (RadiAnt/OsiriX/Weasis all do this) rather than in a side panel -
+# radiologists expect to read this without looking away from the image.
+_OVERLAY_MARGIN = 10
+_OVERLAY_ALIGNMENT = {
+    "top_left": Qt.AlignmentFlag.AlignLeft,
+    "top_right": Qt.AlignmentFlag.AlignRight,
+    "bottom_left": Qt.AlignmentFlag.AlignLeft,
+    "bottom_right": Qt.AlignmentFlag.AlignRight,
+}
+
+
+class RoiViewport(QGraphicsView):
+    """Shows a windowed grayscale slice with draw-then-assign ROI selection.
+
+    Interaction model: a plain left-drag always draws a single "draft"
+    rectangle (`draft_changed`, amber/dashed) - there is no "arm" step
+    first. The caller decides what to do with it via `commit_current_as`
+    ("roi1"/"roi2"), which saves the current draft into that slot (drawn in
+    that slot's solid color) without clearing it, so the same draft can be
+    committed to the other slot too if wanted. Drawing a new rectangle
+    replaces the previous draft. Panning is a middle-button drag (scrollbars
+    are otherwise always hidden, see `__init__`); Ctrl+wheel zooms (centered
+    on the cursor), plain wheel navigates slices (`wheelEvent`).
+    Double-click resets zoom/pan to fit the view. Zoom/pan persists across
+    slice changes (`set_image`) - only reset on double-click or first image.
+
+    Hovering over the image (no button held) emits `cursor_moved` with the
+    pixel coordinates and HU value under the cursor - the live "what am I
+    looking at" readout real DICOM viewers show, driven the same way a
+    QLabel-based status bar would be, just via a Qt signal so this widget
+    stays ignorant of how the caller displays it (see `main_window`'s
+    corner-overlay text).
+
+    Also shows patient/study/series/technical identity as four screen-corner
+    text labels (`set_overlay_text`), the standard DICOM-viewer convention
+    (RadiAnt/OsiriX/Weasis) for keeping that information on the image itself
+    instead of a side panel.
+
+    Also supports named, semi-transparent mask overlays (`set_overlay`/
+    `clear_overlay`) layered above the base image and below ROI rectangles -
+    the rendering mechanism for FR-06, ready for whenever a real mask
+    source (FR-02 automatic segmentation) exists. Cleared per-slice, same
+    as ROI rectangles.
+    """
+
+    draft_changed = Signal(object)  # RoiRect | None - the in-progress/last-drawn, not-yet-necessarily-saved rectangle
+    cursor_moved = Signal(object)  # (x: int, y: int, value_hu: float) | None - None when off-image or cursor leaves
+    slice_scroll = Signal(int)  # +1 (next slice) or -1 (previous slice)
+    zoom_changed = Signal(float)  # new zoom percentage - see `current_zoom_percent`
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setBackgroundBrush(QBrush(QColor("#05070a")))
+        self.setFrameShape(QGraphicsView.Shape.NoFrame)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # Left-drag always draws a draft rectangle (see class docstring) -
+        # Qt's built-in hand-drag pan mode would fight that, so panning is
+        # handled manually (middle-button, see mouse*Event below) and this
+        # stays NoDrag permanently rather than toggling per "armed" state.
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        # Mouse-move events must fire even with no button held, for the
+        # hover cursor/pixel-value readout.
+        self.setMouseTracking(True)
+        # This view always keeps the image either exactly fitted or panned
+        # by our own drag handling - a visible scrollbar is never part of
+        # the design, and letting Qt show/hide one automatically (the
+        # default `ScrollBarAsNeeded`) risks a feedback loop where a
+        # scrollbar appearing shrinks the viewport out from under an
+        # already-computed fit, shifting the image by the scrollbar's width.
+        # Manual middle-button panning still works with bars hidden - it
+        # sets the scrollbars' values directly, not via their widgets.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._pixmap_item: QGraphicsPixmapItem | None = None
+        self._roi_items: dict[str, QGraphicsRectItem] = {}
+        self._overlay_items: dict[str, QGraphicsPixmapItem] = {}
+        self._image_size = (0, 0)  # (width, height)
+        self._drag_start: QPointF | None = None
+        self._current_rect: RoiRect | None = None
+        self._current_rect_item: QGraphicsRectItem | None = None
+        self._pan_last_pos = None
+        self._current_pixels_hu: np.ndarray | None = None
+        self._window_width, self._window_center = WINDOW_PRESETS[DEFAULT_WINDOW_PRESET]
+        self._is_zoomed = False
+
+        # Parented to the viewport (not `self`/the scene) so this text stays
+        # fixed to the widget's corners in screen pixels regardless of
+        # zoom/pan - scene items would scale and drift with the image, which
+        # is not how any real DICOM viewer's overlay behaves. Transparent to
+        # mouse events so it never steals an ROI drag happening underneath.
+        self._overlay_labels: dict[str, QLabel] = {}
+        for corner, alignment in _OVERLAY_ALIGNMENT.items():
+            label = QLabel(self.viewport())
+            label.setAlignment(alignment)
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            label.setStyleSheet(
+                "QLabel { color: #e7eaed; background: rgba(5, 7, 10, 0.62); "
+                "font-family: 'IBM Plex Mono', Consolas, monospace; font-size: 10px; "
+                "padding: 4px 7px; border-radius: 4px; }"
+            )
+            label.setVisible(False)
+            self._overlay_labels[corner] = label
+
+    def set_overlay_text(self, corner: str, lines: list[str]) -> None:
+        """Sets the text shown in one screen corner ("top_left", "top_right",
+        "bottom_left", "bottom_right"), or hides it if `lines` is empty.
+        """
+        label = self._overlay_labels[corner]
+        label.setText("\n".join(lines))
+        label.setVisible(bool(lines))
+        label.adjustSize()
+        self._reposition_overlay_labels()
+
+    def _reposition_overlay_labels(self) -> None:
+        vp_width, vp_height = self.viewport().width(), self.viewport().height()
+        m = _OVERLAY_MARGIN
+        self._overlay_labels["top_left"].move(m, m)
+        self._overlay_labels["bottom_left"].move(m, vp_height - self._overlay_labels["bottom_left"].height() - m)
+        for corner in ("top_right", "bottom_right"):
+            label = self._overlay_labels[corner]
+            y = m if corner == "top_right" else vp_height - label.height() - m
+            label.move(vp_width - label.width() - m, y)
+
+    def set_image(self, pixels_hu: np.ndarray) -> None:
+        """Displays a new slice, windowed per the current WW/WL (see `set_window`).
+
+        Resets ROI overlays (committed and draft) - a freshly displayed
+        slice has no ROIs drawn on it yet (the caller, `main_window`, also
+        resets its own ROI state) - but preserves the current zoom/pan (see
+        class docstring).
+        """
+        self._current_pixels_hu = pixels_hu
+        height, width = pixels_hu.shape
+        is_first_image = self._pixmap_item is None
+        size_changed = (width, height) != self._image_size
+        self._image_size = (width, height)
+
+        for item in self._roi_items.values():
+            self._scene.removeItem(item)
+        self._roi_items = {}
+        if self._current_rect_item is not None:
+            self._scene.removeItem(self._current_rect_item)
+            self._current_rect_item = None
+        self._current_rect = None
+        self.draft_changed.emit(None)
+        self.clear_all_overlays()  # overlays (e.g. segmentation masks) are per-slice too
+
+        pixmap = self._make_windowed_pixmap()
+        if self._pixmap_item is None:
+            self._pixmap_item = self._scene.addPixmap(pixmap)
+            self._pixmap_item.setZValue(0)
+        else:
+            self._pixmap_item.setPixmap(pixmap)
+
+        if size_changed:
+            self._scene.setSceneRect(0, 0, width, height)
+        if is_first_image or not self._is_zoomed:
+            self._fit_in_view()
+
+    def clear(self) -> None:
+        """Removes the displayed image and all ROI/overlay/draft state -
+        back to the pre-`set_image` empty viewport, for `main_window`'s
+        "Close Study" action. Unlike `set_image`, does not replace the
+        pixmap with a new one - there is no image to show at all afterwards.
+        """
+        if self._pixmap_item is not None:
+            self._scene.removeItem(self._pixmap_item)
+            self._pixmap_item = None
+        for item in self._roi_items.values():
+            self._scene.removeItem(item)
+        self._roi_items = {}
+        if self._current_rect_item is not None:
+            self._scene.removeItem(self._current_rect_item)
+            self._current_rect_item = None
+        self._current_rect = None
+        self.draft_changed.emit(None)
+        self.clear_all_overlays()
+        self._current_pixels_hu = None
+        self._image_size = (0, 0)
+        self._is_zoomed = False
+        for corner in self._overlay_labels:
+            self.set_overlay_text(corner, [])
+
+    def set_window(self, width: float, center: float) -> None:
+        """Re-windows the currently displayed slice (WW/WL), keeping ROI overlays intact."""
+        self._window_width = width
+        self._window_center = center
+        if self._current_pixels_hu is not None and self._pixmap_item is not None:
+            self._pixmap_item.setPixmap(self._make_windowed_pixmap())
+
+    def current_window(self) -> tuple[float, float]:
+        """Current (width, center) WW/WL, for the caller's corner-overlay text."""
+        return self._window_width, self._window_center
+
+    def current_zoom_percent(self) -> float:
+        """Current zoom as a percentage where 100% means one image pixel is
+        shown as one screen pixel (the common uncalibrated-display
+        convention real viewers use, e.g. RadiAnt's `Zoom: 145%`) - this
+        tool has no monitor-calibration step, so it can't offer a
+        true-physical-size 100% the way a calibrated PACS workstation would.
+        """
+        return self.transform().m11() * 100.0
+
+    def _fit_in_view(self) -> None:
+        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.zoom_changed.emit(self.current_zoom_percent())
+
+    def _make_windowed_pixmap(self) -> QPixmap:
+        height, width = self._current_pixels_hu.shape
+        img8 = np.ascontiguousarray(apply_window(self._current_pixels_hu, self._window_width, self._window_center))
+        image = QImage(img8.tobytes(), width, height, width, QImage.Format.Format_Grayscale8)
+        return QPixmap.fromImage(image)
+
+    def commit_current_as(self, roi_key: str) -> RoiRect | None:
+        """Saves the current draft rectangle (the last one drawn - see
+        `draft_changed`) as `roi_key` ("roi1" or "roi2"), drawing it in that
+        slot's solid color and replacing whatever was previously saved
+        there. Returns the saved rect, or None if nothing has been drawn
+        yet (the caller should keep the Set ROI1/2 buttons disabled until a
+        first `draft_changed` with a non-None rect has fired).
+
+        The draft itself is *not* cleared afterwards (only its on-screen
+        dashed preview is, since it's now shown as the committed color
+        instead) - the same draft can still be committed to the other slot
+        too, since the request was "draw once, decide which slot(s) after".
+        """
+        if self._current_rect is None:
+            return None
+        self._draw_roi(roi_key, self._current_rect)
+        if self._current_rect_item is not None:
+            self._scene.removeItem(self._current_rect_item)
+            self._current_rect_item = None
+        return self._current_rect
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        super().resizeEvent(event)
+        if self._pixmap_item is not None and not self._is_zoomed:
+            self._fit_in_view()
+        self._reposition_overlay_labels()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_last_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._pixmap_item is not None:
+            self._drag_start = self.mapToScene(event.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        """Three mutually exclusive behaviors, in priority order: an active
+        middle-button pan; an active left-drag, which live-updates the draft
+        rectangle and emits `draft_changed` (using the exact same squared
+        rect `mouseReleaseEvent` will finalize, so nothing changes shape at
+        the moment of release); otherwise, if an image is loaded, a hover
+        cursor/pixel-value reading (`cursor_moved`).
+        """
+        if self._pan_last_pos is not None:
+            delta = event.pos() - self._pan_last_pos
+            self._pan_last_pos = event.pos()
+            h_bar, v_bar = self.horizontalScrollBar(), self.verticalScrollBar()
+            h_bar.setValue(h_bar.value() - delta.x())
+            v_bar.setValue(v_bar.value() - delta.y())
+            event.accept()
+            return
+        if self._drag_start is not None:
+            rect = self._rect_from_drag_endpoint(event.pos())
+            if rect is not None:
+                self._current_rect = rect
+                self._draw_current_rect(rect)
+                self.draft_changed.emit(rect)
+        elif self._current_pixels_hu is not None:
+            self._emit_cursor_reading(event.pos())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        if event.button() == Qt.MouseButton.MiddleButton and self._pan_last_pos is not None:
+            self._pan_last_pos = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
+            rect = self._rect_from_drag_endpoint(event.pos())
+            self._drag_start = None
+            if rect is not None:
+                self._current_rect = rect
+                self._draw_current_rect(rect)
+                self.draft_changed.emit(rect)
+            else:
+                logger.warning(
+                    "Drag produced an empty rectangle (no selection made) - the drag may have been "
+                    "outside the image, or too short to register."
+                )
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        self.cursor_moved.emit(None)
+        super().leaveEvent(event)
+
+    def _emit_cursor_reading(self, view_pos) -> None:
+        scene_pos = self.mapToScene(view_pos)
+        x, y = int(scene_pos.x()), int(scene_pos.y())
+        width, height = self._image_size
+        if 0 <= x < width and 0 <= y < height:
+            value = float(self._current_pixels_hu[y, x])
+            self.cursor_moved.emit((x, y, value))
+        else:
+            self.cursor_moved.emit(None)
+
+    def _rect_from_drag_endpoint(self, view_pos) -> RoiRect | None:
+        """Builds the (squared) `RoiRect` from `self._drag_start` to
+        `view_pos`, or None if that produces an empty rectangle (e.g. no
+        real drag distance yet, or the drag is outside the image).
+        """
+        end = self.mapToScene(view_pos)
+        width, height = self._image_size
+        raw_rect = normalize_rect(
+            int(self._drag_start.x()), int(self._drag_start.y()), int(end.x()), int(end.y()), width, height
+        )
+        if raw_rect.width <= 0 or raw_rect.height <= 0:
+            return None
+        # calc_digital_nps requires an exactly square ROI - a manual drag
+        # essentially never lands on one by hand, so square it here (see
+        # make_square's docstring). Live preview and final selection both
+        # use this same squared rect, so nothing changes shape at release.
+        rect = make_square(raw_rect, width, height)
+        if rect != raw_rect:
+            logger.debug("ROI drag: squared %dx%d to %dx%d", raw_rect.width, raw_rect.height, rect.width, rect.height)
+        return rect
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        """Resets zoom/pan to fit the current slice in the viewport."""
+        self._is_zoomed = False
+        if self._pixmap_item is not None:
+            self._fit_in_view()
+        super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        """Ctrl+wheel zooms (centered on the cursor); plain wheel navigates slices."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = _ZOOM_STEP if event.angleDelta().y() > 0 else 1 / _ZOOM_STEP
+            new_scale = self.transform().m11() * factor
+            if _MIN_ZOOM_SCALE <= new_scale <= _MAX_ZOOM_SCALE:
+                self.scale(factor, factor)
+                self._is_zoomed = True
+                self.zoom_changed.emit(self.current_zoom_percent())
+            event.accept()
+            return
+
+        delta = event.angleDelta().y()
+        if delta != 0:
+            self.slice_scroll.emit(1 if delta < 0 else -1)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def _draw_roi(self, key: str, rect: RoiRect) -> None:
+        existing = self._roi_items.get(key)
+        if existing is not None:
+            self._scene.removeItem(existing)
+        color = QColor(_ROI_COLORS[key])
+        fill = QColor(color)
+        fill.setAlpha(45)
+        item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, QPen(color, 1.5), QBrush(fill))
+        item.setZValue(2)  # above overlays (z=1) and the base image (z=0)
+        self._roi_items[key] = item
+
+    def _draw_current_rect(self, rect: RoiRect) -> None:
+        if self._current_rect_item is not None:
+            self._scene.removeItem(self._current_rect_item)
+        color = QColor(_DRAFT_COLOR)
+        fill = QColor(color)
+        fill.setAlpha(35)
+        pen = QPen(color, 1.5)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, pen, QBrush(fill))
+        item.setZValue(2)
+        self._current_rect_item = item
+
+    def set_overlay(self, key: str, mask: np.ndarray, color: str = "#5fbf83", opacity: float = 0.6) -> None:
+        """Displays `mask` (2D boolean/0-1 array, same shape as the current
+        slice) as a semi-transparent colored layer above the base image,
+        keyed by `key` so multiple named overlays (e.g. one per segmented
+        structure) can coexist and be independently replaced/cleared.
+
+        This is the rendering mechanism for FR-06 (visualize segmented
+        structures/metrics/noise maps); it does not generate masks itself -
+        automatic segmentation (FR-02) is a separate, not-yet-implemented
+        concern, so nothing calls this with real data yet.
+        """
+        expected_shape = (self._image_size[1], self._image_size[0])  # (height, width)
+        if mask.shape != expected_shape:
+            raise ValueError(f"Overlay mask shape {mask.shape} does not match image shape {expected_shape}")
+
+        self.clear_overlay(key)
+
+        height, width = mask.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        qcolor = QColor(color)
+        rgba[..., 0] = qcolor.red()
+        rgba[..., 1] = qcolor.green()
+        rgba[..., 2] = qcolor.blue()
+        rgba[..., 3] = np.where(mask.astype(bool), round(255 * opacity), 0).astype(np.uint8)
+
+        image = QImage(np.ascontiguousarray(rgba).tobytes(), width, height, width * 4, QImage.Format.Format_RGBA8888)
+        item = self._scene.addPixmap(QPixmap.fromImage(image))
+        item.setZValue(1)  # above the base image (z=0), below ROI rects (z=2)
+        self._overlay_items[key] = item
+
+    def clear_overlay(self, key: str) -> None:
+        """Removes a previously set overlay layer, if present. No-op otherwise."""
+        item = self._overlay_items.pop(key, None)
+        if item is not None:
+            self._scene.removeItem(item)
+
+    def clear_all_overlays(self) -> None:
+        for key in list(self._overlay_items):
+            self.clear_overlay(key)
