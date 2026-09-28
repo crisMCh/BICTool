@@ -46,6 +46,21 @@ geometry-based splitting, out of scope to fix here). So this module matches
 each given DICOM slice to its NIfTI slice individually, by content, rather
 than assuming a 1:1-by-order correspondence - a slice with no good match is
 simply excluded (`is_segmentable` returns False), not a fatal error.
+
+The reference slice used to discover the orientation transform must itself
+have real content: a uniform/blank slice (e.g. pure air) can't discriminate
+between candidate transpose/flip combinations at all, since flipping or
+transposing a constant image returns that same constant image - every
+candidate ties. Confirmed as a real bug on a real scan (2026-09-25, a
+gantry-tilted stroke-protocol study whose first slice happened to be an
+entirely blank -1024 HU margin slice): always using a fixed index (e.g.
+"slice 0") as the reference silently picked an untested, wrong transform
+purely because of tie-breaking order, correct-looking only because it was
+never actually validated against real anatomy - every slice with real
+content then failed to match anything, which looked like (but had nothing
+to do with) the gantry tilt. `align_dicom_to_nifti` now auto-selects the
+slice with the highest pixel variance as its reference by default, which is
+guaranteed to have real content to discriminate against.
 """
 
 from __future__ import annotations
@@ -196,47 +211,105 @@ def _match_slice_to_nifti(
     return best
 
 
+def _select_reference_key(dicom_slices: dict[int, np.ndarray]) -> int:
+    """Picks the slice with the most information content (highest pixel
+    variance) to discover the orientation transform from - see the module
+    docstring for why a fixed/arbitrary choice (e.g. "always slice 0") is
+    unsafe: a uniform slice can't discriminate between transpose/flip
+    candidates at all, so it risks silently locking in an untested, wrong
+    transform.
+
+    This is the single best guess, kept as its own function since
+    `align_dicom_to_nifti`'s default (`reference_key=None`) tries it first -
+    but a variance-only guess isn't infallible either (see `_reference_key_
+    candidates`'s own docstring), so callers needing robustness should use
+    that instead of stopping here.
+    """
+    return _reference_key_candidates(dicom_slices)[0]
+
+
+def _reference_key_candidates(dicom_slices: dict[int, np.ndarray]) -> list[int]:
+    """Every slice key, ordered by decreasing pixel variance - `align_dicom_
+    to_nifti` tries each in turn until one actually produces a confident
+    match, rather than trusting the single highest-variance slice
+    unconditionally.
+
+    Why more than one candidate is needed: high variance means "has enough
+    content to discriminate a transpose/flip candidate," not "definitely has
+    a real NIfTI counterpart." Confirmed as a real failure on real data
+    (2026-09-25, a Siemens photon-counting 'good postop' scan): `dicom2nifti`
+    silently dropped one DICOM slice that had no real NIfTI counterpart
+    (same class of gap as the scout/localizer case the module docstring
+    already documents) - and that exact orphaned slice happened to have the
+    *highest* variance of the whole series (an artifact/outlier, not real
+    anatomical detail), so picking only the single highest-variance slice
+    reproduced the same class of bug the variance heuristic was originally
+    added to fix, just from the opposite direction.
+    """
+    return sorted(dicom_slices, key=lambda key: float(np.var(dicom_slices[key])), reverse=True)
+
+
 def align_dicom_to_nifti(
-    dicom_slices: dict[int, np.ndarray], nifti_hu: np.ndarray, reference_key: int
+    dicom_slices: dict[int, np.ndarray], nifti_hu: np.ndarray, reference_key: int | None = None
 ) -> DicomNiftiVolume:
     """Aligns each of `dicom_slices` (arbitrary integer keys -> 2D HU
     arrays, e.g. one per deduplicated DICOM slice) against `nifti_hu` (an
     already-converted NIfTI volume), discovering the shared orientation
-    transform from `dicom_slices[reference_key]` and matching every other
-    slice individually by content.
+    transform from a reference slice and matching every other slice
+    individually by content.
 
     Pure - no file I/O, no knowledge of DICOM concepts like duplicate
     slices or `ImagePositionPatient`. `reference_key` must be a real key of
-    `dicom_slices`; which DICOM index that actually is (e.g. "slice 0") is
-    the caller's choice, not this function's concern.
+    `dicom_slices` if given, and is tried exactly once (no fallback) - for
+    when a caller has a specific reason to force a particular slice (e.g. a
+    test). Left as `None` (the default), every slice is tried in turn as a
+    candidate reference (highest pixel variance first, via `_reference_key_
+    candidates`) until one produces a confident match - not just the single
+    best-looking one - since the highest-variance slice can itself turn out
+    to be an outlier with no real NIfTI counterpart (see `_reference_key_
+    candidates`'s own docstring for the real case that proved this
+    necessary).
     """
-    dicom_reference_slice = dicom_slices[reference_key]
-    best_for_reference: tuple[int, float, AxisTransform] | None = None
-    for candidate in (
-        AxisTransform(transpose=t, flip0=f0, flip1=f1)
-        for t in (False, True)
-        for f0 in (False, True)
-        for f1 in (False, True)
-    ):
-        transformed = candidate.apply(dicom_reference_slice)
-        match = _match_slice_to_nifti(transformed, nifti_hu, claimed=set())
-        if match is not None and (best_for_reference is None or match[1] < best_for_reference[1]):
-            best_for_reference = (match[0], match[1], candidate)
-    if best_for_reference is None:
+    candidate_keys = [reference_key] if reference_key is not None else _reference_key_candidates(dicom_slices)
+
+    best_overall: tuple[int, int, float, AxisTransform] | None = None  # (reference_key, nifti_index, mad, transform)
+    for candidate_reference_key in candidate_keys:
+        dicom_reference_slice = dicom_slices[candidate_reference_key]
+        best_for_reference: tuple[int, float, AxisTransform] | None = None
+        for candidate in (
+            AxisTransform(transpose=t, flip0=f0, flip1=f1)
+            for t in (False, True)
+            for f0 in (False, True)
+            for f1 in (False, True)
+        ):
+            transformed = candidate.apply(dicom_reference_slice)
+            match = _match_slice_to_nifti(transformed, nifti_hu, claimed=set())
+            if match is not None and (best_for_reference is None or match[1] < best_for_reference[1]):
+                best_for_reference = (match[0], match[1], candidate)
+
+        if best_for_reference is not None and (best_overall is None or best_for_reference[1] < best_overall[2]):
+            best_overall = (candidate_reference_key, *best_for_reference)
+        if best_for_reference is not None and best_for_reference[1] <= _MAX_MATCH_MAD:
+            break  # confident match found - no need to try further candidates
+
+    if best_overall is None:
         raise OrientationError(
             "No transpose/flip combination matched any NIfTI slice's shape - "
             "cannot determine the DICOM<->NIfTI orientation mapping for this scan."
         )
-    reference_nifti_index, reference_mad, transform = best_for_reference
+    reference_key, reference_nifti_index, reference_mad, transform = best_overall
     if reference_mad > _MAX_MATCH_MAD:
+        tried = f"{len(candidate_keys)} candidate reference slice(s)" if len(candidate_keys) > 1 else "the given reference slice"
         raise OrientationError(
             f"Best DICOM<->NIfTI orientation match still differs by {reference_mad:.2f} HU on "
-            "average - this scan's geometry doesn't match the lossless transpose/flip assumption "
-            "this module relies on (see module docstring). Refusing to guess an overlay mapping."
+            f"average, after trying {tried} - this scan's geometry doesn't match the lossless "
+            "transpose/flip assumption this module relies on (see module docstring). Refusing to "
+            "guess an overlay mapping."
         )
     logger.info(
-        "nifti_alignment: orientation transform=%s (reference slice match residual=%.4f HU)",
+        "nifti_alignment: orientation transform=%s (reference key=%s, match residual=%.4f HU)",
         transform,
+        reference_key,
         reference_mad,
     )
 

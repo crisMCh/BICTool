@@ -412,6 +412,82 @@ def test_hover_off_image_emits_none():
     assert readings == [None]
 
 
+def test_set_overlay_stores_the_mask_and_display_name_for_hover_lookup():
+    viewport = RoiViewport()
+    viewport.resize(100, 100)
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+    mask = np.zeros((100, 100), dtype=bool)
+    mask[10:20, 10:20] = True
+
+    viewport.set_overlay("seg_Ventricular System", mask, label="Ventricular System")
+
+    assert viewport._overlay_masks["seg_Ventricular System"][15, 15]
+    assert viewport._overlay_display_names["seg_Ventricular System"] == "Ventricular System"
+
+
+def test_set_overlay_label_defaults_to_the_key():
+    viewport = RoiViewport()
+    viewport.resize(100, 100)
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+
+    viewport.set_overlay("stroke_lesion", np.zeros((100, 100), dtype=bool))
+
+    assert viewport._overlay_display_names["stroke_lesion"] == "stroke_lesion"
+
+
+def test_clear_overlay_removes_the_mask_and_display_name():
+    viewport = RoiViewport()
+    viewport.resize(100, 100)
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+    viewport.set_overlay("tissue_White Matter", np.ones((100, 100), dtype=bool), label="White Matter")
+
+    viewport.clear_overlay("tissue_White Matter")
+
+    assert "tissue_White Matter" not in viewport._overlay_masks
+    assert "tissue_White Matter" not in viewport._overlay_display_names
+
+
+def test_hovering_a_masked_pixel_shows_a_tooltip_with_the_overlay_name(monkeypatch):
+    viewport = RoiViewport()
+    viewport.show()
+    viewport.resize(100, 100)
+    pixels = np.zeros((100, 100), dtype=np.float64)
+    viewport.set_image(pixels)
+    mask = np.zeros((100, 100), dtype=bool)
+    mask[25:35, 55:65] = True
+    viewport.set_overlay("seg_Ventricular System", mask, label="Ventricular System")
+
+    shown = []
+    monkeypatch.setattr("bictool.presentation.views.roi_viewport.QToolTip.showText", lambda pos, text, w: shown.append(text))
+    hidden = []
+    monkeypatch.setattr("bictool.presentation.views.roi_viewport.QToolTip.hideText", lambda: hidden.append(True))
+
+    viewport.mouseMoveEvent(_move_event((60, 30)))
+
+    assert shown == ["Ventricular System"]
+    assert hidden == []
+
+
+def test_hovering_outside_any_overlay_hides_the_tooltip(monkeypatch):
+    viewport = RoiViewport()
+    viewport.show()
+    viewport.resize(100, 100)
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+    mask = np.zeros((100, 100), dtype=bool)
+    mask[25:35, 55:65] = True
+    viewport.set_overlay("seg_Ventricular System", mask, label="Ventricular System")
+
+    shown = []
+    monkeypatch.setattr("bictool.presentation.views.roi_viewport.QToolTip.showText", lambda pos, text, w: shown.append(text))
+    hidden = []
+    monkeypatch.setattr("bictool.presentation.views.roi_viewport.QToolTip.hideText", lambda: hidden.append(True))
+
+    viewport.mouseMoveEvent(_move_event((5, 5)))  # well outside the mask
+
+    assert shown == []
+    assert hidden == [True]
+
+
 def test_leave_event_emits_none():
     from PySide6.QtCore import QEvent
 

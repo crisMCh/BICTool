@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QLabel,
+    QToolTip,
     QWidget,
 )
 
@@ -82,7 +83,10 @@ class RoiViewport(QGraphicsView):
     `clear_overlay`) layered above the base image and below ROI rectangles -
     the rendering mechanism for FR-06, ready for whenever a real mask
     source (FR-02 automatic segmentation) exists. Cleared per-slice, same
-    as ROI rectangles.
+    as ROI rectangles. While at least one overlay is visible, hovering over
+    a masked pixel shows that overlay's display name (`set_overlay`'s
+    `label` argument) as a native tooltip, so structures with similar
+    overlay colors can still be told apart by hovering.
     """
 
     draft_changed = Signal(object)  # RoiRect | None - the in-progress/last-drawn, not-yet-necessarily-saved rectangle
@@ -120,6 +124,13 @@ class RoiViewport(QGraphicsView):
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._roi_items: dict[str, QGraphicsRectItem] = {}
         self._overlay_items: dict[str, QGraphicsPixmapItem] = {}
+        # Raw mask data + a friendly display name per overlay key, kept
+        # alongside `_overlay_items` purely so hovering the mouse can report
+        # which named overlay(s) sit under the cursor (see
+        # `_update_overlay_tooltip`) - the rendered pixmap alone can't answer
+        # "which mask is this" once composited to RGBA.
+        self._overlay_masks: dict[str, np.ndarray] = {}
+        self._overlay_display_names: dict[str, str] = {}
         self._image_size = (0, 0)  # (width, height)
         self._drag_start: QPointF | None = None
         self._current_rect: RoiRect | None = None
@@ -342,6 +353,7 @@ class RoiViewport(QGraphicsView):
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         self.cursor_moved.emit(None)
+        QToolTip.hideText()
         super().leaveEvent(event)
 
     def _emit_cursor_reading(self, view_pos) -> None:
@@ -351,8 +363,25 @@ class RoiViewport(QGraphicsView):
         if 0 <= x < width and 0 <= y < height:
             value = float(self._current_pixels_hu[y, x])
             self.cursor_moved.emit((x, y, value))
+            self._update_overlay_tooltip(view_pos, x, y)
         else:
             self.cursor_moved.emit(None)
+            QToolTip.hideText()
+
+    def _update_overlay_tooltip(self, view_pos, x: int, y: int) -> None:
+        """Shows a native tooltip naming whichever visible overlay(s) sit
+        under (x, y) - lets structures sharing a similar overlay color
+        still be told apart by hovering (see the class docstring).
+        """
+        names = [
+            self._overlay_display_names[key]
+            for key, mask in self._overlay_masks.items()
+            if mask[y, x]
+        ]
+        if names:
+            QToolTip.showText(self.mapToGlobal(view_pos), ", ".join(names), self)
+        else:
+            QToolTip.hideText()
 
     def _rect_from_drag_endpoint(self, view_pos) -> RoiRect | None:
         """Builds the (squared) `RoiRect` from `self._drag_start` to
@@ -424,11 +453,18 @@ class RoiViewport(QGraphicsView):
         item.setZValue(2)
         self._current_rect_item = item
 
-    def set_overlay(self, key: str, mask: np.ndarray, color: str = "#5fbf83", opacity: float = 0.6) -> None:
+    def set_overlay(
+        self, key: str, mask: np.ndarray, color: str = "#5fbf83", opacity: float = 0.6, label: str | None = None
+    ) -> None:
         """Displays `mask` (2D boolean/0-1 array, same shape as the current
         slice) as a semi-transparent colored layer above the base image,
         keyed by `key` so multiple named overlays (e.g. one per segmented
         structure) can coexist and be independently replaced/cleared.
+
+        `label` is what the hover tooltip shows for this overlay (see the
+        class docstring) - defaults to `key` itself if not given, but
+        callers keying overlays with an internal prefix (e.g. `f"seg_
+        {display_name}"`) should pass the clean `display_name` here instead.
 
         This is the rendering mechanism for FR-06 (visualize segmented
         structures/metrics/noise maps); it does not generate masks itself -
@@ -442,23 +478,28 @@ class RoiViewport(QGraphicsView):
         self.clear_overlay(key)
 
         height, width = mask.shape
+        mask_bool = mask.astype(bool)
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
         qcolor = QColor(color)
         rgba[..., 0] = qcolor.red()
         rgba[..., 1] = qcolor.green()
         rgba[..., 2] = qcolor.blue()
-        rgba[..., 3] = np.where(mask.astype(bool), round(255 * opacity), 0).astype(np.uint8)
+        rgba[..., 3] = np.where(mask_bool, round(255 * opacity), 0).astype(np.uint8)
 
         image = QImage(np.ascontiguousarray(rgba).tobytes(), width, height, width * 4, QImage.Format.Format_RGBA8888)
         item = self._scene.addPixmap(QPixmap.fromImage(image))
         item.setZValue(1)  # above the base image (z=0), below ROI rects (z=2)
         self._overlay_items[key] = item
+        self._overlay_masks[key] = mask_bool
+        self._overlay_display_names[key] = label if label is not None else key
 
     def clear_overlay(self, key: str) -> None:
         """Removes a previously set overlay layer, if present. No-op otherwise."""
         item = self._overlay_items.pop(key, None)
         if item is not None:
             self._scene.removeItem(item)
+        self._overlay_masks.pop(key, None)
+        self._overlay_display_names.pop(key, None)
 
     def clear_all_overlays(self) -> None:
         for key in list(self._overlay_items):

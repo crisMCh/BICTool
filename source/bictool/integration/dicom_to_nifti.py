@@ -48,11 +48,6 @@ from bictool.integration.dicom_file_loader import _parse_decimal
 
 logger = logging.getLogger(__name__)
 
-# Which DICOM slice's own array is used to discover the orientation
-# transform (see `_nifti_alignment`'s docstring) - any slice with real
-# anatomy works equally well; index 0 is simplest and always present.
-_REFERENCE_SLICE_INDEX = 0
-
 
 def _read_position(path: Path) -> tuple[float, float, float] | None:
     ds = pydicom.dcmread(str(path), stop_before_pixels=True)
@@ -118,7 +113,55 @@ def _convert_via_dicom2nifti(dicom_paths: list[Path]) -> np.ndarray:
             shutil.copy2(path, tmp_dicom_dir / path.name)
 
         out_path = Path(tmpdir) / "converted.nii.gz"
-        dicom2nifti.dicom_series_to_nifti(str(tmp_dicom_dir), str(out_path), reorient_nifti=True)
+        # `reorient_nifti=False` - deliberately NOT letting dicom2nifti
+        # canonicalize the array axes to world-axis order. Confirmed as a
+        # real bug on a real gantry-tilted scan (2026-09-25,
+        # 20260131_164257_435458 "good 19yrs", 15 deg tilt): dicom2nifti's
+        # own axis-canonicalization heuristic (assign each array axis to
+        # whichever world axis its affine column is most aligned with) can
+        # get confused by a tilted slice axis and swap the slice axis with
+        # an in-plane axis entirely - producing a NIfTI shaped e.g.
+        # (512, 37, 559) instead of the correct (512, 559, 37) for a
+        # 37-slice, 559x512 series, which then fails
+        # `_nifti_alignment.align_dicom_to_nifti` outright ("no transpose/
+        # flip combination matched any NIfTI slice's shape"). This module
+        # never depended on dicom2nifti's own canonical orientation being
+        # correct anyway - `_nifti_alignment.py` discovers the real
+        # transpose/flip empirically by content-matching against the DICOM
+        # slices themselves, so disabling this step only removes a source
+        # of risk, not a capability actually being relied on.
+        try:
+            dicom2nifti.dicom_series_to_nifti(str(tmp_dicom_dir), str(out_path), reorient_nifti=False)
+        except (IndexError, dicom2nifti.exceptions.ConversionValidationError, dicom2nifti.exceptions.ConversionError) as exc:
+            # `dicom2nifti` refuses a series that can't become a usable
+            # multi-slice volume, via two different code paths depending on
+            # *why* - both confirmed as real cases, 2026-09-25/28, on
+            # E:\Datasets\iViolin\data\PSR_58's own candidates:
+            # 1. A whole series that's pure localizer/scout content (every
+            #    file's `ImageType` containing "LOCALIZER") gets every file
+            #    silently stripped by dicom2nifti's own internal `remove_
+            #    non_imaging_slices`/`remove_duplicate_slices`/`remove_
+            #    localizers_by_imagetype`, and its own "anything left?"
+            #    check comes *after* the next step that needs at least one
+            #    file - so it crashes with a bare, opaque `IndexError`
+            #    (`dicom_input[0]` on an empty list) rather than its own
+            #    `ConversionValidationError`.
+            # 2. A series with too few real slices to begin with (e.g. a
+            #    genuine single-slice series) is validated properly and
+            #    raises dicom2nifti's own `ConversionValidationError
+            #    ('TOO_FEW_SLICES/LOCALIZER')` - a real, named exception,
+            #    but still a third-party one, not one of BICTool's own.
+            # Both are translated into the same clear, actionable error
+            # here rather than letting either leak through as-is - matches
+            # `dicom_file_loader.py`'s own plain-`ValueError` convention for
+            # "can't proceed with this input" cases. `ConversionError` is
+            # dicom2nifti's other, more generic exception class (e.g. "no
+            # DICOM files found") - caught alongside for the same reason,
+            # even though no real case has hit it here yet.
+            raise ValueError(
+                "This series has no usable image content to segment - it looks like a scout/"
+                "localizer series or has too few real slices. Pick a different series."
+            ) from exc
         return nib.load(str(out_path)).get_fdata().astype(np.float32)
 
 
@@ -150,7 +193,11 @@ def build_dicom_nifti_volume(slice_paths: list[Path], get_slice_hu) -> DicomNift
     dicom_slices = {
         unique_index: get_slice_hu(dicom_index) for unique_index, dicom_index in unique_index_to_dicom_index.items()
     }
-    reference_unique_index = dicom_index_to_unique_index[_REFERENCE_SLICE_INDEX]
 
-    alignment = align_dicom_to_nifti(dicom_slices, nifti_hu, reference_key=reference_unique_index)
+    # No fixed reference index (e.g. "slice 0") - `align_dicom_to_nifti`
+    # auto-selects a slice with real content to discover the orientation
+    # transform from (see its own/`_nifti_alignment`'s docstring for why a
+    # fixed choice is unsafe: a blank/uniform slice can silently lock in an
+    # untested, wrong transform).
+    alignment = align_dicom_to_nifti(dicom_slices, nifti_hu)
     return alignment.rekeyed(dicom_index_to_unique_index)
