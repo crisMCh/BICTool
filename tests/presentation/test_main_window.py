@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import bictool.application.worker as worker_module
+import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate
 from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.viewmodels.windowing import WINDOW_PRESETS
@@ -124,7 +125,7 @@ def test_window_has_expected_title_and_menus():
     window = MainWindowView()
     assert window.windowTitle() == "BICTool"
     menu_titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert menu_titles == ["File", "Study", "View", "Export"]
+    assert menu_titles == ["File", "Study", "View", "Tools", "Export"]
 
 
 def test_metric_status_starts_idle_not_queued():
@@ -329,6 +330,58 @@ def test_window_preset_defaults_to_brain_and_switching_updates_viewport():
 
     assert window._roi_viewport._window_width == 3000.0
     assert window._roi_viewport._window_center == 400.0
+
+
+def test_custom_window_action_disabled_before_a_study_is_loaded():
+    window = MainWindowView()
+    assert window._custom_window_action.isEnabled() is False
+
+
+def test_custom_window_dialog_accept_applies_the_chosen_window(monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    class _FakeDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def window(self):
+            return (250.0, 60.0)
+
+    monkeypatch.setattr(main_window_module, "CustomWindowDialog", _FakeDialog)
+
+    window = MainWindowView()
+    _load_fake_volume(window)
+
+    window._on_custom_window_clicked()
+
+    assert window._roi_viewport._window_width == 250.0
+    assert window._roi_viewport._window_center == 60.0
+    assert "WL: 60" in _overlay_text(window, "bottom_right")
+    assert "WW: 250" in _overlay_text(window, "bottom_right")
+
+
+def test_custom_window_dialog_cancel_leaves_the_window_unchanged(monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    class _FakeDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(main_window_module, "CustomWindowDialog", _FakeDialog)
+
+    window = MainWindowView()
+    _load_fake_volume(window)
+    original_width, original_center = window._roi_viewport.current_window()
+
+    window._on_custom_window_clicked()
+
+    assert window._roi_viewport.current_window() == (original_width, original_center)
 
 
 def test_window_preset_dropdown_offers_all_standard_presets():

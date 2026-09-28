@@ -124,7 +124,7 @@ import numpy as np
 import pydicom
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QPainter
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -153,6 +153,33 @@ from bictool.application.dicom_load_worker import DicomLoadWorker
 from bictool.application.scheduler import Scheduler
 from bictool.application.worker import Worker
 from bictool.domain.results.study_quality import SliceQualityResult
+from bictool.domain.segmentation.brain_tissue import (
+    DEFAULT_AIR_HU_CUTOFF,
+    DEFAULT_BONE_HU_CUTOFF,
+    DEFAULT_GRAY_MATTER_RANGE,
+    DEFAULT_MIN_COMPONENT_SIZE,
+    DEFAULT_SMOOTHING_SIZE,
+    DEFAULT_WHITE_MATTER_RANGE,
+    classify_brain_tissue,
+    extract_brain_mask,
+)
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_BLOCK_SIZE,
+    DEFAULT_PLAUSIBLE_RANGE,
+)
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_MIN_COMPONENT_SIZE as ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
+)
+from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
+from bictool.domain.segmentation.brain_tissue_fcm import (
+    DEFAULT_FUZZINESS,
+    DEFAULT_MAX_ITER,
+    DEFAULT_SPATIAL_WEIGHT,
+)
+from bictool.domain.segmentation.brain_tissue_fcm import (
+    DEFAULT_MIN_COMPONENT_SIZE as FCM_DEFAULT_MIN_COMPONENT_SIZE,
+)
+from bictool.domain.segmentation.brain_tissue_fcm import classify_brain_tissue_fcm
 from bictool.infrastructure.config import load_config
 from bictool.infrastructure.logging_config import QtLogHandler, configure_logging
 from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate, load_series
@@ -161,7 +188,11 @@ from bictool.presentation.viewmodels.chart_data import mtf_display_curve
 from bictool.presentation.viewmodels.roi_selection import RoiRect, crop_roi
 from bictool.presentation.viewmodels.segmentation_overlay import decode_masks_for_checkboxes
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS
+from bictool.presentation.views.adaptive_settings_dialog import AdaptiveSettings, AdaptiveSettingsDialog
+from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueSettings, BrainTissueSettingsDialog
+from bictool.presentation.views.custom_window_dialog import CustomWindowDialog
 from bictool.presentation.views.dicom_tags_dialog import DicomTagsDialog
+from bictool.presentation.views.fcm_settings_dialog import FcmSettings, FcmSettingsDialog
 from bictool.presentation.views.export_dialog import ExportDialog
 from bictool.presentation.views.roi_viewport import RoiViewport
 from bictool.presentation.views.segmentation_selection_dialog import SegmentationSelectionDialog
@@ -265,17 +296,70 @@ _SEGMENTATION_MAPPING: dict[str, list[str]] = {
     "Temporal Lobe": ["Temporal Lobe"],
     "Thalamus": ["Thalamus"],
 }
-# Distinct from ROI1/ROI2's colors (cyan/pink) and the stroke overlay
-# (CRITICAL red) so overlapping overlays stay visually distinguishable.
-_SEGMENTATION_COLOR_PALETTE = ["#5fbf83", "#e0b34c", "#9b7ede", "#e08a4c", "#3fa7c9", "#c94ca0", "#7ec98f"]
+# One color per structure (16, matching `_SEGMENTATION_MAPPING` 1:1 - no
+# repeats) - evenly spaced by hue (HLS, L=0.60/S=0.55 held fixed for
+# consistent vibrancy/contrast against the dark theme) rather than the
+# original 7-color palette, which repeated every 7 structures and made
+# several unrelated structures share an identical overlay color (2026-09-25
+# report: "many of them have the same or very similar color"). Hue bands
+# around ROI1's cyan (~190°), ROI2's pink (~310°), and the stroke overlay's
+# red (~5°, CRITICAL) are skipped (±18°) so a segmentation overlay is never
+# confusable with those other overlay kinds either.
+_SEGMENTATION_COLOR_PALETTE = [
+    "#d19b61", "#d1b861", "#cdd161", "#afd161",
+    "#92d161", "#74d161", "#61d16b", "#61d188",
+    "#61d1a6", "#619cd1", "#617ed1", "#6161d1",
+    "#7f61d1", "#9c61d1", "#b961d1", "#d16188",
+]
+# Assigning the (already hue-spread) palette in plain dict order still left
+# *adjacent* structures looking similar (2026-09-25 report: "many similar
+# colored labels are close to each other") - `_SEGMENTATION_MAPPING`'s
+# order clusters anatomically-neighboring structures together (e.g. the
+# four lobes, or Caudate/Lentiform Nucleus/Insular Cortex/Internal Capsule
+# around the basal ganglia), so consecutive palette entries (only ~22.5°
+# apart in hue) kept landing right next to each other in the image too.
+# Reading the palette via a bit-reversal permutation instead (a standard
+# technique for this exact problem) guarantees consecutive structures
+# always draw from opposite/far-apart parts of the hue circle - see
+# `test_main_window_segmentation.py`'s test asserting a minimum hue
+# separation between every consecutive pair.
+_SEGMENTATION_PALETTE_ORDER = [0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15]
 # One color per display name, computed once (not per-widget) since the
 # `SegmentationSelectionDialog`'s checkboxes and `RoiViewport`'s overlays
 # both need the same display-name -> color association, independent of any
 # widget lifetime.
 _SEGMENTATION_COLORS: dict[str, str] = {
-    name: _SEGMENTATION_COLOR_PALETTE[i % len(_SEGMENTATION_COLOR_PALETTE)]
+    name: _SEGMENTATION_COLOR_PALETTE[_SEGMENTATION_PALETTE_ORDER[i % len(_SEGMENTATION_PALETTE_ORDER)]]
     for i, name in enumerate(_SEGMENTATION_MAPPING)
 }
+
+# HU-threshold-only white/gray matter overlays (domain.segmentation.brain_tissue)
+# - a separate feature from the CNN Segmentation box above, so its colors are
+# picked to stay distinct from both that palette and ROI1/ROI2's cyan/pink.
+_BRAIN_TISSUE_COLORS: dict[str, str] = {
+    "White Matter": "#4c8ce0",
+    "Gray Matter": "#e0a24c",
+    "Brain Mask": "#8d96a0",  # neutral gray - the skull-strip result itself, not a tissue class
+}
+
+# The three WM/GM classification methods, selected from Tools -> WM/GM
+# Classification (a radio-style submenu, not the sidebar) - each is a
+# separate domain module with its own module docstring explaining its
+# approach/trade-offs, and its own settings dialog (also under Tools).
+# Fuzzy C-Means is the default per explicit request (2026-09-25) after
+# comparing all three candidates the user tried; GMM+MRF (a fourth
+# candidate briefly implemented for comparison) was removed entirely -
+# see brain_tissue_fcm.py/brain_tissue_adaptive.py's own docstrings for
+# the surviving two, and brain_tissue.py for the original threshold method.
+_BRAIN_TISSUE_METHOD_FCM = "Fuzzy C-Means"
+_BRAIN_TISSUE_METHOD_THRESHOLD = "HU Thresholding"
+_BRAIN_TISSUE_METHOD_ADAPTIVE = "Adaptive Thresholding"
+_BRAIN_TISSUE_METHODS = [
+    _BRAIN_TISSUE_METHOD_FCM,
+    _BRAIN_TISSUE_METHOD_THRESHOLD,
+    _BRAIN_TISSUE_METHOD_ADAPTIVE,
+]
+_BRAIN_TISSUE_DEFAULT_METHOD = _BRAIN_TISSUE_METHOD_FCM
 
 
 class MainWindowView(QMainWindow):
@@ -319,6 +403,45 @@ class MainWindowView(QMainWindow):
         self._stroke_model = None
         self._segmentation_cache: dict[int, object] = {}  # slice index -> head_ct_unet.SegmentationResult
         self._stroke_cache: dict[int, object] = {}  # slice index -> aisd_stroke_unet.StrokeSegmentationResult
+        # HU-threshold-only white/gray matter classification (domain.
+        # segmentation.brain_tissue) - a separate, non-ML feature, so unlike
+        # anatomy/stroke there's no model to load and no config-gated
+        # enablement; the checkboxes just run this synchronously per slice
+        # (milliseconds, not the CNN's ~160s) and cache the result.
+        self._brain_tissue_cache: dict[int, object] = {}  # slice index -> brain_tissue.BrainTissueResult
+        # Which of the three methods is active - chosen from Tools -> WM/GM
+        # Classification (an app-level preference, like the settings below,
+        # not per-study state - see `_reset_brain_tissue_display`).
+        self._brain_tissue_method = _BRAIN_TISSUE_DEFAULT_METHOD
+        # Tunable via Tools → HU Thresholding Settings… (`_on_brain_tissue_settings_clicked`)
+        # - starts at brain_tissue.py's own defaults.
+        self._brain_tissue_default_settings = BrainTissueSettings(
+            air_hu_cutoff=DEFAULT_AIR_HU_CUTOFF,
+            bone_hu_cutoff=DEFAULT_BONE_HU_CUTOFF,
+            white_matter_low=DEFAULT_WHITE_MATTER_RANGE[0],
+            white_matter_high=DEFAULT_WHITE_MATTER_RANGE[1],
+            gray_matter_low=DEFAULT_GRAY_MATTER_RANGE[0],
+            gray_matter_high=DEFAULT_GRAY_MATTER_RANGE[1],
+            smoothing_size=DEFAULT_SMOOTHING_SIZE,
+            min_component_size=DEFAULT_MIN_COMPONENT_SIZE,
+        )
+        self._brain_tissue_settings = self._brain_tissue_default_settings
+        # Tunable via Tools → Fuzzy C-Means Settings…
+        self._fcm_default_settings = FcmSettings(
+            fuzziness=DEFAULT_FUZZINESS,
+            max_iter=DEFAULT_MAX_ITER,
+            spatial_weight=DEFAULT_SPATIAL_WEIGHT,
+            min_component_size=FCM_DEFAULT_MIN_COMPONENT_SIZE,
+        )
+        self._fcm_settings = self._fcm_default_settings
+        # Tunable via Tools → Adaptive Threshold Settings…
+        self._adaptive_default_settings = AdaptiveSettings(
+            block_size=DEFAULT_BLOCK_SIZE,
+            plausible_low=DEFAULT_PLAUSIBLE_RANGE[0],
+            plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
+            min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
+        )
+        self._adaptive_settings = self._adaptive_default_settings
         self._active_segmentation_worker: SegmentationWorker | None = None
         self._active_stroke_worker: StrokeWorker | None = None
         self._active_volume_segmentation_worker: VolumeSegmentationWorker | None = None
@@ -438,6 +561,41 @@ class MainWindowView(QMainWindow):
         self._view_tags_action.setEnabled(False)
         self._view_tags_action.setToolTip("Open a study first")
 
+        # Configuration/adjustment dialogs - distinct from View's display
+        # toggles and File's I/O. None of these actions need a study-loaded
+        # gate except Custom Window, which is disabled/re-enabled the same
+        # way the viewer toolbar's own preset dropdown already is (see
+        # `_show_view_page`) - the settings dialogs and the method choice
+        # below are plain numeric-parameters forms/preferences, usable
+        # (and worth setting up) before any study is even opened.
+        tools_menu = menu_bar.addMenu("&Tools")
+
+        # One radio-style submenu picks which of the three WM/GM
+        # classification methods is active; each method's own tunable
+        # parameters live in its own settings dialog, listed right below it
+        # here rather than inside the submenu itself (a checkable action and
+        # a "open a dialog" action are different enough interactions that
+        # mixing them in one menu would be confusing).
+        wm_gm_menu = tools_menu.addMenu("WM/GM Classification")
+        self._brain_tissue_method_actions: dict[str, QAction] = {}
+        method_group = QActionGroup(self)
+        method_group.setExclusive(True)
+        for method in _BRAIN_TISSUE_METHODS:
+            action = wm_gm_menu.addAction(method)
+            action.setCheckable(True)
+            action.setChecked(method == self._brain_tissue_method)
+            action.triggered.connect(lambda checked, m=method: self._on_brain_tissue_method_selected(m))
+            method_group.addAction(action)
+            self._brain_tissue_method_actions[method] = action
+
+        tools_menu.addAction("HU Thresholding Settings…", self._on_brain_tissue_settings_clicked)
+        tools_menu.addAction("Fuzzy C-Means Settings…", self._on_fcm_settings_clicked)
+        tools_menu.addAction("Adaptive Threshold Settings…", self._on_adaptive_settings_clicked)
+        tools_menu.addSeparator()
+        self._custom_window_action = tools_menu.addAction("Custom Window…", self._on_custom_window_clicked)
+        self._custom_window_action.setEnabled(False)
+        self._custom_window_action.setToolTip("Open a study first")
+
         export_menu = menu_bar.addMenu("&Export")
         self._export_action = export_menu.addAction("Export Results…", self._open_export_dialog)
         # Disabled rather than a silent no-op click - a clickable-looking
@@ -471,6 +629,7 @@ class MainWindowView(QMainWindow):
 
         self._reset_segmentation_display()
         self._reset_stroke_display()
+        self._reset_brain_tissue_display()
 
         self._slice_slider.setEnabled(False)
         self._slice_slider.blockSignals(True)
@@ -493,6 +652,8 @@ class MainWindowView(QMainWindow):
         self._reload_series_action.setToolTip("Open a study first")
         self._view_tags_action.setEnabled(False)
         self._view_tags_action.setToolTip("Open a study first")
+        self._custom_window_action.setEnabled(False)
+        self._custom_window_action.setToolTip("Open a study first")
 
         self._show_view_page(0)
 
@@ -517,6 +678,17 @@ class MainWindowView(QMainWindow):
             return
         title = f"DICOM Tags — Slice {self._current_slice_index + 1} / {self._loaded_volume.num_slices}"
         DicomTagsDialog(dataset, title=title, parent=self).exec()
+
+    def _on_brain_tissue_settings_clicked(self) -> None:
+        dialog = BrainTissueSettingsDialog(self._brain_tissue_settings, self._brain_tissue_default_settings, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._brain_tissue_settings = dialog.settings()
+        # Every already-computed result was made with the old parameters -
+        # discard it so the next checkbox check/slice view recomputes fresh,
+        # exactly like `_reset_brain_tissue_display` does on a new study.
+        self._brain_tissue_cache = {}
+        self._refresh_brain_tissue_for_current_slice()
 
     def _open_export_dialog(self) -> None:
         if self._last_result is None or self._last_export_context is None:
@@ -657,6 +829,8 @@ class MainWindowView(QMainWindow):
         self._reload_series_action.setToolTip("Re-reads the current series from disk")
         self._view_tags_action.setEnabled(True)
         self._view_tags_action.setToolTip("")
+        self._custom_window_action.setEnabled(True)
+        self._custom_window_action.setToolTip("")
 
         # A different volume (new series, reload, or a fresh open) means any
         # cached segmentation/stroke results (keyed by slice index) belong
@@ -674,6 +848,7 @@ class MainWindowView(QMainWindow):
             self._primary_series_dicom_nifti_volume = self._dicom_nifti_volume
         self._reset_segmentation_display()
         self._reset_stroke_display()
+        self._reset_brain_tissue_display()
         self._update_segmentation_availability()
         self._current_series_is_primary = is_primary_series
 
@@ -754,6 +929,7 @@ class MainWindowView(QMainWindow):
         self._update_confirm_availability()
         self._refresh_segmentation_for_current_slice()
         self._refresh_stroke_for_current_slice()
+        self._refresh_brain_tissue_for_current_slice()
         self._update_viewer_overlay()  # top-left corner shows the current slice number
 
     def _on_viewport_slice_scroll(self, direction: int) -> None:
@@ -763,6 +939,17 @@ class MainWindowView(QMainWindow):
 
     def _on_window_preset_clicked(self, preset_name: str) -> None:
         width, center = WINDOW_PRESETS[preset_name]
+        self._roi_viewport.set_window(width, center)
+        self._update_viewer_overlay()  # bottom-right corner shows the current WL/WW
+
+    def _on_custom_window_clicked(self) -> None:
+        if self._loaded_volume is None:
+            return
+        current_width, current_center = self._roi_viewport.current_window()
+        dialog = CustomWindowDialog(current_width, current_center, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        width, center = dialog.window()
         self._roi_viewport.set_window(width, center)
         self._update_viewer_overlay()  # bottom-right corner shows the current WL/WW
 
@@ -1061,6 +1248,10 @@ class MainWindowView(QMainWindow):
         column = QVBoxLayout(self._segmentation_roi_widget)
         column.setContentsMargins(0, 0, 0, 0)
         column.addWidget(self._build_segmentation_box())
+        # HU-threshold-only, no-ML feature - kept visually separate from the
+        # CNN Segmentation box above (different method, different purpose)
+        # per explicit request (2026-09-24).
+        column.addWidget(self._build_brain_tissue_box())
         column.addWidget(self._build_roi_box())
         # Placed after (not merged with) the QC-relevant Segmentation/ROI
         # boxes - stroke detection is a diagnostic-adjacent capability, not
@@ -1277,7 +1468,7 @@ class MainWindowView(QMainWindow):
         # already-chosen structures are actually drawn right now, so
         # flipping it back on shows exactly what was showing before.
         self._show_segments_cb = QCheckBox("Show Segments")
-        self._show_segments_cb.setChecked(True)
+        self._show_segments_cb.setChecked(False)  # per explicit request (2026-09-24) - opt in, not on by default
         self._show_segments_cb.setEnabled(False)
         self._show_segments_cb.setToolTip("Open a study first")
         self._show_segments_cb.toggled.connect(self._on_show_segments_toggled)
@@ -1376,6 +1567,7 @@ class MainWindowView(QMainWindow):
             masks[display_name],
             color=_SEGMENTATION_COLORS[display_name],
             opacity=self._segmentation_opacity,
+            label=display_name,
         )
 
     def _on_show_segments_toggled(self, checked: bool) -> None:
@@ -1651,6 +1843,148 @@ class MainWindowView(QMainWindow):
 
     # ---- stroke detection (investigational, not a QC/image-quality measurement) ----
 
+    def _build_brain_tissue_box(self) -> QWidget:
+        # HU-threshold-only white/gray matter classification
+        # (domain.segmentation.brain_tissue) - no ML, so unlike Segmentation/
+        # Stroke there's no weights config to gate on: both checkboxes are
+        # simply enabled once a study is loaded (see
+        # `_update_segmentation_availability`) and computed synchronously,
+        # on demand, per slice (milliseconds - see brain_tissue.py's
+        # docstring) rather than via a background worker.
+        box = QGroupBox("Brain Tissue")
+        layout = QVBoxLayout(box)
+
+        self._white_matter_cb = QCheckBox("White Matter")
+        self._white_matter_cb.setEnabled(False)
+        self._white_matter_cb.setToolTip("Open a study first")
+        self._white_matter_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['White Matter']}; }}")
+        self._white_matter_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("White Matter", checked))
+        layout.addWidget(self._white_matter_cb)
+
+        self._gray_matter_cb = QCheckBox("Gray Matter")
+        self._gray_matter_cb.setEnabled(False)
+        self._gray_matter_cb.setToolTip("Open a study first")
+        self._gray_matter_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['Gray Matter']}; }}")
+        self._gray_matter_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("Gray Matter", checked))
+        layout.addWidget(self._gray_matter_cb)
+
+        # The intermediate skull-strip result itself (extract_brain_mask),
+        # not a tissue class - shown on request so the user can judge
+        # skull-strip quality directly, since white/gray matter's own
+        # accuracy is bounded by it.
+        self._brain_mask_cb = QCheckBox("Brain Mask (skull-strip)")
+        self._brain_mask_cb.setEnabled(False)
+        self._brain_mask_cb.setToolTip("Open a study first")
+        self._brain_mask_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['Brain Mask']}; }}")
+        self._brain_mask_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("Brain Mask", checked))
+        layout.addWidget(self._brain_mask_cb)
+
+        return box
+
+    def _ensure_brain_tissue_result_for_current_slice(self):
+        """Returns this slice's cached `BrainTissueResult`, computing it (and
+        caching it) on first request - `None` if no study is loaded.
+        """
+        if self._loaded_volume is None:
+            return None
+        cached = self._brain_tissue_cache.get(self._current_slice_index)
+        if cached is not None:
+            return cached
+        threshold_settings = self._brain_tissue_settings
+        fcm_settings = self._fcm_settings
+        adaptive_settings = self._adaptive_settings
+        slice_hu = self._loaded_volume.get_slice_hu(self._current_slice_index)
+        brain_mask = extract_brain_mask(slice_hu, threshold_settings.air_hu_cutoff, threshold_settings.bone_hu_cutoff)
+
+        if self._brain_tissue_method == _BRAIN_TISSUE_METHOD_FCM:
+            result = classify_brain_tissue_fcm(
+                slice_hu,
+                brain_mask,
+                fuzziness=fcm_settings.fuzziness,
+                max_iter=fcm_settings.max_iter,
+                spatial_weight=fcm_settings.spatial_weight,
+                min_component_size=fcm_settings.min_component_size,
+            )
+        elif self._brain_tissue_method == _BRAIN_TISSUE_METHOD_ADAPTIVE:
+            result = classify_brain_tissue_adaptive(
+                slice_hu,
+                brain_mask,
+                block_size=adaptive_settings.block_size,
+                plausible_range=(adaptive_settings.plausible_low, adaptive_settings.plausible_high),
+                min_component_size=adaptive_settings.min_component_size,
+            )
+        else:
+            result = classify_brain_tissue(
+                slice_hu,
+                brain_mask,
+                white_matter_range=(threshold_settings.white_matter_low, threshold_settings.white_matter_high),
+                gray_matter_range=(threshold_settings.gray_matter_low, threshold_settings.gray_matter_high),
+                smoothing_size=threshold_settings.smoothing_size,
+                min_component_size=threshold_settings.min_component_size,
+            )
+        # Not a tissue class from any of these methods, but the same
+        # `masks: dict[str, np.ndarray]` shape happily carries it too - see
+        # `_build_brain_tissue_box`'s "Brain Mask" checkbox.
+        result.masks["Brain Mask"] = brain_mask
+        self._brain_tissue_cache[self._current_slice_index] = result
+        return result
+
+    def _on_brain_tissue_method_selected(self, method: str) -> None:
+        self._brain_tissue_method = method
+        # Every already-computed result was made with the old method -
+        # discard it so the next checkbox check/slice view recomputes fresh,
+        # same as a settings-dialog change.
+        self._brain_tissue_cache = {}
+        self._refresh_brain_tissue_for_current_slice()
+
+    def _on_fcm_settings_clicked(self) -> None:
+        dialog = FcmSettingsDialog(self._fcm_settings, self._fcm_default_settings, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._fcm_settings = dialog.settings()
+        self._brain_tissue_cache = {}
+        self._refresh_brain_tissue_for_current_slice()
+
+    def _on_adaptive_settings_clicked(self) -> None:
+        dialog = AdaptiveSettingsDialog(self._adaptive_settings, self._adaptive_default_settings, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._adaptive_settings = dialog.settings()
+        self._brain_tissue_cache = {}
+        self._refresh_brain_tissue_for_current_slice()
+
+    def _apply_brain_tissue_overlay(self, name: str) -> None:
+        result = self._ensure_brain_tissue_result_for_current_slice()
+        if result is None:
+            return
+        self._roi_viewport.set_overlay(f"tissue_{name}", result.masks[name], color=_BRAIN_TISSUE_COLORS[name], label=name)
+
+    def _on_brain_tissue_checkbox_toggled(self, name: str, checked: bool) -> None:
+        if not checked:
+            self._roi_viewport.clear_overlay(f"tissue_{name}")
+            return
+        self._apply_brain_tissue_overlay(name)
+
+    def _reset_brain_tissue_display(self) -> None:
+        self._brain_tissue_cache = {}
+        for checkbox in (self._white_matter_cb, self._gray_matter_cb, self._brain_mask_cb):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.setEnabled(False)
+            checkbox.setToolTip("Open a study first")
+            checkbox.blockSignals(False)
+    def _refresh_brain_tissue_for_current_slice(self) -> None:
+        # Whole-volume-scoped checked state (like "Show Segments") - persists
+        # across slice navigation; `RoiViewport.set_image` already cleared
+        # every overlay by the time this runs (see `_show_slice`), so a
+        # checked box's overlay just needs to be reapplied for the new slice.
+        if self._white_matter_cb.isChecked():
+            self._apply_brain_tissue_overlay("White Matter")
+        if self._gray_matter_cb.isChecked():
+            self._apply_brain_tissue_overlay("Gray Matter")
+        if self._brain_mask_cb.isChecked():
+            self._apply_brain_tissue_overlay("Brain Mask")
+
     def _build_stroke_box(self) -> QWidget:
         # Kept structurally simple and visually separate from Segmentation
         # (see `domain.segmentation.aisd_stroke_unet`'s module docstring for
@@ -1746,7 +2080,7 @@ class MainWindowView(QMainWindow):
         self._stroke_mask_for_current_slice = result.masks["Lesion"]
         self._stroke_lesion_cb.setEnabled(True)
         if self._stroke_lesion_cb.isChecked():
-            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL)
+            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL, label="Suspected Lesion")
 
     def _on_stroke_error(self, message: str) -> None:
         logger.error("Stroke check failed: %s", message)
@@ -1760,7 +2094,7 @@ class MainWindowView(QMainWindow):
             self._roi_viewport.clear_overlay("stroke_lesion")
             return
         if self._stroke_mask_for_current_slice is not None:
-            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL)
+            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL, label="Suspected Lesion")
 
     # ---- segmentation/stroke lifecycle (volume load, slice change, close study) ----
 
@@ -1784,6 +2118,15 @@ class MainWindowView(QMainWindow):
         has_stroke_weights = bool(segmentation_config.get("stroke_weights_path"))
         self._check_stroke_btn.setEnabled(has_stroke_weights)
         self._check_stroke_btn.setToolTip("" if has_stroke_weights else "Stroke model weights not configured")
+
+        # No weights/config to gate on (HU-threshold only) - always available
+        # once a study is loaded.
+        self._white_matter_cb.setEnabled(True)
+        self._white_matter_cb.setToolTip("")
+        self._gray_matter_cb.setEnabled(True)
+        self._gray_matter_cb.setToolTip("")
+        self._brain_mask_cb.setEnabled(True)
+        self._brain_mask_cb.setToolTip("")
 
     def _reset_segmentation_display(self) -> None:
         """Full reset for a new/closed study - clears the per-volume cache
@@ -1833,7 +2176,7 @@ class MainWindowView(QMainWindow):
         self._show_segments_cb.setEnabled(False)
         self._show_segments_cb.setToolTip("Open a study first")
         self._show_segments_cb.blockSignals(True)
-        self._show_segments_cb.setChecked(True)  # back to its default - nothing selected yet anyway
+        self._show_segments_cb.setChecked(False)  # back to its default (2026-09-24) - opt in, not on by default
         self._show_segments_cb.blockSignals(False)
         self._segmentation_status_label.setText("—")
         self._segmentation_status_label.setToolTip("")

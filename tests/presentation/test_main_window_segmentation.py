@@ -413,6 +413,7 @@ def test_segmentation_checkbox_toggle_sets_and_clears_overlay(monkeypatch):
     _install_passthrough_nifti_volume(window)
     window._segment_slice_btn.click()
     _pump_scheduler(window)
+    window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     cb = _dialog_checkboxes(window)["Ventricular System"]
 
     cb.setChecked(True)
@@ -437,6 +438,7 @@ def test_show_segments_checkbox_hides_and_restores_selected_overlays_without_tou
     _install_passthrough_nifti_volume(window)
     window._segment_slice_btn.click()
     _pump_scheduler(window)
+    window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     cb = _dialog_checkboxes(window)["Ventricular System"]
     cb.setChecked(True)
     assert "seg_Ventricular System" in window._roi_viewport._overlay_items
@@ -458,7 +460,7 @@ def test_show_segments_checkbox_starts_disabled_until_weights_configured(monkeyp
     _load_fake_volume(window)
 
     assert window._show_segments_cb.isEnabled() is False
-    assert window._show_segments_cb.isChecked() is True  # default stays "on" even while disabled
+    assert window._show_segments_cb.isChecked() is False  # default is "off" (2026-09-24), even while disabled
 
 
 def test_opacity_slider_change_reapplies_currently_visible_overlays_at_the_new_opacity(monkeypatch):
@@ -474,6 +476,7 @@ def test_opacity_slider_change_reapplies_currently_visible_overlays_at_the_new_o
     _install_passthrough_nifti_volume(window)
     window._segment_slice_btn.click()
     _pump_scheduler(window)
+    window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     # All 16 are selected by default - deselect down to just one, so this
     # test can assert on a single, predictable re-application.
     for name, cb in _dialog_checkboxes(window).items():
@@ -818,6 +821,7 @@ def test_segmentation_selection_persists_across_slice_change_and_reapplies_when_
     _install_passthrough_nifti_volume(window, num_slices=3)
     window._segment_slice_btn.click()  # segments slice 0 only
     _pump_scheduler(window)
+    window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     ventricles_cb = _dialog_checkboxes(window)["Ventricular System"]
     ventricles_cb.setChecked(True)
     assert "seg_Ventricular System" in window._roi_viewport._overlay_items
@@ -894,6 +898,7 @@ def test_segment_volume_live_updates_overlay_for_the_currently_displayed_slice(m
     window = MainWindowView()
     _load_fake_volume(window, num_slices=3)
     _install_passthrough_nifti_volume(window, num_slices=3)
+    window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     cb = _dialog_checkboxes(window)["Ventricular System"]
     cb.setChecked(True)  # checked ahead of time, even while disabled - toggled again once enabled below
 
@@ -1225,3 +1230,35 @@ def test_load_selected_series_marks_only_index_zero_as_the_primary_series(monkey
     window._load_selected_series(1)
 
     assert calls == [True, False]
+
+
+def test_segmentation_colors_are_all_distinct_across_all_16_structures():
+    # Regression test for 2026-09-25's report ("many of them have the same
+    # or very similar color") - the old 7-color palette repeated every 7
+    # structures; this just checks there are no exact duplicates left.
+    colors = list(main_window_module._SEGMENTATION_COLORS.values())
+    assert len(colors) == 16
+    assert len(set(colors)) == 16
+
+
+def test_segmentation_colors_of_consecutive_structures_are_well_separated_in_hue():
+    # Regression test for the follow-up report ("similar colored labels are
+    # close to each other") - `_SEGMENTATION_MAPPING`'s dict order clusters
+    # anatomically-neighboring structures together (the four lobes; Caudate/
+    # Lentiform Nucleus/Insular Cortex/Internal Capsule around the basal
+    # ganglia), so it's not enough for the 16 colors to be merely distinct -
+    # consecutive entries specifically must land far apart on the hue wheel.
+    import colorsys
+
+    def _hue_degrees(hex_color: str) -> float:
+        r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+        h, _l, _s = colorsys.rgb_to_hls(r, g, b)
+        return h * 360
+
+    colors = list(main_window_module._SEGMENTATION_COLORS.values())
+    hues = [_hue_degrees(c) for c in colors]
+
+    for a, b in zip(hues, hues[1:]):
+        diff = abs(a - b) % 360
+        circular_diff = min(diff, 360 - diff)
+        assert circular_diff >= 45, f"consecutive structures only {circular_diff:.1f}° apart in hue"
