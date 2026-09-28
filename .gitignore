@@ -20,3 +20,8 @@ debugs/
 # redistribute; kept locally only. See requirements/requirements.md for
 # the maintained, committed summary of the same content.
 requirements/*.pdf
+
+# Internal Claude Code session context/handoff notes - development
+# history, not meant to be visible in the repo a customer sees.
+CLAUDE.md
+architecture/ml_segmentation_integration_notes.md
