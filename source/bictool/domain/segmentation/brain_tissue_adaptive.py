@@ -49,12 +49,19 @@ def classify_brain_tissue_adaptive(
 ) -> BrainTissueResult:
     low, high = plausible_range
     in_band = brain_mask & (slice_hu >= low) & (slice_hu < high)
+    # Below `plausible_range`'s own floor, within the brain mask, is CSF/
+    # subarachnoid space rather than "neither" - exposing it as its own
+    # class (2026-09-29) fixes a real reported issue where CSF pixels near
+    # `low` were occasionally pulled into `in_band` (partial-volume/noise)
+    # and read as White Matter with no way to see or correct for it.
+    csf_raw = brain_mask & (slice_hu < low)
 
     local_cutoff = _local_mean(slice_hu, brain_mask, block_size)
 
     white_matter_raw = in_band & (slice_hu < local_cutoff)
     gray_matter_raw = in_band & (slice_hu >= local_cutoff)
 
+    csf = clean_mask(csf_raw, min_component_size)
     white_matter = clean_mask(white_matter_raw, min_component_size)
     gray_matter = clean_mask(gray_matter_raw, min_component_size)
-    return BrainTissueResult(masks={"White Matter": white_matter, "Gray Matter": gray_matter})
+    return BrainTissueResult(masks={"CSF": csf, "White Matter": white_matter, "Gray Matter": gray_matter})

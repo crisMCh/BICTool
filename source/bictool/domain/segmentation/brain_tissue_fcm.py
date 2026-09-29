@@ -19,6 +19,13 @@ citations) - a 2-cluster fit would blur two of them together. Cluster
 centers are sorted ascending and assigned CSF/other -> White Matter ->
 Gray Matter, matching that same published ordering; this assumes exactly 3
 clusters, so `n_clusters` isn't meant to be changed casually.
+
+The CSF/other cluster is exposed as its own "CSF" mask (2026-09-29) rather
+than discarded, since it was already being computed to disambiguate White
+Matter/Gray Matter - giving it an explicit output class fixes a real
+reported issue where subarachnoid-space/CSF pixels near the White Matter
+cluster's boundary were occasionally read as White Matter with no way to
+see or correct for it.
 """
 
 from __future__ import annotations
@@ -64,7 +71,7 @@ def classify_brain_tissue_fcm(
     mask_indices = np.flatnonzero(brain_mask)
     if mask_indices.size < n_clusters:
         empty = np.zeros_like(brain_mask, dtype=bool)
-        return BrainTissueResult(masks={"White Matter": empty.copy(), "Gray Matter": empty.copy()})
+        return BrainTissueResult(masks={"CSF": empty.copy(), "White Matter": empty.copy(), "Gray Matter": empty.copy()})
 
     values = slice_hu.ravel()[mask_indices].astype(np.float64)
     membership, centers = _fit_fcm(values, n_clusters, fuzziness, max_iter)
@@ -84,12 +91,14 @@ def classify_brain_tissue_fcm(
     blended = (1 - spatial_weight) * membership_maps + spatial_weight * neighbor_avg
 
     order = np.argsort(centers)  # ascending HU: [CSF/other, White Matter, Gray Matter]
-    white_index, gray_index = order[1], order[2]
+    csf_index, white_index, gray_index = order[0], order[1], order[2]
 
     labels = np.argmax(blended, axis=-1)
+    csf_raw = brain_mask & (labels == csf_index)
     white_matter_raw = brain_mask & (labels == white_index)
     gray_matter_raw = brain_mask & (labels == gray_index)
 
+    csf = clean_mask(csf_raw, min_component_size)
     white_matter = clean_mask(white_matter_raw, min_component_size)
     gray_matter = clean_mask(gray_matter_raw, min_component_size)
-    return BrainTissueResult(masks={"White Matter": white_matter, "Gray Matter": gray_matter})
+    return BrainTissueResult(masks={"CSF": csf, "White Matter": white_matter, "Gray Matter": gray_matter})

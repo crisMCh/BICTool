@@ -75,7 +75,7 @@ def test_extract_brain_mask_returns_boolean_array_of_same_shape():
     assert mask.shape == slice_hu.shape
 
 
-def test_classify_brain_tissue_labels_white_and_gray_matter_by_hu_band():
+def test_classify_brain_tissue_labels_csf_white_and_gray_matter_by_hu_band():
     # Blocks are large (16x16) and well separated so the median-filter/
     # small-component clean-up (see brain_tissue.py's docstring) doesn't
     # erode them away - assertions check each block's interior, away from
@@ -86,18 +86,38 @@ def test_classify_brain_tissue_labels_white_and_gray_matter_by_hu_band():
 
     slice_hu[0:16, 0:16] = 28.0  # white matter band
     slice_hu[22:38, 22:38] = 40.0  # gray matter band
-    slice_hu[44:60, 44:60] = 10.0  # CSF-like, neither band
+    slice_hu[44:60, 44:60] = 10.0  # CSF band
 
     result = classify_brain_tissue(slice_hu, brain_mask)
 
     assert result.masks["White Matter"][3:13, 3:13].all()
     assert not result.masks["Gray Matter"][3:13, 3:13].any()
+    assert not result.masks["CSF"][3:13, 3:13].any()
 
     assert result.masks["Gray Matter"][25:35, 25:35].all()
     assert not result.masks["White Matter"][25:35, 25:35].any()
+    assert not result.masks["CSF"][25:35, 25:35].any()
 
+    assert result.masks["CSF"][47:57, 47:57].all()
     assert not result.masks["White Matter"][47:57, 47:57].any()
     assert not result.masks["Gray Matter"][47:57, 47:57].any()
+
+
+def test_classify_brain_tissue_csf_does_not_leak_into_white_matter_near_the_band_boundary():
+    # Regression test for the real issue reported 2026-09-29: CSF/
+    # subarachnoid-space pixels right at White Matter's lower band edge
+    # were occasionally read as White Matter before CSF had its own
+    # explicit class to claim them first. Checks the interior only, away
+    # from the array boundary the clean-up morphology legitimately erodes
+    # (see the "labels_csf_white_and_gray_matter" test above).
+    size = 30
+    slice_hu = np.full((size, size), 19.0, dtype=np.float64)  # just below White Matter's low (20.0)
+    brain_mask = np.ones((size, size), dtype=bool)
+
+    result = classify_brain_tissue(slice_hu, brain_mask)
+
+    assert result.masks["CSF"][5:25, 5:25].all()
+    assert not result.masks["White Matter"].any()
 
 
 def test_classify_brain_tissue_never_labels_outside_the_brain_mask():
@@ -107,6 +127,7 @@ def test_classify_brain_tissue_never_labels_outside_the_brain_mask():
 
     result = classify_brain_tissue(slice_hu, brain_mask)
 
+    assert not result.masks["CSF"].any()
     assert not result.masks["White Matter"].any()
     assert not result.masks["Gray Matter"].any()
 
@@ -167,8 +188,11 @@ def test_classify_brain_tissue_masks_are_boolean_and_mutually_exclusive():
 
     result = classify_brain_tissue(slice_hu, brain_mask)
 
-    white_matter, gray_matter = result.masks["White Matter"], result.masks["Gray Matter"]
+    csf, white_matter, gray_matter = result.masks["CSF"], result.masks["White Matter"], result.masks["Gray Matter"]
+    assert csf.dtype == bool
     assert white_matter.dtype == bool
     assert gray_matter.dtype == bool
     assert white_matter.shape == slice_hu.shape
     assert not (white_matter & gray_matter).any()
+    assert not (csf & white_matter).any()
+    assert not (csf & gray_matter).any()

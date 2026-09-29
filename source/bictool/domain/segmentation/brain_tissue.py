@@ -65,10 +65,15 @@ DEFAULT_BONE_HU_CUTOFF = 100.0
 _OPENING_STRUCTURE = np.ones((3, 3), dtype=bool)
 _CLOSING_STRUCTURE = np.ones((5, 5), dtype=bool)
 
-# Literature-typical HU bands for white and gray matter (gray matter ~40 HU,
-# white matter ~30 HU) - named/tunable rather than hidden in the function
-# body, since real HU values drift by scanner/protocol and these may need
-# retuning against real data.
+# Literature-typical HU bands for CSF, white, and gray matter (CSF ~10 HU,
+# white matter ~30 HU, gray matter ~40 HU) - named/tunable rather than hidden
+# in the function body, since real HU values drift by scanner/protocol and
+# these may need retuning against real data. CSF's own band is exposed
+# (2026-09-29) so subarachnoid-space/CSF pixels near the White Matter band's
+# lower edge get their own explicit class instead of occasionally being
+# misclassified as White Matter - a real reported issue across all three
+# WM/GM methods.
+DEFAULT_CSF_RANGE = (0.0, 20.0)
 DEFAULT_WHITE_MATTER_RANGE = (20.0, 32.0)
 DEFAULT_GRAY_MATTER_RANGE = (32.0, 45.0)
 
@@ -155,12 +160,13 @@ def _clean_mask(mask: np.ndarray, min_component_size: int) -> np.ndarray:
 def classify_brain_tissue(
     slice_hu: np.ndarray,
     brain_mask: np.ndarray,
+    csf_range: tuple[float, float] = DEFAULT_CSF_RANGE,
     white_matter_range: tuple[float, float] = DEFAULT_WHITE_MATTER_RANGE,
     gray_matter_range: tuple[float, float] = DEFAULT_GRAY_MATTER_RANGE,
     smoothing_size: int = DEFAULT_SMOOTHING_SIZE,
     min_component_size: int = DEFAULT_MIN_COMPONENT_SIZE,
 ) -> BrainTissueResult:
-    """Classifies every pixel of `slice_hu` within `brain_mask` as white
+    """Classifies every pixel of `slice_hu` within `brain_mask` as CSF, white
     matter, gray matter, or neither, by HU-band membership on a denoised
     copy of `slice_hu`, then cleans up each resulting mask (see
     `_clean_mask`).
@@ -175,13 +181,16 @@ def classify_brain_tissue(
     """
     smoothed_hu = ndimage.median_filter(slice_hu, size=smoothing_size)
 
+    csf_low, csf_high = csf_range
     white_low, white_high = white_matter_range
     gray_low, gray_high = gray_matter_range
 
+    csf_raw = brain_mask & (smoothed_hu >= csf_low) & (smoothed_hu < csf_high)
     white_matter_raw = brain_mask & (smoothed_hu >= white_low) & (smoothed_hu < white_high)
     gray_matter_raw = brain_mask & (smoothed_hu >= gray_low) & (smoothed_hu < gray_high)
 
+    csf = _clean_mask(csf_raw, min_component_size)
     white_matter = _clean_mask(white_matter_raw, min_component_size)
     gray_matter = _clean_mask(gray_matter_raw, min_component_size)
 
-    return BrainTissueResult(masks={"White Matter": white_matter, "Gray Matter": gray_matter})
+    return BrainTissueResult(masks={"CSF": csf, "White Matter": white_matter, "Gray Matter": gray_matter})

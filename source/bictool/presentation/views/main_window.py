@@ -156,6 +156,7 @@ from bictool.domain.results.study_quality import SliceQualityResult
 from bictool.domain.segmentation.brain_tissue import (
     DEFAULT_AIR_HU_CUTOFF,
     DEFAULT_BONE_HU_CUTOFF,
+    DEFAULT_CSF_RANGE,
     DEFAULT_GRAY_MATTER_RANGE,
     DEFAULT_MIN_COMPONENT_SIZE,
     DEFAULT_SMOOTHING_SIZE,
@@ -163,6 +164,7 @@ from bictool.domain.segmentation.brain_tissue import (
     classify_brain_tissue,
     extract_brain_mask,
 )
+from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
 from bictool.domain.segmentation.brain_tissue_adaptive import (
     DEFAULT_BLOCK_SIZE,
     DEFAULT_PLAUSIBLE_RANGE,
@@ -337,6 +339,7 @@ _SEGMENTATION_COLORS: dict[str, str] = {
 # - a separate feature from the CNN Segmentation box above, so its colors are
 # picked to stay distinct from both that palette and ROI1/ROI2's cyan/pink.
 _BRAIN_TISSUE_COLORS: dict[str, str] = {
+    "CSF": "#5cc9a0",
     "White Matter": "#4c8ce0",
     "Gray Matter": "#e0a24c",
     "Brain Mask": "#8d96a0",  # neutral gray - the skull-strip result itself, not a tissue class
@@ -418,6 +421,8 @@ class MainWindowView(QMainWindow):
         self._brain_tissue_default_settings = BrainTissueSettings(
             air_hu_cutoff=DEFAULT_AIR_HU_CUTOFF,
             bone_hu_cutoff=DEFAULT_BONE_HU_CUTOFF,
+            csf_low=DEFAULT_CSF_RANGE[0],
+            csf_high=DEFAULT_CSF_RANGE[1],
             white_matter_low=DEFAULT_WHITE_MATTER_RANGE[0],
             white_matter_high=DEFAULT_WHITE_MATTER_RANGE[1],
             gray_matter_low=DEFAULT_GRAY_MATTER_RANGE[0],
@@ -1674,6 +1679,13 @@ class MainWindowView(QMainWindow):
         result = self._dicom_nifti_volume.remap_result_to_dicom_space(result)
         self._segmentation_cache[self._current_slice_index] = result
         self._apply_segmentation_result(result, from_cache=False)
+        # This slice now has real CNN segmentation data, which
+        # `_brain_mask_for_current_slice` prefers over the HU-threshold
+        # fallback - drop any already-cached (fallback-based) Brain Tissue
+        # result and refresh, so "Brain Mask" becomes available/correct
+        # immediately rather than only on the next slice re-visit.
+        self._brain_tissue_cache.pop(self._current_slice_index, None)
+        self._refresh_brain_tissue_for_current_slice()
 
     def _apply_segmentation_result(self, result, *, from_cache: bool) -> None:
         self._segment_slice_btn.setEnabled(True)
@@ -1812,6 +1824,11 @@ class MainWindowView(QMainWindow):
             # progress text/buttons (`_apply_segmentation_result` does both,
             # which would be wrong mid-batch).
             self._apply_segmentation_masks(result)
+            # Same reasoning as `_on_segmentation_finished`: this slice now
+            # has real CNN data, so "Brain Mask" may just have become
+            # available - refresh immediately rather than on next re-visit.
+            self._brain_tissue_cache.pop(slice_index, None)
+            self._refresh_brain_tissue_for_current_slice()
 
     def _on_volume_segmentation_progress(self, completed: int, total: int) -> None:
         self._segmentation_status_label.setText(f"Segmenting volume… {completed}/{total}")
@@ -1844,15 +1861,24 @@ class MainWindowView(QMainWindow):
     # ---- stroke detection (investigational, not a QC/image-quality measurement) ----
 
     def _build_brain_tissue_box(self) -> QWidget:
-        # HU-threshold-only white/gray matter classification
+        # HU-threshold-only CSF/white/gray matter classification
         # (domain.segmentation.brain_tissue) - no ML, so unlike Segmentation/
-        # Stroke there's no weights config to gate on: both checkboxes are
-        # simply enabled once a study is loaded (see
-        # `_update_segmentation_availability`) and computed synchronously,
-        # on demand, per slice (milliseconds - see brain_tissue.py's
-        # docstring) rather than via a background worker.
+        # Stroke there's no weights config to gate on: the CSF/White Matter/
+        # Gray Matter checkboxes are simply enabled once a study is loaded
+        # (see `_update_segmentation_availability`) and computed
+        # synchronously, on demand, per slice (milliseconds - see
+        # brain_tissue.py's docstring) rather than via a background worker.
+        # "Brain Mask" is the exception - see
+        # `_update_brain_mask_checkbox_availability`.
         box = QGroupBox("Brain Tissue")
         layout = QVBoxLayout(box)
+
+        self._csf_cb = QCheckBox("CSF")
+        self._csf_cb.setEnabled(False)
+        self._csf_cb.setToolTip("Open a study first")
+        self._csf_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['CSF']}; }}")
+        self._csf_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("CSF", checked))
+        layout.addWidget(self._csf_cb)
 
         self._white_matter_cb = QCheckBox("White Matter")
         self._white_matter_cb.setEnabled(False)
@@ -1881,6 +1907,29 @@ class MainWindowView(QMainWindow):
 
         return box
 
+    def _brain_mask_for_current_slice(self, slice_hu: np.ndarray) -> np.ndarray:
+        """Prefers the CNN anatomy segmentation's merged-and-3D-volume-filtered
+        brain mask (`segmentation_brain_mask.brain_mask_from_segmentation`)
+        for the current slice when it has been segmented - more robust on
+        irregular anatomy (e.g. a postop craniotomy/hardware scan) than the
+        HU-threshold `extract_brain_mask`, which real data showed cannot
+        reliably tell true brain apart from the connected scalp/orbit/sinus
+        envelope on such scans (see `architecture/ml_segmentation_integration_notes.md`,
+        2026-09-28/29 entries for the full investigation). Falls back to
+        `extract_brain_mask` when this slice has no segmentation result yet
+        (segmentation not run, weights/TensorFlow unavailable, or this
+        specific slice hasn't been segmented) - the HU-threshold method is
+        still the only option in that case.
+        """
+        if self._segmentation_cache:
+            masks_by_slice = {index: result.masks for index, result in self._segmentation_cache.items()}
+            segmentation_masks = brain_mask_from_segmentation(masks_by_slice, self._loaded_volume.num_slices)
+            if self._current_slice_index in segmentation_masks:
+                return segmentation_masks[self._current_slice_index]
+
+        threshold_settings = self._brain_tissue_settings
+        return extract_brain_mask(slice_hu, threshold_settings.air_hu_cutoff, threshold_settings.bone_hu_cutoff)
+
     def _ensure_brain_tissue_result_for_current_slice(self):
         """Returns this slice's cached `BrainTissueResult`, computing it (and
         caching it) on first request - `None` if no study is loaded.
@@ -1894,7 +1943,7 @@ class MainWindowView(QMainWindow):
         fcm_settings = self._fcm_settings
         adaptive_settings = self._adaptive_settings
         slice_hu = self._loaded_volume.get_slice_hu(self._current_slice_index)
-        brain_mask = extract_brain_mask(slice_hu, threshold_settings.air_hu_cutoff, threshold_settings.bone_hu_cutoff)
+        brain_mask = self._brain_mask_for_current_slice(slice_hu)
 
         if self._brain_tissue_method == _BRAIN_TISSUE_METHOD_FCM:
             result = classify_brain_tissue_fcm(
@@ -1917,6 +1966,7 @@ class MainWindowView(QMainWindow):
             result = classify_brain_tissue(
                 slice_hu,
                 brain_mask,
+                csf_range=(threshold_settings.csf_low, threshold_settings.csf_high),
                 white_matter_range=(threshold_settings.white_matter_low, threshold_settings.white_matter_high),
                 gray_matter_range=(threshold_settings.gray_matter_low, threshold_settings.gray_matter_high),
                 smoothing_size=threshold_settings.smoothing_size,
@@ -1967,22 +2017,51 @@ class MainWindowView(QMainWindow):
 
     def _reset_brain_tissue_display(self) -> None:
         self._brain_tissue_cache = {}
-        for checkbox in (self._white_matter_cb, self._gray_matter_cb, self._brain_mask_cb):
+        for checkbox in (self._csf_cb, self._white_matter_cb, self._gray_matter_cb, self._brain_mask_cb):
             checkbox.blockSignals(True)
             checkbox.setChecked(False)
             checkbox.setEnabled(False)
             checkbox.setToolTip("Open a study first")
             checkbox.blockSignals(False)
+    def _update_brain_mask_checkbox_availability(self) -> None:
+        """"Brain Mask" reflects `_brain_mask_for_current_slice`'s
+        CNN-segmentation-derived result, which is only meaningful once real
+        segmentation data exists for the slice being viewed - unlike White
+        Matter/Gray Matter, which stay usable via the HU-threshold fallback
+        regardless (see `_brain_mask_for_current_slice`'s docstring). Kept
+        disabled, with an explanatory tooltip, until segmentation has
+        actually produced a result for the current slice - never silently
+        shows the inferior HU-threshold skull-strip under this checkbox.
+        """
+        if self._loaded_volume is None:
+            self._brain_mask_cb.setEnabled(False)
+            self._brain_mask_cb.setToolTip("Open a study first")
+            return
+        weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
+        if not weights_path:
+            self._brain_mask_cb.setEnabled(False)
+            self._brain_mask_cb.setToolTip("Segmentation model weights not configured")
+            return
+        if self._current_slice_index not in self._segmentation_cache:
+            self._brain_mask_cb.setEnabled(False)
+            self._brain_mask_cb.setToolTip("Waiting for anatomy segmentation on this slice…")
+            return
+        self._brain_mask_cb.setEnabled(True)
+        self._brain_mask_cb.setToolTip("")
+
     def _refresh_brain_tissue_for_current_slice(self) -> None:
         # Whole-volume-scoped checked state (like "Show Segments") - persists
         # across slice navigation; `RoiViewport.set_image` already cleared
         # every overlay by the time this runs (see `_show_slice`), so a
         # checked box's overlay just needs to be reapplied for the new slice.
+        self._update_brain_mask_checkbox_availability()
+        if self._csf_cb.isChecked():
+            self._apply_brain_tissue_overlay("CSF")
         if self._white_matter_cb.isChecked():
             self._apply_brain_tissue_overlay("White Matter")
         if self._gray_matter_cb.isChecked():
             self._apply_brain_tissue_overlay("Gray Matter")
-        if self._brain_mask_cb.isChecked():
+        if self._brain_mask_cb.isChecked() and self._brain_mask_cb.isEnabled():
             self._apply_brain_tissue_overlay("Brain Mask")
 
     def _build_stroke_box(self) -> QWidget:
@@ -2121,12 +2200,15 @@ class MainWindowView(QMainWindow):
 
         # No weights/config to gate on (HU-threshold only) - always available
         # once a study is loaded.
+        self._csf_cb.setEnabled(True)
+        self._csf_cb.setToolTip("")
         self._white_matter_cb.setEnabled(True)
         self._white_matter_cb.setToolTip("")
         self._gray_matter_cb.setEnabled(True)
         self._gray_matter_cb.setToolTip("")
-        self._brain_mask_cb.setEnabled(True)
-        self._brain_mask_cb.setToolTip("")
+        # "Brain Mask" has its own, segmentation-dependent availability - see
+        # `_update_brain_mask_checkbox_availability`.
+        self._update_brain_mask_checkbox_availability()
 
     def _reset_segmentation_display(self) -> None:
         """Full reset for a new/closed study - clears the per-volume cache

@@ -375,6 +375,31 @@ def test_segment_slice_dispatches_worker_and_enables_checkboxes(monkeypatch):
     assert 0 in window._segmentation_cache
 
 
+def test_segment_slice_enables_the_brain_mask_checkbox_for_the_segmented_slice(monkeypatch):
+    # "Brain Mask" (Tools -> Brain Tissue box) reflects the CNN-segmentation-
+    # derived skull-strip (see `main_window._brain_mask_for_current_slice`)
+    # and is disabled until real segmentation data exists for the currently
+    # displayed slice - never silently enabled just because a study loaded
+    # (see `tests/presentation/test_main_window_brain_tissue.py` for the
+    # "no weights configured"/"not yet segmented" disabled cases).
+    monkeypatch.setattr(
+        main_window_module, "load_config", lambda: {"segmentation": {"anatomy_weights_path": "/fake/weights.hdf5"}}
+    )
+    _install_fake_domain_module(monkeypatch, "head_ct_unet")
+    _install_fake_worker_module(
+        monkeypatch, "bictool.application.segmentation_worker", "SegmentationWorker", result=_fake_segmentation_result()
+    )
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _install_passthrough_nifti_volume(window)
+    assert window._brain_mask_cb.isEnabled() is False
+
+    window._segment_slice_btn.click()
+    _pump_scheduler(window)
+
+    assert window._brain_mask_cb.isEnabled() is True
+
+
 def test_segment_slice_second_click_uses_cache_and_never_reimports(monkeypatch):
     monkeypatch.setattr(
         main_window_module, "load_config", lambda: {"segmentation": {"anatomy_weights_path": "/fake/weights.hdf5"}}

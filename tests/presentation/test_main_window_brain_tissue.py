@@ -2,9 +2,16 @@
 (white/gray matter checkboxes) - checkbox-to-overlay wiring, per-slice-index
 caching, and the disabled-until-loaded lifecycle.
 
-Unlike Segmentation/Stroke, this feature has no ML model and no config to
-gate on, so these tests never need to install fake TensorFlow modules or
-touch `load_config`.
+White Matter/Gray Matter have no ML model and no config to gate on, so most
+of these tests never need to install fake TensorFlow modules or touch
+`load_config`. "Brain Mask" is the exception (see
+`main_window._brain_mask_for_current_slice`/`_update_brain_mask_checkbox_
+availability`): it prefers a CNN-segmentation-derived result and is disabled
+until one exists for the current slice - the "segmentation completes it"
+case needs the fake-segmentation-module machinery, so it's covered in
+`test_main_window_segmentation.py` instead
+(`test_segment_slice_enables_the_brain_mask_checkbox_for_the_segmented_slice`);
+this file only covers the two disabled cases, which need no fake modules.
 """
 
 import numpy as np
@@ -67,18 +74,43 @@ def _load_fake_volume(window: MainWindowView, num_slices: int = 1) -> DicomVolum
 def test_brain_tissue_checkboxes_disabled_before_a_study_is_loaded():
     window = MainWindowView()
 
+    assert window._csf_cb.isEnabled() is False
     assert window._white_matter_cb.isEnabled() is False
     assert window._gray_matter_cb.isEnabled() is False
     assert window._brain_mask_cb.isEnabled() is False
 
 
-def test_brain_tissue_checkboxes_enabled_once_a_study_is_loaded():
+def test_csf_white_gray_matter_checkboxes_enabled_once_a_study_is_loaded():
     window = MainWindowView()
     _load_fake_volume(window)
 
+    assert window._csf_cb.isEnabled() is True
     assert window._white_matter_cb.isEnabled() is True
     assert window._gray_matter_cb.isEnabled() is True
-    assert window._brain_mask_cb.isEnabled() is True
+
+
+def test_brain_mask_checkbox_disabled_without_weights_configured(monkeypatch):
+    # Explicitly no weights configured - never rely on the real machine's
+    # own `~/.bictool/config.json` being absent, since a dev machine that
+    # has configured real segmentation weights for other work would make
+    # this test's premise false.
+    monkeypatch.setattr(main_window_module, "load_config", lambda: {})
+    window = MainWindowView()
+    _load_fake_volume(window)
+
+    assert window._brain_mask_cb.isEnabled() is False
+    assert window._brain_mask_cb.toolTip() == "Segmentation model weights not configured"
+
+
+def test_brain_mask_checkbox_disabled_when_slice_not_yet_segmented(monkeypatch):
+    monkeypatch.setattr(
+        main_window_module, "load_config", lambda: {"segmentation": {"anatomy_weights_path": "/fake/weights.hdf5"}}
+    )
+    window = MainWindowView()
+    _load_fake_volume(window)  # stubs `_maybe_auto_segment_volume`, so nothing actually segments
+
+    assert window._brain_mask_cb.isEnabled() is False
+    assert window._brain_mask_cb.toolTip() == "Waiting for anatomy segmentation on this slice…"
 
 
 def test_brain_mask_checkbox_toggle_sets_and_clears_overlay():
@@ -90,6 +122,17 @@ def test_brain_mask_checkbox_toggle_sets_and_clears_overlay():
 
     window._brain_mask_cb.setChecked(False)
     assert "tissue_Brain Mask" not in window._roi_viewport._overlay_items
+
+
+def test_csf_checkbox_toggle_sets_and_clears_overlay():
+    window = MainWindowView()
+    _load_fake_volume(window)
+
+    window._csf_cb.setChecked(True)
+    assert "tissue_CSF" in window._roi_viewport._overlay_items
+
+    window._csf_cb.setChecked(False)
+    assert "tissue_CSF" not in window._roi_viewport._overlay_items
 
 
 def test_white_matter_checkbox_toggle_sets_and_clears_overlay():
@@ -170,6 +213,8 @@ def test_settings_dialog_accept_updates_settings_and_recomputes(monkeypatch):
     new_settings = BrainTissueSettings(
         air_hu_cutoff=-400.0,
         bone_hu_cutoff=90.0,
+        csf_low=-5.0,
+        csf_high=18.0,
         white_matter_low=18.0,
         white_matter_high=30.0,
         gray_matter_low=30.0,

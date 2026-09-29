@@ -7,6 +7,8 @@ from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueS
 _DEFAULTS = BrainTissueSettings(
     air_hu_cutoff=-500.0,
     bone_hu_cutoff=100.0,
+    csf_low=0.0,
+    csf_high=20.0,
     white_matter_low=20.0,
     white_matter_high=32.0,
     gray_matter_low=32.0,
@@ -20,6 +22,8 @@ def test_dialog_starts_prefilled_with_the_current_settings():
     current = BrainTissueSettings(
         air_hu_cutoff=-400.0,
         bone_hu_cutoff=90.0,
+        csf_low=-5.0,
+        csf_high=18.0,
         white_matter_low=18.0,
         white_matter_high=30.0,
         gray_matter_low=30.0,
@@ -36,6 +40,8 @@ def test_restore_defaults_resets_all_fields():
     current = BrainTissueSettings(
         air_hu_cutoff=-400.0,
         bone_hu_cutoff=90.0,
+        csf_low=-5.0,
+        csf_high=18.0,
         white_matter_low=18.0,
         white_matter_high=30.0,
         gray_matter_low=30.0,
@@ -55,7 +61,11 @@ def test_editing_a_field_is_reflected_in_settings():
 
     dialog._min_component_spin.setValue(100)
     dialog._smoothing_spin.setValue(7)
+    dialog._csf_low_spin.setValue(-3.0)
+    dialog._csf_high_spin.setValue(19.0)
 
     result = dialog.settings()
     assert result.min_component_size == 100
     assert result.smoothing_size == 7
+    assert result.csf_low == -3.0
+    assert result.csf_high == 19.0

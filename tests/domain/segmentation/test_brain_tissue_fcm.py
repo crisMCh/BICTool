@@ -26,11 +26,15 @@ def test_classify_brain_tissue_fcm_separates_three_real_clusters():
 
     assert result.masks["White Matter"][5:15, 5:15].all()
     assert not result.masks["Gray Matter"][5:15, 5:15].any()
+    assert not result.masks["CSF"][5:15, 5:15].any()
 
     assert result.masks["Gray Matter"][45:55, 5:15].all()
     assert not result.masks["White Matter"][45:55, 5:15].any()
+    assert not result.masks["CSF"][45:55, 5:15].any()
 
-    # The CSF-like middle band should be neither.
+    # The CSF-like middle band should be its own class (2026-09-29) - not
+    # left unclassified, and not read as White Matter/Gray Matter.
+    assert result.masks["CSF"][25:35, 5:15].all()
     assert not result.masks["White Matter"][25:35, 5:15].any()
     assert not result.masks["Gray Matter"][25:35, 5:15].any()
 
@@ -41,6 +45,7 @@ def test_classify_brain_tissue_fcm_never_labels_outside_the_brain_mask():
 
     result = classify_brain_tissue_fcm(slice_hu, brain_mask)
 
+    assert not result.masks["CSF"].any()
     assert not result.masks["White Matter"].any()
     assert not result.masks["Gray Matter"].any()
 
@@ -50,11 +55,14 @@ def test_classify_brain_tissue_fcm_masks_are_boolean_and_mutually_exclusive():
 
     result = classify_brain_tissue_fcm(slice_hu, brain_mask)
 
-    white_matter, gray_matter = result.masks["White Matter"], result.masks["Gray Matter"]
+    csf, white_matter, gray_matter = result.masks["CSF"], result.masks["White Matter"], result.masks["Gray Matter"]
+    assert csf.dtype == bool
     assert white_matter.dtype == bool
     assert gray_matter.dtype == bool
     assert white_matter.shape == slice_hu.shape
     assert not (white_matter & gray_matter).any()
+    assert not (csf & white_matter).any()
+    assert not (csf & gray_matter).any()
 
 
 def test_classify_brain_tissue_fcm_handles_a_too_small_brain_mask():
@@ -64,5 +72,6 @@ def test_classify_brain_tissue_fcm_handles_a_too_small_brain_mask():
 
     result = classify_brain_tissue_fcm(slice_hu, brain_mask, n_clusters=3)
 
+    assert not result.masks["CSF"].any()
     assert not result.masks["White Matter"].any()
     assert not result.masks["Gray Matter"].any()

@@ -38,6 +38,7 @@ def test_classify_brain_tissue_adaptive_never_labels_outside_the_brain_mask():
 
     result = classify_brain_tissue_adaptive(slice_hu, brain_mask)
 
+    assert not result.masks["CSF"].any()
     assert not result.masks["White Matter"].any()
     assert not result.masks["Gray Matter"].any()
 
@@ -49,8 +50,27 @@ def test_classify_brain_tissue_adaptive_masks_are_boolean_and_mutually_exclusive
 
     result = classify_brain_tissue_adaptive(slice_hu, brain_mask)
 
-    white_matter, gray_matter = result.masks["White Matter"], result.masks["Gray Matter"]
+    csf, white_matter, gray_matter = result.masks["CSF"], result.masks["White Matter"], result.masks["Gray Matter"]
+    assert csf.dtype == bool
     assert white_matter.dtype == bool
     assert gray_matter.dtype == bool
     assert white_matter.shape == slice_hu.shape
     assert not (white_matter & gray_matter).any()
+    assert not (csf & white_matter).any()
+    assert not (csf & gray_matter).any()
+
+
+def test_classify_brain_tissue_adaptive_labels_below_plausible_range_as_csf():
+    # Regression test for the real issue reported 2026-09-29: pixels below
+    # `plausible_range`'s own floor (CSF/subarachnoid space) previously had
+    # no explicit class of their own. Checks the interior only, away from
+    # the array boundary the clean-up morphology legitimately erodes.
+    size = 20
+    slice_hu = np.full((size, size), 10.0, dtype=np.float64)  # below the default plausible_range floor (15.0)
+    brain_mask = np.ones((size, size), dtype=bool)
+
+    result = classify_brain_tissue_adaptive(slice_hu, brain_mask, min_component_size=0)
+
+    assert result.masks["CSF"][5:15, 5:15].all()
+    assert not result.masks["White Matter"].any()
+    assert not result.masks["Gray Matter"].any()

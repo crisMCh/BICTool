@@ -55,6 +55,8 @@ class BrainTissueSettings:
 
     air_hu_cutoff: float
     bone_hu_cutoff: float
+    csf_low: float
+    csf_high: float
     white_matter_low: float
     white_matter_high: float
     gray_matter_low: float
@@ -94,6 +96,12 @@ class BrainTissueSettingsDialog(QDialog):
 
         self._bone_cutoff_spin = self._make_hu_spin(-3000, 3000, current.bone_hu_cutoff)
         form.addRow("Skull-strip: bone HU cutoff (above)", self._bone_cutoff_spin)
+
+        self._csf_low_spin = self._make_hu_spin(-3000, 3000, current.csf_low)
+        form.addRow("CSF: HU low", self._csf_low_spin)
+
+        self._csf_high_spin = self._make_hu_spin(-3000, 3000, current.csf_high)
+        form.addRow("CSF: HU high", self._csf_high_spin)
 
         self._white_low_spin = self._make_hu_spin(-3000, 3000, current.white_matter_low)
         form.addRow("White matter: HU low", self._white_low_spin)
@@ -142,6 +150,8 @@ class BrainTissueSettingsDialog(QDialog):
     def _on_restore_defaults_clicked(self) -> None:
         self._air_cutoff_spin.setValue(self._defaults.air_hu_cutoff)
         self._bone_cutoff_spin.setValue(self._defaults.bone_hu_cutoff)
+        self._csf_low_spin.setValue(self._defaults.csf_low)
+        self._csf_high_spin.setValue(self._defaults.csf_high)
         self._white_low_spin.setValue(self._defaults.white_matter_low)
         self._white_high_spin.setValue(self._defaults.white_matter_high)
         self._gray_low_spin.setValue(self._defaults.gray_matter_low)
@@ -153,6 +163,8 @@ class BrainTissueSettingsDialog(QDialog):
         return BrainTissueSettings(
             air_hu_cutoff=self._air_cutoff_spin.value(),
             bone_hu_cutoff=self._bone_cutoff_spin.value(),
+            csf_low=self._csf_low_spin.value(),
+            csf_high=self._csf_high_spin.value(),
             white_matter_low=self._white_low_spin.value(),
             white_matter_high=self._white_high_spin.value(),
             gray_matter_low=self._gray_low_spin.value(),
