@@ -55,9 +55,9 @@ def test_evaluate_slice_quality_wires_nps_and_contrast_correctly(monkeypatch):
     fake_mtf = np.array([[1.0, 1.0], [0.8, 0.75], [0.6, 0.5], [0.4, 0.3], [0.2, 0.1]])
     fake_mtf_area_per_edge = np.array([0.3, 0.4])
 
-    import bictool.domain.results.study_quality as sq
+    import bictool.domain.metrics.mtf_seed as mtf_seed
 
-    monkeypatch.setattr(sq, "calc_mtf", lambda *a, **k: (fake_xaxis, fake_mtf, fake_mtf_area_per_edge))
+    monkeypatch.setattr(mtf_seed, "calc_mtf", lambda *a, **k: (fake_xaxis, fake_mtf, fake_mtf_area_per_edge))
 
     result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)
 
@@ -98,3 +98,52 @@ def test_evaluate_slice_quality_wires_nps_and_contrast_correctly(monkeypatch):
     expected_label, expected_decision = classify_quality(expected_features)
     assert result.predicted_label == expected_label
     assert result.decision_value == expected_decision
+
+
+def test_evaluate_slice_quality_retries_mtf_seeds_until_one_finds_edges(monkeypatch):
+    import bictool.domain.metrics.mtf_seed as mtf_seed
+
+    tried = []
+
+    def fake_calc_mtf(img_roi, x, y, pix_spc):
+        tried.append((x, y))
+        if (x, y) != (3, 4):
+            raise ValueError("No edge columns survived bump removal")
+        return np.array([0.0, 0.5, 1.0]), np.ones((3, 2)), np.array([0.3, 0.4])
+
+    monkeypatch.setattr(mtf_seed, "calc_mtf", fake_calc_mtf)
+
+    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, mtf_seeds=[(2, 2), (3, 4), (5, 5)])
+
+    assert tried == [(2, 2), (3, 4)]
+    assert result.mtf_seed == (3, 4)
+
+
+def _stub_mtf(monkeypatch, mtf, areas):
+    import bictool.domain.metrics.mtf_seed as mtf_seed
+
+    xaxis = np.linspace(0.0, 1.2, mtf.shape[0])
+    monkeypatch.setattr(mtf_seed, "calc_mtf", lambda *a, **k: (xaxis, mtf, areas))
+
+
+def test_edges_with_a_non_finite_mtf_are_dropped_everywhere(monkeypatch):
+    good = np.linspace(1.0, 0.1, 5)
+    mtf = np.column_stack([good, good, np.full(5, np.inf)])
+    _stub_mtf(monkeypatch, mtf, np.array([0.3, 0.5, np.nan]))
+
+    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)
+
+    assert result.mtf.shape[1] == 2
+    assert result.mtf_area == 0.4
+    assert np.isfinite(result.feature_vector).all()
+
+
+def test_slice_fails_when_most_edges_have_a_non_finite_mtf(monkeypatch):
+    import pytest
+
+    good = np.linspace(1.0, 0.1, 5)
+    mtf = np.column_stack([good, np.full(5, np.inf), np.full(5, np.inf)])
+    _stub_mtf(monkeypatch, mtf, np.array([0.3, np.nan, np.nan]))
+
+    with pytest.raises(ValueError, match="2 of 3 edge points"):
+        evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)

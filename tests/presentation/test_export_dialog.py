@@ -35,3 +35,20 @@ def test_destination_returns_the_typed_path(tmp_path):
     dialog._dest_edit.setText(str(tmp_path) + " ")  # trailing whitespace, as a user might leave it
 
     assert dialog.destination() == tmp_path
+
+
+def test_scope_defaults_to_the_current_slice_and_study_needs_results():
+    dialog = ExportDialog()
+
+    assert dialog.scope() == "slice"
+    assert dialog._study_rb.isEnabled() is False
+
+
+def test_study_scope_can_be_preselected_and_disables_chart_images(tmp_path):
+    dialog = ExportDialog(default_dir=str(tmp_path), study_available=True, default_scope="study")
+
+    assert dialog.scope() == "study"
+    assert dialog._jpg_cb.isEnabled() is False
+
+    dialog._slice_rb.setChecked(True)
+    assert dialog._jpg_cb.isEnabled() is True

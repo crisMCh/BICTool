@@ -4,6 +4,7 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView
 
+from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.views.roi_viewport import RoiViewport
 
 
@@ -581,3 +582,185 @@ def test_clear_on_a_never_shown_viewport_does_not_raise():
     # test setups - clear() must be a safe no-op-ish call either way.
     viewport = RoiViewport()
     viewport.clear()  # must not raise
+
+
+def _release_event(pos: tuple[int, int]) -> QMouseEvent:
+    return QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(*pos),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _one_to_one_viewport() -> RoiViewport:
+    # Shown and sized to match the image so view and scene coordinates agree
+    # (see test_mouse_move_without_a_preceding_press_does_not_draft_but_reads_cursor).
+    viewport = RoiViewport()
+    viewport.show()
+    viewport.resize(100, 100)
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+    return viewport
+
+
+def test_set_draft_draws_and_emits_like_a_drawn_rect():
+    viewport = _one_to_one_viewport()
+    drafts = []
+    viewport.draft_changed.connect(drafts.append)
+
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+
+    assert drafts == [RoiRect(10, 10, 30, 30)]
+    assert viewport._current_rect_item is not None
+    assert viewport.commit_current_as("roi1") == RoiRect(10, 10, 30, 30)
+
+
+def test_clear_draft_removes_the_draft():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+    drafts = []
+    viewport.draft_changed.connect(drafts.append)
+
+    viewport.clear_draft()
+
+    assert drafts == [None]
+    assert viewport._current_rect_item is None
+    assert viewport.commit_current_as("roi1") is None
+
+
+def test_dragging_inside_the_draft_moves_it_and_keeps_its_size():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+
+    viewport.mousePressEvent(_press_event((20, 20)))
+    viewport.mouseMoveEvent(_move_event((35, 25)))
+    viewport.mouseReleaseEvent(_release_event((35, 25)))
+
+    rect = viewport._current_rect
+    assert (rect.width, rect.height) == (20, 20)
+    # Moved by the drag delta (15, 5); +/-1 px for view-to-scene rounding.
+    assert abs(rect.x0 - 25) <= 1 and abs(rect.y0 - 15) <= 1
+
+
+def test_moving_the_draft_emits_draft_moved():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+    moved = []
+    viewport.draft_moved.connect(lambda key, rect: moved.append((key, rect)))
+
+    viewport.mousePressEvent(_press_event((20, 20)))
+    viewport.mouseMoveEvent(_move_event((35, 25)))
+
+    assert moved == [("", viewport._current_rect)]
+
+
+def test_dragging_outside_the_draft_still_draws_a_new_one():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+    moved = []
+    viewport.draft_moved.connect(lambda key, rect: moved.append((key, rect)))
+
+    viewport.mousePressEvent(_press_event((60, 60)))
+    viewport.mouseMoveEvent(_move_event((80, 80)))
+    viewport.mouseReleaseEvent(_release_event((80, 80)))
+
+    assert viewport._current_rect.x0 >= 60 and viewport._current_rect.y0 >= 60
+    assert moved == []  # a new drawing is not a move
+
+
+def test_moving_the_draft_is_clamped_to_the_image():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+
+    viewport.mousePressEvent(_press_event((20, 20)))
+    viewport.mouseMoveEvent(_move_event((99, 99)))
+
+    assert viewport._current_rect == RoiRect(80, 80, 100, 100)
+
+
+def test_after_committing_a_draft_pressing_inside_grabs_the_committed_roi():
+    # After Set ROI1 the dashed draft is gone - pressing where it was grabs
+    # the now-committed ROI1 (movable until confirmed), not an invisible draft.
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(10, 10, 30, 30))
+    viewport.commit_current_as("roi1")
+
+    viewport.mousePressEvent(_press_event((20, 20)))
+
+    assert viewport._move_key == "roi1"
+    assert viewport._drag_start is None
+
+
+def test_set_roi_shows_committed_rois_for_both_slots():
+    viewport = _one_to_one_viewport()
+
+    viewport.set_roi("roi1", RoiRect(10, 10, 30, 30))
+    viewport.set_roi("roi2", RoiRect(50, 50, 70, 70))
+
+    assert viewport.roi("roi1") == RoiRect(10, 10, 30, 30)
+    assert viewport.roi("roi2") == RoiRect(50, 50, 70, 70)
+    assert set(viewport._roi_items) == {"roi1", "roi2"}
+
+
+def test_clear_rois_removes_them():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("roi1", RoiRect(10, 10, 30, 30))
+
+    viewport.clear_rois()
+
+    assert viewport.roi("roi1") is None
+    assert viewport._roi_items == {}
+
+
+def test_dragging_a_committed_roi_moves_it_and_emits_its_key():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("roi2", RoiRect(50, 50, 70, 70))
+    moved = []
+    viewport.draft_moved.connect(lambda key, rect: moved.append((key, rect)))
+
+    viewport.mousePressEvent(_press_event((60, 60)))
+    viewport.mouseMoveEvent(_move_event((70, 60)))
+    viewport.mouseReleaseEvent(_release_event((70, 60)))
+
+    rect = viewport.roi("roi2")
+    assert (rect.width, rect.height) == (20, 20)
+    assert abs(rect.x0 - 60) <= 1 and abs(rect.y0 - 50) <= 1
+    assert moved and moved[-1] == ("roi2", rect)
+
+
+def test_locked_viewport_neither_moves_rois_nor_draws():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("roi1", RoiRect(10, 10, 30, 30))
+    viewport.set_locked(True)
+    drafts = []
+    viewport.draft_changed.connect(drafts.append)
+
+    viewport.mousePressEvent(_press_event((20, 20)))  # inside ROI1
+    viewport.mouseMoveEvent(_move_event((40, 40)))
+    viewport.mousePressEvent(_press_event((60, 60)))  # empty area
+    viewport.mouseMoveEvent(_move_event((80, 80)))
+
+    assert viewport.roi("roi1") == RoiRect(10, 10, 30, 30)
+    assert drafts == []
+
+
+def test_unlocking_makes_rois_movable_again():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("roi1", RoiRect(10, 10, 30, 30))
+    viewport.set_locked(True)
+    viewport.set_locked(False)
+
+    viewport.mousePressEvent(_press_event((20, 20)))
+    viewport.mouseMoveEvent(_move_event((30, 20)))
+
+    assert viewport.roi("roi1") != RoiRect(10, 10, 30, 30)
+
+
+def test_new_image_clears_committed_rois():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("roi1", RoiRect(10, 10, 30, 30))
+
+    viewport.set_image(np.zeros((100, 100), dtype=np.float64))
+
+    assert viewport.roi("roi1") is None

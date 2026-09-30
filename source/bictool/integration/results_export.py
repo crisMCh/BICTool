@@ -18,12 +18,14 @@ through this (Qt-free, testable) module.
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from openpyxl import Workbook
 
 from bictool.domain.results.study_quality import SliceQualityResult
+from bictool.domain.results.study_summary import study_verdict, summarize_metrics
 
 _FEATURE_NAMES = ["mtf_area", "nps_homo", "nps_struct", "var_struct", "ratio_lf_hf", "slope_avg", "loc_max"]
 
@@ -85,4 +87,109 @@ def export_metrics_excel(result: SliceQualityResult, context: ExportContext, pat
         sheet.append(row)
     sheet.column_dimensions["A"].width = 26
     sheet.column_dimensions["B"].width = 16
+    workbook.save(str(path))
+
+
+# --- Whole-study export (global QA): summary + one row per slice ---
+
+# Study summary metric -> ASCII label (same wording as the per-slice export).
+_STUDY_METRIC_LABELS = {
+    "mtf_area": "MTF area (mm^-1)",
+    "nps_variance": "NPS variance (HU^2mm^2)",
+    "ps_mtf_ratio": "PS/MTF ratio (LF/HF)",
+    "contrast": "Contrast (HU)",
+    "decision_value": "Decision value",
+}
+_SLICE_TABLE_HEADER = ["Slice", *_STUDY_METRIC_LABELS.values(), "Verdict", *_FEATURE_NAMES]
+
+
+@dataclass
+class StudyExportContext:
+    """Non-identifying context for a whole-study export (see `ExportContext`).
+    `failed_slices` are 1-based slice numbers whose QA failed - listed, not
+    averaged.
+    """
+
+    series_label: str
+    slice_count: int
+    pixel_spacing_mm: float
+    acquisition_date: str | None
+    failed_slices: list[int]
+
+
+def _study_summary_rows(results: Mapping[int, SliceQualityResult], context: StudyExportContext) -> list[list[str]]:
+    verdict = study_verdict(results.values())
+    summary = summarize_metrics(results.values())
+    rows = [
+        ["Series", context.series_label],
+        ["Slices in series", str(context.slice_count)],
+        ["Slices analysed", str(len(results))],
+        ["Failed slices", ", ".join(str(number) for number in context.failed_slices)],
+        ["Pixel spacing (mm)", f"{context.pixel_spacing_mm:.4f}"],
+        ["Acquisition date", context.acquisition_date or ""],
+        [],
+        ["Study verdict", verdict.verdict if verdict else ""],
+        ["Acceptable slices", f"{verdict.acceptable} of {verdict.total}" if verdict else ""],
+        [],
+        ["Metric", "Mean", "SD", "Slices"],
+    ]
+    for name, label in _STUDY_METRIC_LABELS.items():
+        metric = summary.get(name)
+        if metric is not None:
+            rows.append([label, f"{metric.mean:.6g}", f"{metric.std:.6g}", str(metric.count)])
+    return rows
+
+
+def _study_slice_rows(results: Mapping[int, SliceQualityResult]) -> list[list[str]]:
+    """`_SLICE_TABLE_HEADER` then one row per slice (1-based numbers, in order)."""
+    rows = [list(_SLICE_TABLE_HEADER)]
+    for index in sorted(results):
+        result = results[index]
+        rows.append(
+            [
+                str(index + 1),
+                f"{result.mtf_area:.6g}",
+                f"{result.nps_roi2.var_nps:.6g}",
+                f"{result.ratio.ratio_lf_hf:.6g}",
+                f"{result.contrast_roi1:.6g}",
+                f"{result.decision_value:.6g}",
+                "Acceptable" if result.predicted_label == 1 else "Unacceptable",
+                *(f"{value:.6g}" for value in result.feature_vector),
+            ]
+        )
+    return rows
+
+
+def export_study_csv(
+    results: Mapping[int, SliceQualityResult],
+    context: StudyExportContext,
+    summary_path: str | Path,
+    slices_path: str | Path,
+) -> None:
+    """Two CSV files (CSV has no sheets): the study summary and the per-slice
+    table. `results` is keyed by 0-based slice index.
+    """
+    for path, rows in ((summary_path, _study_summary_rows(results, context)), (slices_path, _study_slice_rows(results))):
+        with open(path, "w", newline="", encoding="ascii", errors="replace") as f:
+            csv.writer(f).writerows(rows)
+
+
+def export_study_excel(results: Mapping[int, SliceQualityResult], context: StudyExportContext, path: str | Path) -> None:
+    """One workbook: "Study summary" and "Per slice" sheets. `results` is
+    keyed by 0-based slice index.
+    """
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = "Study summary"
+    for row in _study_summary_rows(results, context):
+        summary_sheet.append(row)
+    summary_sheet.column_dimensions["A"].width = 26
+    for column in "BCD":
+        summary_sheet.column_dimensions[column].width = 14
+
+    slices_sheet = workbook.create_sheet("Per slice")
+    for row in _study_slice_rows(results):
+        slices_sheet.append(row)
+    for (header_cell,) in slices_sheet.iter_cols(min_row=1, max_row=1):
+        slices_sheet.column_dimensions[header_cell.column_letter].width = max(len(str(header_cell.value)) + 2, 10)
     workbook.save(str(path))

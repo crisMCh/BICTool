@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -38,6 +39,7 @@ class Worker(QRunnable):
         pix_spc: float,
         act_cont_mask_x: int = 10,
         act_cont_mask_y: int = 10,
+        mtf_seeds: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         super().__init__()
         self._img_roi1 = img_roi1
@@ -45,16 +47,18 @@ class Worker(QRunnable):
         self._pix_spc = pix_spc
         self._act_cont_mask_x = act_cont_mask_x
         self._act_cont_mask_y = act_cont_mask_y
+        self._mtf_seeds = mtf_seeds
         self.signals = WorkerSignals()
 
     def run(self) -> None:
         logger.info(
-            "Worker starting: roi1 shape=%s, roi2 shape=%s, pix_spc=%s, act_cont_mask=(%s, %s)",
+            "Worker starting: roi1 shape=%s, roi2 shape=%s, pix_spc=%s, act_cont_mask=(%s, %s), mtf_seeds=%s",
             self._img_roi1.shape,
             self._img_roi2.shape,
             self._pix_spc,
             self._act_cont_mask_x,
             self._act_cont_mask_y,
+            self._mtf_seeds,
         )
         try:
             result = evaluate_slice_quality(
@@ -63,6 +67,7 @@ class Worker(QRunnable):
                 self._pix_spc,
                 self._act_cont_mask_x,
                 self._act_cont_mask_y,
+                mtf_seeds=self._mtf_seeds,
             )
         except Exception as exc:  # report to the GUI thread instead of crashing the pool thread
             logger.exception("Worker failed: evaluate_slice_quality raised %s", type(exc).__name__)

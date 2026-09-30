@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 import bictool.domain.segmentation as segmentation_pkg
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
+from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.views.main_window import MainWindowView
 
 _SLICE_SHAPE = (60, 60)
@@ -1287,3 +1288,276 @@ def test_segmentation_colors_of_consecutive_structures_are_well_separated_in_hue
         diff = abs(a - b) % 360
         circular_diff = min(diff, 360 - diff)
         assert circular_diff >= 45, f"consecutive structures only {circular_diff:.1f}° apart in hue"
+
+
+# ---- Auto ROIs (ROI Selection box) ----
+
+_AUTO_SHAPE = (120, 120)  # roomier than _SLICE_SHAPE: ROI1 and ROI2 side by side
+
+
+def _septum_result() -> SimpleNamespace:
+    """A septum line inside a roomy ventricle, parenchyma around it - at the
+    fake volume's 0.5 mm spacing: a 22 px ROI1 on the septum, a 22 px
+    ventricle ROI2 next to it.
+    """
+    masks = {name: np.zeros(_AUTO_SHAPE, dtype=bool) for name in _ALL_ANATOMY_RAW_NAMES}
+    masks["Brain Parenchyma"][5:115, 5:115] = True
+    masks["Ventricular System"][20:100, 20:100] = True
+    masks["Septum Pellucidum"][30:90, 59:61] = True
+    masks["Ventricular System"] &= ~masks["Septum Pellucidum"]
+    masks["Brain Parenchyma"] &= ~(masks["Ventricular System"] | masks["Septum Pellucidum"])
+    return SimpleNamespace(masks=masks)
+
+
+def _falx_result() -> SimpleNamespace:
+    """A straight midline falx line in parenchyma - ROI2 must come from white matter."""
+    masks = {name: np.zeros(_AUTO_SHAPE, dtype=bool) for name in _ALL_ANATOMY_RAW_NAMES}
+    masks["Frontal Lobe"][5:115, 5:115] = True
+    masks["Dural Folds"][15:105, 59:61] = True
+    masks["Frontal Lobe"] &= ~masks["Dural Folds"]
+    return SimpleNamespace(masks=masks)
+
+
+def _empty_result() -> SimpleNamespace:
+    return SimpleNamespace(masks={name: np.zeros(_AUTO_SHAPE, dtype=bool) for name in _ALL_ANATOMY_RAW_NAMES})
+
+
+def _window_with_segmented_slices(results_by_slice: dict, num_slices: int = 3) -> MainWindowView:
+    window = MainWindowView()
+    volume = _fake_dicom_volume(num_slices)
+    volume._slice_cache = {i: np.zeros(_AUTO_SHAPE, dtype=np.float64) for i in range(num_slices)}
+    window._maybe_auto_segment_volume = lambda: None
+    window._on_volume_loaded(volume)
+    window._segmentation_cache = dict(results_by_slice)
+    window._update_auto_rois_availability()
+    return window
+
+
+def _fake_all_white_matter_classifier(window: MainWindowView, monkeypatch) -> None:
+    """Every brain pixel is white matter - stands in for the real (slow) WM/GM methods."""
+
+    def classifier():
+        def classify(slice_hu, brain_mask):
+            masks = {"CSF": np.zeros_like(brain_mask), "White Matter": brain_mask.copy(), "Gray Matter": np.zeros_like(brain_mask)}
+            masks["Brain Mask"] = brain_mask
+            return SimpleNamespace(masks=masks)
+
+        return classify
+
+    monkeypatch.setattr(window, "_tissue_classifier", classifier)
+
+
+def _slot_rect(window: MainWindowView, key: str) -> RoiRect | None:
+    return window._roi_viewport.roi(key)
+
+
+def _touching(a: RoiRect, b: RoiRect) -> bool:
+    return a.x0 <= b.x1 and b.x0 <= a.x1 and a.y0 <= b.y1 and b.y0 <= a.y1
+
+
+def test_auto_rois_disabled_until_segmentation_exists():
+    window = MainWindowView()
+    _load_fake_volume(window)
+
+    assert window._auto_rois_cb.isEnabled() is False
+
+
+def test_auto_rois_place_roi1_and_a_ventricle_roi2_for_the_septum():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+
+    window._auto_rois_cb.setChecked(True)
+
+    roi1, roi2 = _slot_rect(window, "roi1"), _slot_rect(window, "roi2")
+    assert roi1 is not None and roi2 is not None
+    assert roi1.width == roi2.width == 22
+    assert not _touching(roi1, roi2)
+    assert window._auto_roi2_candidates[0].structure == "Ventricular System"
+    assert "ROI2 here: ventricle" in window._auto_rois_status_label.text()
+
+
+def test_auto_rois_are_computed_for_every_segmented_slice():
+    window = _window_with_segmented_slices({0: _septum_result(), 1: _empty_result(), 2: _septum_result()})
+
+    window._auto_rois_cb.setChecked(True)
+
+    assert set(window._auto_roi1_candidates) == {0, 2}
+    assert set(window._auto_roi2_candidates) == {0, 2}
+
+
+def test_auto_roi_drafts_follow_slice_navigation():
+    window = _window_with_segmented_slices({0: _septum_result(), 1: _empty_result(), 2: _septum_result()})
+    window._auto_rois_cb.setChecked(True)
+
+    window._show_slice(1)
+    assert _slot_rect(window, "roi1") is None and _slot_rect(window, "roi2") is None
+    assert "No septum pellucidum on this slice" in window._auto_rois_status_label.text()
+    assert "1, 3" in window._auto_rois_status_label.text()  # 1-based slice numbers
+
+    window._show_slice(2)
+    assert _slot_rect(window, "roi1") is not None and _slot_rect(window, "roi2") is not None
+
+
+def test_auto_rois_fill_the_roi_table_without_set_clicks():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+
+    window._auto_rois_cb.setChecked(True)
+
+    roi1, roi2 = _slot_rect(window, "roi1"), _slot_rect(window, "roi2")
+    assert window._roi_rects == {"roi1": roi1, "roi2": roi2}
+    assert window._roi_position_items["roi1"].text() == f"{roi1.x0}–{roi1.x1}, {roi1.y0}–{roi1.y1}"
+    assert window._roi_size_items["roi2"].text() == f"{roi2.width}×{roi2.height} px"
+    assert window._confirm_rois_cb.isEnabled() is True  # still needs the user's confirmation
+
+
+def test_a_hand_set_roi_overrides_the_automatic_one_on_that_slice():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+    auto_roi2 = _slot_rect(window, "roi2")
+    hand_drawn = RoiRect(5, 5, 27, 27)
+
+    window._roi_viewport.set_draft(hand_drawn)
+    window._set_roi1_btn.click()
+
+    assert window._roi_rects == {"roi1": hand_drawn, "roi2": auto_roi2}
+
+
+def test_confirmed_auto_rois_can_not_be_moved_or_changed():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+
+    window._confirm_rois_cb.setChecked(True)
+
+    assert window._roi_viewport._locked is True
+    assert window._auto_rois_cb.isEnabled() is False
+    assert window._auto_roi1_dural_rb.isEnabled() is False
+
+    window._confirm_rois_cb.setChecked(False)
+
+    assert window._roi_viewport._locked is False
+    assert window._auto_rois_cb.isEnabled() is True
+
+
+def test_moving_roi1_re_places_roi2_around_it():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+    roi1 = _slot_rect(window, "roi1")
+    moved = RoiRect(roi1.x0, roi1.y0 + 20, roi1.x1, roi1.y1 + 20)
+
+    window._roi_viewport.set_roi("roi1", moved)
+    window._roi_viewport.draft_moved.emit("roi1", moved)
+
+    assert _slot_rect(window, "roi1") == moved
+    assert not _touching(moved, _slot_rect(window, "roi2"))
+
+
+def test_a_hand_moved_roi2_is_kept_when_roi1_moves():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+    roi2 = _slot_rect(window, "roi2")
+    moved_roi2 = RoiRect(roi2.x0 + 2, roi2.y0, roi2.x1 + 2, roi2.y1)
+    # What a real drag does: the viewport moves its draft, then reports it.
+    window._roi_viewport.set_roi("roi2", moved_roi2)
+    window._roi_viewport.draft_moved.emit("roi2", moved_roi2)
+
+    roi1 = _slot_rect(window, "roi1")
+    moved_roi1 = RoiRect(roi1.x0, roi1.y0 + 4, roi1.x1, roi1.y1 + 4)
+    window._roi_viewport.set_roi("roi1", moved_roi1)
+    window._roi_viewport.draft_moved.emit("roi1", moved_roi1)
+
+    assert _slot_rect(window, "roi2") == moved_roi2
+    assert window._auto_roi2_candidates[0].col0 == moved_roi2.x0
+
+
+def test_moved_auto_rois_are_remembered_per_slice():
+    window = _window_with_segmented_slices({0: _septum_result(), 1: _septum_result()}, num_slices=2)
+    window._auto_rois_cb.setChecked(True)
+    roi2 = _slot_rect(window, "roi2")
+    moved_roi2 = RoiRect(roi2.x0 + 2, roi2.y0, roi2.x1 + 2, roi2.y1)
+    window._roi_viewport.draft_moved.emit("roi2", moved_roi2)
+
+    window._show_slice(1)
+    window._show_slice(0)
+
+    assert _slot_rect(window, "roi2") == moved_roi2
+
+
+def test_white_matter_roi2_waits_for_the_background_wm_gm_classification(monkeypatch):
+    window = _window_with_segmented_slices({0: _falx_result()}, num_slices=1)
+    _fake_all_white_matter_classifier(window, monkeypatch)
+    window._auto_roi1_dural_rb.setChecked(True)
+
+    window._auto_rois_cb.setChecked(True)
+    assert _slot_rect(window, "roi1") is not None
+    _pump_scheduler(window)
+
+    roi2 = window._auto_roi2_candidates[0]
+    assert roi2.structure == "White Matter"
+    assert _slot_rect(window, "roi2") is not None
+    assert not _touching(_slot_rect(window, "roi1"), _slot_rect(window, "roi2"))
+
+
+def test_changing_the_wm_gm_method_re_places_white_matter_roi2(monkeypatch):
+    window = _window_with_segmented_slices({0: _falx_result()}, num_slices=1)
+    _fake_all_white_matter_classifier(window, monkeypatch)
+    window._auto_roi1_dural_rb.setChecked(True)
+    window._auto_rois_cb.setChecked(True)
+    _pump_scheduler(window)
+    assert 0 in window._auto_roi2_candidates
+
+    window._on_brain_tissue_method_selected("HU Thresholding")  # clears the WM/GM cache
+    assert 0 not in window._auto_roi2_candidates  # pending again...
+    _pump_scheduler(window)
+
+    assert window._auto_roi2_candidates[0].structure == "White Matter"  # ...and re-placed
+
+
+def test_switching_structure_recomputes_both_rois():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+    assert 0 in window._auto_roi1_candidates
+
+    window._auto_roi1_dural_rb.setChecked(True)  # no dural folds in the septum result
+
+    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}
+    assert _slot_rect(window, "roi1") is None
+
+
+def test_unchecking_auto_rois_clears_the_drafts():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+
+    window._auto_rois_cb.setChecked(False)
+
+    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}
+    assert _slot_rect(window, "roi1") is None and _slot_rect(window, "roi2") is None
+    assert window._set_roi1_btn.isEnabled() is False
+
+
+def test_segment_slice_enables_auto_rois(monkeypatch):
+    monkeypatch.setattr(
+        main_window_module, "load_config", lambda: {"segmentation": {"anatomy_weights_path": "/fake/weights.hdf5"}}
+    )
+    _install_fake_domain_module(monkeypatch, "head_ct_unet")
+    _install_fake_worker_module(
+        monkeypatch, "bictool.application.segmentation_worker", "SegmentationWorker", result=_fake_segmentation_result()
+    )
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _install_passthrough_nifti_volume(window)
+    assert window._auto_rois_cb.isEnabled() is False
+
+    window._segment_slice_btn.click()
+    _pump_scheduler(window)
+
+    assert window._auto_rois_cb.isEnabled() is True
+
+
+def test_close_study_resets_auto_rois():
+    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+    window._auto_rois_cb.setChecked(True)
+
+    window._on_close_study_clicked()
+
+    assert window._auto_rois_cb.isChecked() is False
+    assert window._auto_rois_cb.isEnabled() is False
+    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}

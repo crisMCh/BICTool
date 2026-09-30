@@ -76,3 +76,16 @@ def test_run_passes_through_all_arguments(monkeypatch):
     assert args[2] == PIX_SPC
     assert args[3] == 5
     assert args[4] == 7
+
+
+def test_run_passes_mtf_seeds_through(monkeypatch):
+    received_kwargs = []
+    monkeypatch.setattr(
+        worker_module,
+        "evaluate_slice_quality",
+        lambda *a, **k: received_kwargs.append(k) or object(),
+    )
+
+    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, mtf_seeds=[(6, 7), (3, 3)]).run()
+
+    assert received_kwargs == [{"mtf_seeds": [(6, 7), (3, 3)]}]

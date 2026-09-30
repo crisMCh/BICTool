@@ -1,5 +1,6 @@
-"""Export dialog (FR-07): lets the user pick which pieces of the currently
-computed result to write out, and where.
+"""Export dialog (FR-07): lets the user pick what to export - the current
+slice's result or the whole study (averages + every slice) - which pieces,
+and where.
 """
 
 from __future__ import annotations
@@ -7,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -15,8 +17,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
 )
+
+SCOPE_SLICE = "slice"
+SCOPE_STUDY = "study"
 
 # Same palette as `main_window.STYLESHEET` - duplicated rather than imported
 # to avoid a circular import (main_window constructs this dialog), matching
@@ -33,7 +39,7 @@ _STYLESHEET = f"""
 QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
 QLabel {{ color: {TEXT}; }}
 QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: 11px; }}
-QCheckBox {{ color: {TEXT}; padding: 2px 0; }}
+QCheckBox, QRadioButton {{ color: {TEXT}; padding: 2px 0; }}
 QLineEdit {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 5px 8px; color: {TEXT};
@@ -61,13 +67,33 @@ class ExportDialog(QDialog):
     result "what do you want" prompt).
     """
 
-    def __init__(self, *, default_dir: str = "", parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        default_dir: str = "",
+        study_available: bool = False,
+        default_scope: str = SCOPE_SLICE,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export Results")
         self.setStyleSheet(_STYLESHEET)
         self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)
+
+        # Scope: the shown slice, or the whole study (study averages plus one
+        # row per slice). Charts are per slice, so JPG is slice-only.
+        layout.addWidget(QLabel("Scope"))
+        self._slice_rb = QRadioButton("Current slice")
+        self._study_rb = QRadioButton("Whole study — averages + every slice")
+        self._study_rb.setEnabled(study_available)
+        scope_group = QButtonGroup(self)
+        for rb in (self._slice_rb, self._study_rb):
+            scope_group.addButton(rb)
+            layout.addWidget(rb)
+        (self._study_rb if study_available and default_scope == SCOPE_STUDY else self._slice_rb).setChecked(True)
+        layout.addSpacing(6)
 
         layout.addWidget(QLabel("What to export"))
         self._excel_cb = QCheckBox("Metrics — Excel workbook (.xlsx)")
@@ -77,6 +103,8 @@ class ExportDialog(QDialog):
         for cb in (self._excel_cb, self._csv_cb, self._jpg_cb):
             cb.toggled.connect(self._update_accept_enabled)
             layout.addWidget(cb)
+        self._study_rb.toggled.connect(self._on_scope_toggled)
+        self._on_scope_toggled(self._study_rb.isChecked())
 
         layout.addSpacing(6)
         layout.addWidget(QLabel("Destination folder"))
@@ -108,6 +136,12 @@ class ExportDialog(QDialog):
         if directory:
             self._dest_edit.setText(directory)
 
+    def _on_scope_toggled(self, study: bool) -> None:
+        if study:
+            self._jpg_cb.setChecked(False)
+        self._jpg_cb.setEnabled(not study)
+        self._jpg_cb.setToolTip("Charts are per slice - choose Current slice" if study else "")
+
     def _update_accept_enabled(self) -> None:
         any_selected = self._excel_cb.isChecked() or self._csv_cb.isChecked() or self._jpg_cb.isChecked()
         self._accept_btn.setEnabled(any_selected and bool(self._dest_edit.text().strip()))
@@ -121,6 +155,9 @@ class ExportDialog(QDialog):
         if self._jpg_cb.isChecked():
             items.add("jpg")
         return items
+
+    def scope(self) -> str:
+        return SCOPE_STUDY if self._study_rb.isChecked() else SCOPE_SLICE
 
     def destination(self) -> Path:
         return Path(self._dest_edit.text().strip())

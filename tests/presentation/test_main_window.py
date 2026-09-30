@@ -299,6 +299,30 @@ def test_trace_panel_receives_log_messages():
     assert "a distinctive test message" in window._trace_log.toPlainText()
 
 
+def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
+    # calc_mtf's active contour must start inside the edge structure - a
+    # manual ROI1 (no segmentation) is seeded on its brightest central line.
+    captured = {}
+
+    def fake_evaluate(img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, mtf_seeds=None):
+        captured["seeds"] = mtf_seeds
+        return _fake_result()
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", fake_evaluate)
+    window = MainWindowView()
+    volume = _load_fake_volume(window)
+    volume._slice_cache[0][:, 12] = 100.0  # a vertical "falx" at column 12
+    _set_roi(window, "roi1", RoiRect(0, 0, 20, 20))
+    _set_roi(window, "roi2", RoiRect(20, 20, 40, 40))
+    window._confirm_rois_cb.setChecked(True)
+
+    window._run_all_btn.click()
+    window._scheduler.pool.waitForDone(5000)
+
+    first_x, _first_y = captured["seeds"][0]
+    assert first_x == 12
+
+
 def test_roi_selection_and_run_all_are_logged_to_the_trace_panel(monkeypatch):
     monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
 
@@ -619,7 +643,10 @@ def test_run_all_surfaces_worker_error(monkeypatch):
     assert window._results_tab_btn.isEnabled() is False
 
 
-def test_slice_slider_navigates_and_resets_roi_confirmation():
+def test_slice_slider_navigates_and_keeps_each_slices_rois_and_the_global_confirmation():
+    # ROIs are per slice and one "Confirmed" covers every slice - navigating
+    # shows the new slice's (here: no) ROIs without un-confirming, and
+    # coming back shows the first slice's ROIs again.
     window = MainWindowView()
     _load_fake_volume(window, num_slices=5)
 
@@ -631,10 +658,27 @@ def test_slice_slider_navigates_and_resets_roi_confirmation():
 
     assert window._current_slice_index == 3
     assert window._slice_label.text() == "Slice 4 / 5"
-    assert window._confirm_rois_cb.isChecked() is False
+    assert window._confirm_rois_cb.isChecked() is True
     assert window._roi_position_items["roi1"].text() == "not set"
     assert window._roi_position_items["roi2"].text() == "not set"
-    assert window._confirm_rois_cb.isEnabled() is False
+
+    window._slice_slider.setValue(0)
+
+    assert window._roi_rects == {"roi1": RoiRect(0, 0, 10, 10), "roi2": RoiRect(20, 20, 30, 30)}
+
+
+def test_confirming_locks_the_rois_and_unconfirming_unlocks_them():
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _set_roi(window, "roi1", RoiRect(0, 0, 10, 10))
+    _set_roi(window, "roi2", RoiRect(20, 20, 30, 30))
+
+    window._confirm_rois_cb.setChecked(True)
+    assert window._roi_viewport._locked is True
+    assert window._set_roi1_btn.isEnabled() is False
+
+    window._confirm_rois_cb.setChecked(False)
+    assert window._roi_viewport._locked is False
 
 
 def _complete_a_run(window: MainWindowView, monkeypatch) -> None:
@@ -779,3 +823,169 @@ def test_viewport_wheel_scroll_moves_slice_slider():
     for _ in range(10):
         window._on_viewport_slice_scroll(-1)
     assert window._slice_slider.value() == 0
+
+
+# ---- Run All = batch QA over every slice with both ROIs ----
+
+
+def _set_rois_on_slices(window: MainWindowView, slices: list[int]) -> None:
+    for index in slices:
+        window._slice_slider.setValue(index)
+        _set_roi(window, "roi1", RoiRect(0, 0, 10, 10))
+        _set_roi(window, "roi2", RoiRect(20, 20, 40, 40))
+
+
+def _run_batch_to_completion(window: MainWindowView) -> None:
+    window._confirm_rois_cb.setChecked(True)
+    window._run_all_btn.click()
+    for _ in range(200):
+        window._scheduler.pool.waitForDone(100)
+        QApplication.processEvents()
+        if window._qa_jobs is None:
+            break
+
+
+def _result_with_label(label: int) -> SimpleNamespace:
+    result = _fake_result()
+    result.predicted_label = label
+    return result
+
+
+def test_run_all_computes_qa_for_every_slice_with_both_rois(monkeypatch):
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=5)
+    _set_rois_on_slices(window, [1, 3, 4])
+    window._slice_slider.setValue(2)  # slice without ROIs is skipped
+
+    _run_batch_to_completion(window)
+
+    assert set(window._qa_results) == {1, 3, 4}
+    assert window._results_slices == [1, 3, 4]
+    assert window._view_stack.currentIndex() == 1
+    assert window._qa_progress_label.text() == "QA done: 3 slice(s)"
+    assert window._study_table.rowCount() == 3
+
+
+def test_results_page_scrolls_through_slices_and_follows_the_viewer(monkeypatch):
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=5)
+    _set_rois_on_slices(window, [1, 3])
+    _run_batch_to_completion(window)
+
+    window._results_slider.setValue(0)
+    assert window._current_slice_index == 1
+    assert window._results_slice_label.text().startswith("Slice 2 / 5")
+
+    window._step_results_slice(1)
+    assert window._current_slice_index == 3
+    assert window._last_export_context.slice_number == 4  # export covers the shown slice
+
+
+def test_study_verdict_is_the_majority_of_slice_verdicts(monkeypatch):
+    labels = iter([1, 0, 1])
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _result_with_label(next(labels)))
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=3)
+    _set_rois_on_slices(window, [0, 1, 2])
+
+    _run_batch_to_completion(window)
+
+    assert window._study_verdict_label.text() == "Study: Acceptable — 2 of 3 slice(s) acceptable"
+    assert window._study_table.item(1, 5).text() == "Unacceptable"
+
+
+def test_a_failing_slice_does_not_stop_the_batch(monkeypatch):
+    calls = iter([None, ValueError("no edge found"), None])
+
+    def evaluate(*args, **kwargs):
+        outcome = next(calls)
+        if outcome is not None:
+            raise outcome
+        return _fake_result()
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=3)
+    _set_rois_on_slices(window, [0, 1, 2])
+
+    _run_batch_to_completion(window)
+
+    assert set(window._qa_results) == {0, 2}
+    assert window._qa_errors == {1: "no edge found"}
+    assert window._qa_progress_label.text() == "QA done: 3 slice(s), 1 failed"
+    # Failed slices are left out of the results, only counted.
+    assert window._results_slices == [0, 2]
+    assert window._study_table.rowCount() == 2
+    assert [window._study_table.item(row, 0).text() for row in range(2)] == ["1", "3"]
+    assert window._study_verdict_label.text().endswith("(1 failed, not shown)")
+
+
+def test_cancel_stops_the_batch_after_the_running_slice(monkeypatch):
+    window = MainWindowView()
+
+    def evaluate(*args, **kwargs):
+        window._qa_cancel_requested = True  # as if Cancel was clicked while this slice ran
+        return _fake_result()
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
+    _load_fake_volume(window, num_slices=3)
+    _set_rois_on_slices(window, [0, 1, 2])
+
+    _run_batch_to_completion(window)
+
+    assert set(window._qa_results) == {0}
+    assert window._qa_progress_label.text() == "QA cancelled: 1/3 slice(s)"
+    assert window._cancel_run_btn.isHidden()
+
+
+def test_run_metrics_box_shows_study_averages_on_the_summary_tab_and_slice_values_per_slice(monkeypatch):
+    areas = iter([0.2, 0.4])
+
+    def evaluate(*args, **kwargs):
+        result = _fake_result()
+        result.mtf_area = next(areas)
+        return result
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=2)
+    _set_rois_on_slices(window, [0, 1])
+    _run_batch_to_completion(window)
+    window._results_slider.setValue(0)  # per-slice tab on slice 1
+
+    assert window._metric_value_items["mtf"].text() == "0.200 mm⁻¹"
+
+    window._results_tabs.setCurrentIndex(1)  # Study summary
+    assert window._metric_value_items["mtf"].text() == "0.300 mm⁻¹"
+    assert window._metric_status_items["mtf"].text() == "mean"
+    assert "2 slice(s)" in window._metric_status_items["mtf"].toolTip()
+
+    window._results_tabs.setCurrentIndex(0)  # back to Per slice
+    assert window._metric_value_items["mtf"].text() == "0.200 mm⁻¹"
+
+    window._results_tabs.setCurrentIndex(1)
+    window._show_view_page(0)  # the image viewer always shows its slice's values
+    assert window._metric_value_items["mtf"].text() == "0.200 mm⁻¹"
+
+
+def test_study_export_writes_the_summary_and_per_slice_files(monkeypatch, tmp_path):
+    import openpyxl
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=3)
+    _set_rois_on_slices(window, [0, 2])
+    _run_batch_to_completion(window)
+
+    window._perform_study_export({"excel", "csv"}, tmp_path)
+
+    written = sorted(path.name for path in tmp_path.iterdir())
+    assert len(written) == 3
+    assert any(name.endswith("_study_metrics.xlsx") for name in written)
+    assert any(name.endswith("_study_summary.csv") for name in written)
+    assert any(name.endswith("_study_slices.csv") for name in written)
+    workbook = openpyxl.load_workbook(next(tmp_path.glob("*_study_metrics.xlsx")))
+    assert len(list(workbook["Per slice"].iter_rows())) == 3  # header + slices 1 and 3

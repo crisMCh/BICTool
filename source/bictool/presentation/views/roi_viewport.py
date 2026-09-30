@@ -90,6 +90,10 @@ class RoiViewport(QGraphicsView):
     """
 
     draft_changed = Signal(object)  # RoiRect | None - the in-progress/last-drawn, not-yet-necessarily-saved rectangle
+    # (key, RoiRect) - something was dragged to a new position: key "" is the
+    # hand-drawn draft (which also emits draft_changed), "roi1"/"roi2" a
+    # committed ROI (only while not locked - see `set_locked`).
+    draft_moved = Signal(str, object)
     cursor_moved = Signal(object)  # (x: int, y: int, value_hu: float) | None - None when off-image or cursor leaves
     slice_scroll = Signal(int)  # +1 (next slice) or -1 (previous slice)
     zoom_changed = Signal(float)  # new zoom percentage - see `current_zoom_percent`
@@ -133,6 +137,16 @@ class RoiViewport(QGraphicsView):
         self._overlay_display_names: dict[str, str] = {}
         self._image_size = (0, 0)  # (width, height)
         self._drag_start: QPointF | None = None
+        # Set while a left-drag that started inside the visible draft is
+        # moving it (see `mousePressEvent`), instead of drawing a new one.
+        self._move_start: QPointF | None = None
+        self._move_origin: RoiRect | None = None
+        self._move_key = ""  # "" = the hand-drawn draft, else the committed ROI being moved
+        # Committed ROIs ("roi1"/"roi2") shown in their slot's solid color -
+        # draggable until `set_locked(True)` (the "Confirmed" state), which
+        # also stops new rectangles from being drawn.
+        self._committed_rois: dict[str, RoiRect] = {}
+        self._locked = False
         self._current_rect: RoiRect | None = None
         self._current_rect_item: QGraphicsRectItem | None = None
         self._pan_last_pos = None
@@ -199,6 +213,9 @@ class RoiViewport(QGraphicsView):
             self._scene.removeItem(self._current_rect_item)
             self._current_rect_item = None
         self._current_rect = None
+        self._move_start = None
+        self._move_origin = None
+        self._committed_rois = {}
         self.draft_changed.emit(None)
         self.clear_all_overlays()  # overlays (e.g. segmentation masks) are per-slice too
 
@@ -230,6 +247,9 @@ class RoiViewport(QGraphicsView):
             self._scene.removeItem(self._current_rect_item)
             self._current_rect_item = None
         self._current_rect = None
+        self._move_start = None
+        self._move_origin = None
+        self._committed_rois = {}
         self.draft_changed.emit(None)
         self.clear_all_overlays()
         self._current_pixels_hu = None
@@ -268,6 +288,47 @@ class RoiViewport(QGraphicsView):
         image = QImage(img8.tobytes(), width, height, width, QImage.Format.Format_Grayscale8)
         return QPixmap.fromImage(image)
 
+    def set_draft(self, rect: RoiRect) -> None:
+        """Shows `rect` as the draft, exactly as if it had just been drawn -
+        used to place an automatically selected ROI that the user can then
+        move (drag inside it) and accept with Set ROI1/ROI2.
+        """
+        self._current_rect = rect
+        self._draw_current_rect(rect)
+        self.draft_changed.emit(rect)
+
+    def clear_draft(self) -> None:
+        """Removes the draft (data and on-screen preview) without touching committed ROIs."""
+        if self._current_rect_item is not None:
+            self._scene.removeItem(self._current_rect_item)
+            self._current_rect_item = None
+        self._current_rect = None
+        self.draft_changed.emit(None)
+
+    def set_roi(self, roi_key: str, rect: RoiRect) -> None:
+        """Shows `rect` as committed ROI `roi_key` ("roi1"/"roi2") in that
+        slot's solid color, replacing whatever was shown there - e.g. an
+        automatically selected ROI, or a slice's saved ROI after navigating.
+        """
+        self._draw_roi(roi_key, rect)
+
+    def roi(self, roi_key: str) -> RoiRect | None:
+        return self._committed_rois.get(roi_key)
+
+    def clear_rois(self) -> None:
+        for item in self._roi_items.values():
+            self._scene.removeItem(item)
+        self._roi_items = {}
+        self._committed_rois = {}
+
+    def set_locked(self, locked: bool) -> None:
+        """Locked (the ROIs have been confirmed): left-drags neither move ROIs
+        nor draw new rectangles.
+        """
+        self._locked = locked
+        self._drag_start = None
+        self._move_start = None
+
     def commit_current_as(self, roi_key: str) -> RoiRect | None:
         """Saves the current draft rectangle (the last one drawn - see
         `draft_changed`) as `roi_key` ("roi1" or "roi2"), drawing it in that
@@ -301,9 +362,41 @@ class RoiViewport(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton and self._pixmap_item is not None:
-            self._drag_start = self.mapToScene(event.pos())
+        if event.button() == Qt.MouseButton.LeftButton and self._pixmap_item is not None and not self._locked:
+            scene_pos = self.mapToScene(event.pos())
+            grabbed = self._draft_under(scene_pos)
+            if grabbed is not None:
+                # Grabbing a draft or ROI moves it (e.g. to adjust an
+                # auto-selected ROI); pressing anywhere else draws a new one.
+                self._move_key, self._move_origin = grabbed
+                self._move_start = scene_pos
+            else:
+                self._drag_start = scene_pos
         super().mousePressEvent(event)
+
+    def _draft_under(self, scene_pos) -> tuple[str, RoiRect] | None:
+        """(key, rect) of the visible draft or committed ROI under `scene_pos` -
+        the hand-drawn draft first (drawn most recently, on top), then ROI1, ROI2.
+        """
+        drafts = []
+        if self._current_rect is not None and self._current_rect_item is not None:
+            drafts.append(("", self._current_rect))
+        drafts.extend(sorted(self._committed_rois.items()))
+        for key, rect in drafts:
+            if rect.x0 <= scene_pos.x() < rect.x1 and rect.y0 <= scene_pos.y() < rect.y1:
+                return key, rect
+        return None
+
+    def _moved_draft(self, view_pos) -> RoiRect:
+        """`_move_origin` translated by the drag so far, clamped inside the image (size unchanged)."""
+        pos = self.mapToScene(view_pos)
+        origin = self._move_origin
+        width, height = self._image_size
+        dx = int(round(pos.x() - self._move_start.x()))
+        dy = int(round(pos.y() - self._move_start.y()))
+        x0 = max(0, min(origin.x0 + dx, width - origin.width))
+        y0 = max(0, min(origin.y0 + dy, height - origin.height))
+        return RoiRect(x0, y0, x0 + origin.width, y0 + origin.height)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         """Three mutually exclusive behaviors, in priority order: an active
@@ -321,7 +414,18 @@ class RoiViewport(QGraphicsView):
             v_bar.setValue(v_bar.value() - delta.y())
             event.accept()
             return
-        if self._drag_start is not None:
+        if self._move_start is not None:
+            rect = self._moved_draft(event.pos())
+            if self._move_key:
+                if rect != self._committed_rois.get(self._move_key):
+                    self.set_roi(self._move_key, rect)
+                    self.draft_moved.emit(self._move_key, rect)
+            elif rect != self._current_rect:
+                self._current_rect = rect
+                self._draw_current_rect(rect)
+                self.draft_changed.emit(rect)
+                self.draft_moved.emit("", rect)
+        elif self._drag_start is not None:
             rect = self._rect_from_drag_endpoint(event.pos())
             if rect is not None:
                 self._current_rect = rect
@@ -336,6 +440,11 @@ class RoiViewport(QGraphicsView):
             self._pan_last_pos = None
             self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._move_start is not None:
+            self._move_start = None
+            self._move_origin = None
+            super().mouseReleaseEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
             rect = self._rect_from_drag_endpoint(event.pos())
@@ -440,18 +549,22 @@ class RoiViewport(QGraphicsView):
         item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, QPen(color, 1.5), QBrush(fill))
         item.setZValue(2)  # above overlays (z=1) and the base image (z=0)
         self._roi_items[key] = item
+        self._committed_rois[key] = rect
 
     def _draw_current_rect(self, rect: RoiRect) -> None:
         if self._current_rect_item is not None:
             self._scene.removeItem(self._current_rect_item)
-        color = QColor(_DRAFT_COLOR)
+        self._current_rect_item = self._add_dashed_rect(rect, _DRAFT_COLOR)
+
+    def _add_dashed_rect(self, rect: RoiRect, color_hex: str) -> QGraphicsRectItem:
+        color = QColor(color_hex)
         fill = QColor(color)
         fill.setAlpha(35)
         pen = QPen(color, 1.5)
         pen.setStyle(Qt.PenStyle.DashLine)
         item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, pen, QBrush(fill))
         item.setZValue(2)
-        self._current_rect_item = item
+        return item
 
     def set_overlay(
         self, key: str, mask: np.ndarray, color: str = "#5fbf83", opacity: float = 0.6, label: str | None = None
