@@ -43,7 +43,7 @@ class VolumeSegmentationWorkerSignals(QObject):
 class VolumeSegmentationWorker(QRunnable):
     """Runs `segment_slice` for each index in `slice_indices` on a
     `QThreadPool` thread. `model` must already have weights loaded (see
-    `head_ct_unet.load_weights`) - loading isn't this worker's job, matching
+    `integration.model_files.load_anatomy_weights`) - loading isn't this worker's job, matching
     `SegmentationWorker`'s own contract.
 
     Call `cancel()` from the GUI thread to request a stop before the next

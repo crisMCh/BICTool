@@ -34,10 +34,28 @@ import numpy as np
 from bictool.domain.metrics.contrast import calc_contrast
 from bictool.domain.metrics.mtf_seed import calc_mtf_first_viable_seed
 from bictool.domain.metrics.nps import NpsResult, nps_complete_roi
+from bictool.domain.metrics.physical_spectra import (
+    mtf_area_in_band,
+    noise_texture,
+    physical_mtf,
+    power_spectrum,
+    ratio_ps_mtf_in_band,
+)
 from bictool.domain.metrics.ps_mtf_ratio import NpsMtfRatioResult, ratio_nps_mtf
 from bictool.domain.results.classification import classify_quality
 
 logger = logging.getLogger(__name__)
+
+# QA recipes. "physical" (default): MTF/PS/NPS on true spatial-frequency axes
+# and the PS/MTF ratio on one fixed band, so features mean the same on every
+# scanner (`physical_spectra`, docs/qa_method/physical_qa_recipe.md).
+# "octave": the faithful port of the original Octave code (Passand 2022) -
+# kept to reproduce Octave-era numbers; its frequency axes are mis-scaled and
+# its ratio range depends on the pixel spacing.
+RECIPE_PHYSICAL = "physical"
+RECIPE_OCTAVE = "octave"
+RECIPES = (RECIPE_PHYSICAL, RECIPE_OCTAVE)
+DEFAULT_RECIPE = RECIPE_PHYSICAL
 
 # `calc_mtf` edge points whose MTF isn't finite (e.g. at the rounded tip of a
 # line's contour, where the "across the edge" profile runs along the line and
@@ -73,9 +91,26 @@ class SliceQualityResult:
 
     # The `calc_mtf` seed `(x, y)` that produced the MTF (see `mtf_seed`).
     mtf_seed: tuple[int, int] | None = None
+    # Which QA recipe produced the numbers (see RECIPES).
+    recipe: str = RECIPE_OCTAVE
+    # Noise texture of the homogeneous ROI2 (TG-233 average / peak NPS
+    # frequency [1/mm], `physical_spectra.noise_texture`) - physical recipe
+    # only, NaN otherwise. Candidate classifier features.
+    nps_f_av: float = float("nan")
+    nps_f_peak: float = float("nan")
 
 
-def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_cont_mask_y=10, *, mtf_seeds=None):
+def evaluate_slice_quality(
+    img_roi1,
+    img_roi2,
+    pix_spc,
+    act_cont_mask_x=10,
+    act_cont_mask_y=10,
+    *,
+    svm_model,
+    mtf_seeds=None,
+    recipe=DEFAULT_RECIPE,
+):
     """Port of `funcImageQualityOctave.m`'s computational recipe (not the
     script itself - see the module docstring).
 
@@ -93,6 +128,7 @@ def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_
         `calc_mtf` finds usable edges (see
         `bictool.domain.metrics.mtf_seed.mtf_seed_candidates`); replaces
         `act_cont_mask_x/y` when given.
+    recipe : "physical" (default) or "octave" - see RECIPES.
 
     Returns
     -------
@@ -109,7 +145,12 @@ def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_
 
     logger.debug("Step 1/6: calc_mtf(img_roi1, ...)")
     seeds = list(mtf_seeds) if mtf_seeds else [(act_cont_mask_x, act_cont_mask_y)]
+    if recipe not in RECIPES:
+        raise ValueError(f"Unknown QA recipe {recipe!r} - expected one of {RECIPES}")
     xaxis, mtf, mtf_area_per_edge, mtf_seed = calc_mtf_first_viable_seed(img_roi1, seeds, pix_spc)
+    if recipe == RECIPE_PHYSICAL:
+        xaxis, mtf = physical_mtf(mtf, pix_spc)
+        mtf_area_per_edge = mtf_area_in_band(xaxis, mtf)
     mtf, mtf_area_per_edge = _drop_invalid_mtf_edges(mtf, mtf_area_per_edge)
     mtf_area = float(np.mean(mtf_area_per_edge))
     logger.debug(
@@ -117,21 +158,27 @@ def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_
     )
 
     logger.debug("Step 2/6: nps_complete_roi(img_roi1, ...) [structured ROI]")
-    nps_roi1 = nps_complete_roi(img_roi1, pix_spc)
+    spectrum = power_spectrum if recipe == RECIPE_PHYSICAL else nps_complete_roi
+    nps_roi1 = spectrum(img_roi1, pix_spc)
     logger.debug("Step 2/6 done: nps_roi1.var_nps=%s, var_measured=%s", nps_roi1.var_nps, nps_roi1.var_measured)
 
     logger.debug("Step 3/6: nps_complete_roi(img_roi2, ...) [homogeneous ROI]")
-    nps_roi2 = nps_complete_roi(img_roi2, pix_spc)
+    nps_roi2 = spectrum(img_roi2, pix_spc)
     logger.debug("Step 3/6 done: nps_roi2.var_nps=%s", nps_roi2.var_nps)
 
     logger.debug("Step 4/6: ratio_nps_mtf(nps_roi1.f_avg, nps_roi1.nps_measured_radagv, xaxis, mtf)")
-    ratio = ratio_nps_mtf(nps_roi1.f_avg, nps_roi1.nps_measured_radagv, xaxis, mtf)
+    ratio_features = ratio_ps_mtf_in_band if recipe == RECIPE_PHYSICAL else ratio_nps_mtf
+    ratio = ratio_features(nps_roi1.f_avg, nps_roi1.nps_measured_radagv, xaxis, mtf)
     logger.debug("Step 4/6 done: ratio_lf_hf=%s, slope_avg=%s, loc_max=%s", ratio.ratio_lf_hf, ratio.slope_avg, ratio.loc_max)
 
     logger.debug("Step 5/6: calc_contrast(img_roi1), calc_contrast(img_roi2)")
     contrast_roi1 = calc_contrast(img_roi1)
     contrast_roi2 = calc_contrast(img_roi2)
     logger.debug("Step 5/6 done: contrast_roi1=%s, contrast_roi2=%s", contrast_roi1, contrast_roi2)
+
+    nps_f_av, nps_f_peak = float("nan"), float("nan")
+    if recipe == RECIPE_PHYSICAL:
+        nps_f_av, nps_f_peak = noise_texture(nps_roi2.f_avg, nps_roi2.nps_measured_radagv)
 
     feature_vector = np.array([
         mtf_area,
@@ -143,7 +190,7 @@ def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_
         ratio.loc_max,
     ])
     logger.debug("Step 6/6: classify_quality(feature_vector=%s)", feature_vector.tolist())
-    predicted_label, decision_value = classify_quality(feature_vector)
+    predicted_label, decision_value = classify_quality(feature_vector, svm_model)
     logger.debug("Step 6/6 done: predicted_label=%s, decision_value=%s", predicted_label, decision_value)
 
     return SliceQualityResult(
@@ -160,6 +207,9 @@ def evaluate_slice_quality(img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_
         predicted_label=predicted_label,
         decision_value=decision_value,
         mtf_seed=mtf_seed,
+        recipe=recipe,
+        nps_f_av=nps_f_av,
+        nps_f_peak=nps_f_peak,
     )
 
 

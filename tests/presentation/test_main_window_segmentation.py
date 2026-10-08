@@ -22,11 +22,11 @@ import types
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 
 import bictool.domain.segmentation as segmentation_pkg
+import bictool.presentation.viewmodels.roi_viewmodel as roi_viewmodel_module
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
 from bictool.presentation.viewmodels.roi_selection import RoiRect
@@ -185,7 +185,15 @@ def _install_fake_domain_module(monkeypatch, submodule_name: str, *, load_weight
             raise load_weights_error
 
     fake_module.build_model = build_model
-    fake_module.load_weights = load_weights
+    # Weights are loaded by `integration.model_files`, imported into the main window.
+    loader = {"head_ct_unet": "load_anatomy_weights", "aisd_stroke_unet": "load_stroke_weights"}[submodule_name]
+    import bictool.integration.model_files as model_files
+
+    # Anatomy weights are loaded by the SegmentationViewModel (via model_files),
+    # stroke weights still by the main window (its own import).
+    monkeypatch.setattr(model_files, loader, load_weights)
+    if hasattr(main_window_module, loader):
+        monkeypatch.setattr(main_window_module, loader, load_weights)
     monkeypatch.setattr(segmentation_pkg, submodule_name, fake_module, raising=False)
     monkeypatch.setitem(sys.modules, fake_module.__name__, fake_module)
     return fake_module
@@ -287,8 +295,8 @@ def test_segment_slice_button_disabled_after_volume_load_when_anatomy_weights_no
 
     _load_fake_volume(window)
 
-    assert window._segment_slice_btn.isEnabled() is False
-    assert window._segment_slice_btn.toolTip() == "Segmentation model weights not configured"
+    assert window._segment_slice_action.isEnabled() is False
+    assert "Segmentation model weights not configured" in window._segment_slice_action.toolTip()
 
 
 def test_check_stroke_button_disabled_after_volume_load_when_stroke_weights_not_configured(monkeypatch):
@@ -298,7 +306,7 @@ def test_check_stroke_button_disabled_after_volume_load_when_stroke_weights_not_
     _load_fake_volume(window)
 
     assert window._check_stroke_btn.isEnabled() is False
-    assert window._check_stroke_btn.toolTip() == "Stroke model weights not configured"
+    assert "Stroke model weights not configured" in window._check_stroke_btn.toolTip()
 
 
 def test_segment_slice_button_enabled_after_volume_load_when_anatomy_weights_configured(monkeypatch):
@@ -309,8 +317,9 @@ def test_segment_slice_button_enabled_after_volume_load_when_anatomy_weights_con
 
     _load_fake_volume(window)
 
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_slice_btn.toolTip() == ""
+    assert window._segment_slice_action.isEnabled() is True
+    # No "why disabled" reason - only the help text.
+    assert window._segment_slice_action.property("tipReason") == ""
     # Stroke weights weren't configured - the two are independent.
     assert window._check_stroke_btn.isEnabled() is False
 
@@ -332,7 +341,7 @@ def test_select_segments_button_disabled_until_a_volume_is_loaded_and_weights_co
     )
     window = MainWindowView()
     assert window._select_segments_btn.isEnabled() is False
-    assert window._select_segments_btn.toolTip() == "Open a study first"
+    assert "Open a study first" in window._select_segments_btn.toolTip()
 
     _load_fake_volume(window)
 
@@ -364,11 +373,11 @@ def test_segment_slice_dispatches_worker_and_enables_checkboxes(monkeypatch):
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
 
     assert window._segmentation_status_label.text() == "Done"
-    assert window._segment_slice_btn.isEnabled() is True
+    assert window._segment_slice_action.isEnabled() is True
     for name, cb in _dialog_checkboxes(window).items():
         if name == "Brainstem":
             continue
@@ -395,7 +404,7 @@ def test_segment_slice_enables_the_brain_mask_checkbox_for_the_segmented_slice(m
     _install_passthrough_nifti_volume(window)
     assert window._brain_mask_cb.isEnabled() is False
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
 
     assert window._brain_mask_cb.isEnabled() is True
@@ -412,7 +421,7 @@ def test_segment_slice_second_click_uses_cache_and_never_reimports(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     assert window._segmentation_status_label.text() == "Done"
 
@@ -421,7 +430,7 @@ def test_segment_slice_second_click_uses_cache_and_never_reimports(monkeypatch):
     monkeypatch.delitem(sys.modules, "bictool.application.segmentation_worker", raising=False)
     monkeypatch.delattr(segmentation_pkg, "head_ct_unet", raising=False)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
 
     assert window._segmentation_status_label.text() == "Done (cached)"
 
@@ -437,7 +446,7 @@ def test_segmentation_checkbox_toggle_sets_and_clears_overlay(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     cb = _dialog_checkboxes(window)["Ventricular System"]
@@ -462,7 +471,7 @@ def test_show_segments_checkbox_hides_and_restores_selected_overlays_without_tou
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     cb = _dialog_checkboxes(window)["Ventricular System"]
@@ -500,7 +509,7 @@ def test_opacity_slider_change_reapplies_currently_visible_overlays_at_the_new_o
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     # All 16 are selected by default - deselect down to just one, so this
@@ -530,7 +539,7 @@ def test_opacity_slider_change_does_nothing_while_segments_are_hidden(monkeypatc
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     _dialog_checkboxes(window)["Ventricular System"].setChecked(True)
     window._show_segments_cb.setChecked(False)
@@ -558,12 +567,12 @@ def test_segmentation_error_is_shown_and_button_is_reenabled(monkeypatch):
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
 
     assert window._segmentation_status_label.text() == "Error"
-    assert window._segmentation_status_label.toolTip() == "boom"
-    assert window._segment_slice_btn.isEnabled() is True
+    assert "boom" in window._segmentation_status_label.toolTip()
+    assert window._segment_slice_action.isEnabled() is True
 
 
 def test_segment_slice_shows_error_dialog_when_tensorflow_not_installed(monkeypatch):
@@ -579,7 +588,7 @@ def test_segment_slice_shows_error_dialog_when_tensorflow_not_installed(monkeypa
     window = MainWindowView()
     _load_fake_volume(window)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
 
     assert calls
     assert calls[0][1] == "TensorFlow not installed"
@@ -597,7 +606,7 @@ def test_segment_slice_shows_error_dialog_when_weights_file_missing(monkeypatch)
     window = MainWindowView()
     _load_fake_volume(window)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
 
     assert calls
     assert calls[0][1] == "Segmentation weights not found"
@@ -672,7 +681,7 @@ def test_stroke_error_is_shown_and_button_is_reenabled(monkeypatch):
     _pump_scheduler(window)
 
     assert window._stroke_status_label.text() == "Error"
-    assert window._stroke_status_label.toolTip() == "lesion check failed"
+    assert "lesion check failed" in window._stroke_status_label.toolTip()
     assert window._check_stroke_btn.isEnabled() is True
 
 
@@ -718,7 +727,7 @@ def test_close_study_resets_segmentation_and_stroke_display(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     window._check_stroke_btn.click()
     _pump_scheduler(window)
@@ -730,12 +739,12 @@ def test_close_study_resets_segmentation_and_stroke_display(monkeypatch):
     assert window._segmentation_cache == {}
     assert window._stroke_cache == {}
     assert window._selected_segmentation_names == set(main_window_module._SEGMENTATION_MAPPING)  # back to "all selected"
-    assert window._segment_slice_btn.isEnabled() is False
-    assert window._segment_slice_btn.toolTip() == "Open a study first"
+    assert window._segment_slice_action.isEnabled() is False
+    assert "Open a study first" in window._segment_slice_action.toolTip()
     assert window._check_stroke_btn.isEnabled() is False
-    assert window._check_stroke_btn.toolTip() == "Open a study first"
+    assert "Open a study first" in window._check_stroke_btn.toolTip()
     assert window._select_segments_btn.isEnabled() is False
-    assert window._select_segments_btn.toolTip() == "Open a study first"
+    assert "Open a study first" in window._select_segments_btn.toolTip()
     for cb in dialog_checkboxes.values():
         assert cb.isEnabled() is False
         assert cb.isChecked() is True  # all selected is the default, restored on reset
@@ -759,7 +768,7 @@ def test_opening_a_new_study_clears_a_stale_primary_series_segmentation_cache(mo
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     assert 0 in window._segmentation_cache
 
@@ -792,7 +801,7 @@ def test_returning_to_the_primary_series_without_a_fresh_discovery_restores_the_
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     assert 0 in window._segmentation_cache
 
@@ -818,7 +827,7 @@ def test_explicitly_reloading_the_primary_series_discards_the_stale_cache(monkey
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
     assert 0 in window._segmentation_cache
 
@@ -845,7 +854,7 @@ def test_segmentation_selection_persists_across_slice_change_and_reapplies_when_
     window = MainWindowView()
     _load_fake_volume(window, num_slices=3)
     _install_passthrough_nifti_volume(window, num_slices=3)
-    window._segment_slice_btn.click()  # segments slice 0 only
+    window._segment_slice_action.trigger()  # segments slice 0 only
     _pump_scheduler(window)
     window._show_segments_cb.setChecked(True)  # master switch defaults off (2026-09-24)
     ventricles_cb = _dialog_checkboxes(window)["Ventricular System"]
@@ -857,10 +866,10 @@ def test_segmentation_selection_persists_across_slice_change_and_reapplies_when_
     assert "seg_Ventricular System" not in window._roi_viewport._overlay_items
     assert ventricles_cb.isChecked() is True  # selection itself is untouched
     assert "Ventricular System" in window._selected_segmentation_names
-    assert window._segmentation_status_label.text() == "—"
+    assert window._segmentation_status_label.text() == "Done"  # browsing never changes the task status
 
     window._slice_slider.setValue(0)  # back to the already-segmented slice
-    assert window._segmentation_status_label.text() == "Done (cached)"
+    assert window._segmentation_status_label.text() == "Done"
     assert "seg_Ventricular System" in window._roi_viewport._overlay_items
 
 
@@ -881,10 +890,10 @@ def test_segment_volume_disables_buttons_and_shows_cancel_immediately(monkeypatc
     _load_fake_volume(window, num_slices=3)
     _install_passthrough_nifti_volume(window, num_slices=3)
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
 
-    assert window._segment_slice_btn.isEnabled() is False
-    assert window._segment_volume_btn.isEnabled() is False
+    assert window._segment_slice_action.isEnabled() is False
+    assert window._segment_volume_action.isEnabled() is False
     assert window._cancel_segment_volume_btn.isHidden() is False
     _pump_scheduler(window)  # let the fake worker finish so it doesn't leak into the next test
 
@@ -899,13 +908,13 @@ def test_segment_volume_segments_every_slice_and_caches_each_result(monkeypatch)
     _load_fake_volume(window, num_slices=3)
     _install_passthrough_nifti_volume(window, num_slices=3)
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
     _pump_scheduler(window)
 
     assert set(window._segmentation_cache) == {0, 1, 2}
     assert window._segmentation_status_label.text() == "Done (volume)"
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_volume_btn.isEnabled() is True
+    assert window._segment_slice_action.isEnabled() is True
+    assert window._segment_volume_action.isEnabled() is True
     assert window._cancel_segment_volume_btn.isHidden() is True
     # The currently displayed slice (0) is live-updated as its own result
     # lands mid-batch - checkboxes should already be enabled.
@@ -928,7 +937,7 @@ def test_segment_volume_live_updates_overlay_for_the_currently_displayed_slice(m
     cb = _dialog_checkboxes(window)["Ventricular System"]
     cb.setChecked(True)  # checked ahead of time, even while disabled - toggled again once enabled below
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
     _pump_scheduler(window)
 
     # Slice 0's result landed mid-batch with the box already checked - the
@@ -947,7 +956,7 @@ def test_segment_volume_skips_slices_already_in_the_cache(monkeypatch):
     _install_passthrough_nifti_volume(window, num_slices=3)
     window._segmentation_cache[1] = _fake_segmentation_result()  # slice 1 already segmented earlier
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
     _pump_scheduler(window)
 
     assert len(fake_worker_cls.constructed) == 1
@@ -966,7 +975,7 @@ def test_segment_volume_is_a_noop_when_every_slice_is_already_cached(monkeypatch
     window._segmentation_cache[0] = _fake_segmentation_result()
     window._segmentation_cache[1] = _fake_segmentation_result()
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
 
     assert fake_worker_cls.constructed == []
     assert window._segmentation_status_label.text() == "Done (all slices already segmented)"
@@ -982,13 +991,13 @@ def test_segment_volume_error_shows_which_slice_failed(monkeypatch):
     _load_fake_volume(window, num_slices=3)
     _install_passthrough_nifti_volume(window, num_slices=3)
 
-    window._segment_volume_btn.click()
+    window._segment_volume_action.trigger()
     _pump_scheduler(window)
 
     assert window._segmentation_status_label.text() == "Error (slice 2)"
-    assert window._segmentation_status_label.toolTip() == "boom"
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_volume_btn.isEnabled() is True
+    assert "boom" in window._segmentation_status_label.toolTip()
+    assert window._segment_slice_action.isEnabled() is True
+    assert window._segment_volume_action.isEnabled() is True
     assert window._cancel_segment_volume_btn.isHidden() is True
     # Slice 0 completed before the error on slice 1 - its result is kept.
     assert 0 in window._segmentation_cache
@@ -1023,16 +1032,16 @@ def test_volume_segmentation_cancelled_resets_ui_state(monkeypatch):
     )
     window = MainWindowView()
     _load_fake_volume(window, num_slices=10)
-    window._segment_slice_btn.setEnabled(False)
-    window._segment_volume_btn.setEnabled(False)
+    window._segment_slice_action.setEnabled(False)
+    window._segment_volume_action.setEnabled(False)
     window._cancel_segment_volume_btn.setVisible(True)
     window._active_volume_segmentation_worker = SimpleNamespace(cancel=lambda: None)
 
     window._on_volume_segmentation_cancelled(3, 10)
 
     assert window._active_volume_segmentation_worker is None
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_volume_btn.isEnabled() is True
+    assert window._segment_slice_action.isEnabled() is True
+    assert window._segment_volume_action.isEnabled() is True
     assert window._cancel_segment_volume_btn.isHidden() is True
     assert window._segmentation_status_label.text() == "Cancelled (3/10 segmented)"
 
@@ -1106,11 +1115,11 @@ def test_ensure_nifti_volume_then_disables_buttons_during_conversion_and_reenabl
 
     window._ensure_nifti_volume_then(lambda: None)
 
-    assert window._segment_slice_btn.isEnabled() is False
-    assert window._segment_volume_btn.isEnabled() is False
+    assert window._segment_slice_action.isEnabled() is False
+    assert window._segment_volume_action.isEnabled() is False
     _pump_scheduler(window)
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_volume_btn.isEnabled() is True
+    assert window._segment_slice_action.isEnabled() is True
+    assert window._segment_volume_action.isEnabled() is True
 
 
 def test_ensure_nifti_volume_then_second_call_reuses_the_cached_volume(monkeypatch):
@@ -1139,9 +1148,9 @@ def test_ensure_nifti_volume_then_error_shows_message_and_reenables_buttons_with
     assert calls == []
     assert window._dicom_nifti_volume is None
     assert window._segmentation_status_label.text() == "Error"
-    assert window._segmentation_status_label.toolTip() == "bad orientation"
-    assert window._segment_slice_btn.isEnabled() is True
-    assert window._segment_volume_btn.isEnabled() is True
+    assert "bad orientation" in window._segmentation_status_label.toolTip()
+    assert window._segment_slice_action.isEnabled() is True
+    assert window._segment_volume_action.isEnabled() is True
 
 
 def test_do_segment_slice_shows_not_segmentable_message_for_an_excluded_slice(monkeypatch):
@@ -1157,7 +1166,7 @@ def test_do_segment_slice_shows_not_segmentable_message_for_an_excluded_slice(mo
     # sharing the series' geometry, see `integration.dicom_to_nifti`.
     window._dicom_nifti_volume = SimpleNamespace(is_segmentable=lambda i: False)
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
 
     assert window._segmentation_status_label.text() == "Not segmentable"
     assert window._active_segmentation_worker is None
@@ -1235,27 +1244,6 @@ def test_loading_a_non_primary_series_does_not_auto_segment(monkeypatch):
 
     assert window._segmentation_cache == {}
     assert fake_worker_cls.constructed == []
-
-
-def test_load_selected_series_marks_only_index_zero_as_the_primary_series(monkeypatch):
-    from bictool.integration.dicom_file_loader import SeriesCandidate
-
-    monkeypatch.setattr(main_window_module, "load_config", lambda: {})
-    window = MainWindowView()
-    calls = []
-    monkeypatch.setattr(
-        window, "_on_volume_loaded", lambda volume, *, is_primary_series, force_reload=False: calls.append(is_primary_series)
-    )
-    candidate = SeriesCandidate(
-        label="fake", sorted_paths=["a.dcm"], slice_locations_mm=[0.0], _reference_header=SimpleNamespace()
-    )
-    window._series_candidates = [candidate, candidate]
-    monkeypatch.setattr(main_window_module, "load_series", lambda c: _fake_dicom_volume(1))
-
-    window._load_selected_series(0)
-    window._load_selected_series(1)
-
-    assert calls == [True, False]
 
 
 def test_segmentation_colors_are_all_distinct_across_all_16_structures():
@@ -1355,182 +1343,230 @@ def _touching(a: RoiRect, b: RoiRect) -> bool:
     return a.x0 <= b.x1 and b.x0 <= a.x1 and a.y0 <= b.y1 and b.y0 <= a.y1
 
 
+def _both_result() -> SimpleNamespace:
+    """Falx above the ventricles, septum between them - both pairs on one slice."""
+    masks = {name: np.zeros(_AUTO_SHAPE, dtype=bool) for name in _ALL_ANATOMY_RAW_NAMES}
+    masks["Frontal Lobe"][2:118, 2:118] = True
+    masks["Ventricular System"][50:112, 20:100] = True
+    masks["Septum Pellucidum"][55:107, 59:61] = True
+    masks["Dural Folds"][4:46, 59:61] = True
+    masks["Ventricular System"] &= ~masks["Septum Pellucidum"]
+    masks["Frontal Lobe"] &= ~(masks["Ventricular System"] | masks["Septum Pellucidum"] | masks["Dural Folds"])
+    return SimpleNamespace(masks=masks)
+
+
+def _both_pairs_window(monkeypatch, results_by_slice=None, num_slices=1) -> MainWindowView:
+    window = _window_with_segmented_slices(results_by_slice or {0: _both_result()}, num_slices=num_slices)
+    _fake_all_white_matter_classifier(window, monkeypatch)
+    window._auto_rois_btn.setChecked(True)
+    _pump_scheduler(window)  # white-matter ROI2s land from the background WM/GM worker
+    return window
+
+
 def test_auto_rois_disabled_until_segmentation_exists():
     window = MainWindowView()
     _load_fake_volume(window)
 
-    assert window._auto_rois_cb.isEnabled() is False
+    assert window._auto_rois_btn.isEnabled() is False
 
 
-def test_auto_rois_place_roi1_and_a_ventricle_roi2_for_the_septum():
-    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
+def test_auto_rois_place_falx_and_septum_pairs_side_by_side(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
 
-    window._auto_rois_cb.setChecked(True)
-
-    roi1, roi2 = _slot_rect(window, "roi1"), _slot_rect(window, "roi2")
-    assert roi1 is not None and roi2 is not None
-    assert roi1.width == roi2.width == 22
-    assert not _touching(roi1, roi2)
-    assert window._auto_roi2_candidates[0].structure == "Ventricular System"
-    assert "ROI2 here: ventricle" in window._auto_rois_status_label.text()
+    rois = window._roi_rects
+    assert set(rois) == {"falx.roi1", "falx.roi2", "septum.roi1", "septum.roi2"}
+    for pair in ("falx", "septum"):
+        assert rois[f"{pair}.roi1"].width == rois[f"{pair}.roi2"].width
+        assert not _touching(rois[f"{pair}.roi1"], rois[f"{pair}.roi2"])
+    assert window._auto_roi2_regions["septum"][0] == "Ventricular System"
+    assert window._auto_roi2_regions["falx"][0] == "White Matter"
+    # Both pairs are drawn on the image at once.
+    assert all(_slot_rect(window, key) == rect for key, rect in rois.items())
+    status = window._auto_rois_status_text
+    assert "Falx: ROI2 in white matter" in status and "Septum: ROI2 in ventricle" in status
 
 
 def test_auto_rois_are_computed_for_every_segmented_slice():
     window = _window_with_segmented_slices({0: _septum_result(), 1: _empty_result(), 2: _septum_result()})
 
-    window._auto_rois_cb.setChecked(True)
+    window._auto_rois_btn.setChecked(True)
 
-    assert set(window._auto_roi1_candidates) == {0, 2}
-    assert set(window._auto_roi2_candidates) == {0, 2}
+    assert window._auto_roi1_slices("septum") == [0, 2]
+    assert window._roi_store.complete_pairs(0) == ["septum"]
+    assert window._roi_store.complete_pairs(1) == []
 
 
-def test_auto_roi_drafts_follow_slice_navigation():
+def test_auto_rois_follow_slice_navigation():
     window = _window_with_segmented_slices({0: _septum_result(), 1: _empty_result(), 2: _septum_result()})
-    window._auto_rois_cb.setChecked(True)
+    window._auto_rois_btn.setChecked(True)
 
     window._show_slice(1)
-    assert _slot_rect(window, "roi1") is None and _slot_rect(window, "roi2") is None
-    assert "No septum pellucidum on this slice" in window._auto_rois_status_label.text()
-    assert "1, 3" in window._auto_rois_status_label.text()  # 1-based slice numbers
+    assert _slot_rect(window, "septum.roi1") is None and _slot_rect(window, "septum.roi2") is None
+    assert "Septum: not on this slice" in window._auto_rois_status_text
+    assert "1, 3" in window._auto_rois_status_text  # 1-based slice numbers
 
     window._show_slice(2)
-    assert _slot_rect(window, "roi1") is not None and _slot_rect(window, "roi2") is not None
+    assert _slot_rect(window, "septum.roi1") is not None and _slot_rect(window, "septum.roi2") is not None
 
 
 def test_auto_rois_fill_the_roi_table_without_set_clicks():
     window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
 
-    window._auto_rois_cb.setChecked(True)
+    window._auto_rois_btn.setChecked(True)
 
-    roi1, roi2 = _slot_rect(window, "roi1"), _slot_rect(window, "roi2")
-    assert window._roi_rects == {"roi1": roi1, "roi2": roi2}
-    assert window._roi_position_items["roi1"].text() == f"{roi1.x0}–{roi1.x1}, {roi1.y0}–{roi1.y1}"
-    assert window._roi_size_items["roi2"].text() == f"{roi2.width}×{roi2.height} px"
+    roi1, roi2 = _slot_rect(window, "septum.roi1"), _slot_rect(window, "septum.roi2")
+    assert window._roi_rects == {"septum.roi1": roi1, "septum.roi2": roi2}
+    assert window._roi_position_items["septum.roi1"].text() == f"{roi1.x0}–{roi1.x1}, {roi1.y0}–{roi1.y1}"
+    assert window._roi_size_items["septum.roi2"].text() == f"{roi2.width}×{roi2.height} px"
+    assert window._roi_position_items["falx.roi1"].text() == "not set"
     assert window._confirm_rois_cb.isEnabled() is True  # still needs the user's confirmation
 
 
-def test_a_hand_set_roi_overrides_the_automatic_one_on_that_slice():
-    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
-    auto_roi2 = _slot_rect(window, "roi2")
-    hand_drawn = RoiRect(5, 5, 27, 27)
+def test_a_drawn_rectangle_can_be_saved_into_any_of_the_four_slots(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    auto_septum_roi2 = window._roi_rects["septum.roi2"]
+    hand_drawn = RoiRect(5, 70, 27, 92)
 
     window._roi_viewport.set_draft(hand_drawn)
-    window._set_roi1_btn.click()
+    window._save_draft_as("septum.roi1")
 
-    assert window._roi_rects == {"roi1": hand_drawn, "roi2": auto_roi2}
+    assert window._roi_rects["septum.roi1"] == hand_drawn
+    assert window._roi_store.is_manual(0, "septum.roi1")
+    # The septum ROI2 was re-placed next to the newly saved ROI1.
+    assert window._roi_rects["septum.roi2"] != auto_septum_roi2
+    assert not _touching(hand_drawn, window._roi_rects["septum.roi2"])
+    assert window._restore_auto_btn.isEnabled() is True
 
 
-def test_confirmed_auto_rois_can_not_be_moved_or_changed():
-    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
+def test_delete_key_removes_one_roi_and_restore_brings_the_automatic_ones_back(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    automatic = dict(window._roi_rects)
+
+    window._roi_viewport.select_roi("falx.roi2")
+    assert window._delete_roi_btn.isEnabled() is True
+    window._roi_viewport.roi_delete_requested.emit("falx.roi2")  # what the Delete key emits
+
+    assert "falx.roi2" not in window._roi_rects
+    assert _slot_rect(window, "falx.roi2") is None
+    assert window._roi_position_items["falx.roi2"].text() == "not set"
+    assert window._roi_store.complete_pairs(0) == ["septum"]  # falx pair no longer measurable here
+
+    window._restore_auto_btn.click()
+
+    assert window._roi_rects == automatic
+    assert window._restore_auto_btn.isEnabled() is False
+
+
+def test_a_deleted_roi_stays_deleted_when_navigating(monkeypatch):
+    window = _both_pairs_window(monkeypatch, {0: _both_result(), 1: _both_result()}, num_slices=2)
+    window._roi_viewport.select_roi("septum.roi1")
+    window._delete_roi_btn.click()
+
+    window._show_slice(1)
+    assert "septum.roi1" in window._roi_rects  # other slice untouched
+    window._show_slice(0)
+
+    assert "septum.roi1" not in window._roi_rects
+
+
+def test_confirmed_rois_can_not_be_moved_deleted_or_changed(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    window._roi_viewport.select_roi("falx.roi1")
 
     window._confirm_rois_cb.setChecked(True)
 
     assert window._roi_viewport._locked is True
-    assert window._auto_rois_cb.isEnabled() is False
-    assert window._auto_roi1_dural_rb.isEnabled() is False
+    assert window._auto_rois_btn.isEnabled() is False
+    assert window._delete_roi_btn.isEnabled() is False
+    window._roi_viewport.roi_delete_requested.emit("falx.roi1")
+    assert "falx.roi1" in window._roi_rects
 
     window._confirm_rois_cb.setChecked(False)
 
     assert window._roi_viewport._locked is False
-    assert window._auto_rois_cb.isEnabled() is True
+    assert window._auto_rois_btn.isEnabled() is True
 
 
-def test_moving_roi1_re_places_roi2_around_it():
-    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
-    roi1 = _slot_rect(window, "roi1")
-    moved = RoiRect(roi1.x0, roi1.y0 + 20, roi1.x1, roi1.y1 + 20)
+def test_moving_a_roi1_re_places_only_its_own_pairs_roi2(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    septum_before = (window._roi_rects["septum.roi1"], window._roi_rects["septum.roi2"])
+    roi1 = window._roi_rects["falx.roi1"]
+    moved = RoiRect(roi1.x0, roi1.y0 + 4, roi1.x1, roi1.y1 + 4)
 
-    window._roi_viewport.set_roi("roi1", moved)
-    window._roi_viewport.draft_moved.emit("roi1", moved)
+    window._roi_viewport.set_roi("falx.roi1", moved)
+    window._roi_viewport.draft_moved.emit("falx.roi1", moved)
 
-    assert _slot_rect(window, "roi1") == moved
-    assert not _touching(moved, _slot_rect(window, "roi2"))
+    assert window._roi_rects["falx.roi1"] == moved
+    assert not _touching(moved, window._roi_rects["falx.roi2"])
+    assert (window._roi_rects["septum.roi1"], window._roi_rects["septum.roi2"]) == septum_before
 
 
 def test_a_hand_moved_roi2_is_kept_when_roi1_moves():
     window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
-    roi2 = _slot_rect(window, "roi2")
+    window._auto_rois_btn.setChecked(True)
+    roi2 = _slot_rect(window, "septum.roi2")
     moved_roi2 = RoiRect(roi2.x0 + 2, roi2.y0, roi2.x1 + 2, roi2.y1)
-    # What a real drag does: the viewport moves its draft, then reports it.
-    window._roi_viewport.set_roi("roi2", moved_roi2)
-    window._roi_viewport.draft_moved.emit("roi2", moved_roi2)
+    # What a real drag does: the viewport moves the ROI, then reports it.
+    window._roi_viewport.set_roi("septum.roi2", moved_roi2)
+    window._roi_viewport.draft_moved.emit("septum.roi2", moved_roi2)
 
-    roi1 = _slot_rect(window, "roi1")
+    roi1 = _slot_rect(window, "septum.roi1")
     moved_roi1 = RoiRect(roi1.x0, roi1.y0 + 4, roi1.x1, roi1.y1 + 4)
-    window._roi_viewport.set_roi("roi1", moved_roi1)
-    window._roi_viewport.draft_moved.emit("roi1", moved_roi1)
+    window._roi_viewport.set_roi("septum.roi1", moved_roi1)
+    window._roi_viewport.draft_moved.emit("septum.roi1", moved_roi1)
 
-    assert _slot_rect(window, "roi2") == moved_roi2
-    assert window._auto_roi2_candidates[0].col0 == moved_roi2.x0
+    assert _slot_rect(window, "septum.roi2") == moved_roi2
 
 
-def test_moved_auto_rois_are_remembered_per_slice():
+def test_moved_rois_are_remembered_per_slice():
     window = _window_with_segmented_slices({0: _septum_result(), 1: _septum_result()}, num_slices=2)
-    window._auto_rois_cb.setChecked(True)
-    roi2 = _slot_rect(window, "roi2")
+    window._auto_rois_btn.setChecked(True)
+    roi2 = _slot_rect(window, "septum.roi2")
     moved_roi2 = RoiRect(roi2.x0 + 2, roi2.y0, roi2.x1 + 2, roi2.y1)
-    window._roi_viewport.draft_moved.emit("roi2", moved_roi2)
+    window._roi_viewport.draft_moved.emit("septum.roi2", moved_roi2)
 
     window._show_slice(1)
     window._show_slice(0)
 
-    assert _slot_rect(window, "roi2") == moved_roi2
+    assert _slot_rect(window, "septum.roi2") == moved_roi2
 
 
 def test_white_matter_roi2_waits_for_the_background_wm_gm_classification(monkeypatch):
     window = _window_with_segmented_slices({0: _falx_result()}, num_slices=1)
     _fake_all_white_matter_classifier(window, monkeypatch)
-    window._auto_roi1_dural_rb.setChecked(True)
 
-    window._auto_rois_cb.setChecked(True)
-    assert _slot_rect(window, "roi1") is not None
+    window._auto_rois_btn.setChecked(True)
+    assert _slot_rect(window, "falx.roi1") is not None
+    assert _slot_rect(window, "falx.roi2") is None  # waiting for WM/GM
     _pump_scheduler(window)
 
-    roi2 = window._auto_roi2_candidates[0]
-    assert roi2.structure == "White Matter"
-    assert _slot_rect(window, "roi2") is not None
-    assert not _touching(_slot_rect(window, "roi1"), _slot_rect(window, "roi2"))
+    assert window._auto_roi2_regions["falx"][0] == "White Matter"
+    assert _slot_rect(window, "falx.roi2") is not None
+    assert not _touching(_slot_rect(window, "falx.roi1"), _slot_rect(window, "falx.roi2"))
 
 
-def test_changing_the_wm_gm_method_re_places_white_matter_roi2(monkeypatch):
-    window = _window_with_segmented_slices({0: _falx_result()}, num_slices=1)
-    _fake_all_white_matter_classifier(window, monkeypatch)
-    window._auto_roi1_dural_rb.setChecked(True)
-    window._auto_rois_cb.setChecked(True)
-    _pump_scheduler(window)
-    assert 0 in window._auto_roi2_candidates
+def test_changing_the_wm_gm_method_re_places_white_matter_roi2_and_keeps_the_ventricle_one(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    septum_roi2 = window._roi_rects["septum.roi2"]
 
     window._on_brain_tissue_method_selected("HU Thresholding")  # clears the WM/GM cache
-    assert 0 not in window._auto_roi2_candidates  # pending again...
+    assert "falx.roi2" not in window._roi_rects  # pending again...
+    assert window._roi_rects["septum.roi2"] == septum_roi2
     _pump_scheduler(window)
 
-    assert window._auto_roi2_candidates[0].structure == "White Matter"  # ...and re-placed
+    assert window._auto_roi2_regions["falx"][0] == "White Matter"  # ...and re-placed
 
 
-def test_switching_structure_recomputes_both_rois():
+def test_unchecking_auto_rois_clears_the_automatic_ones_but_keeps_manual_rois():
     window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
-    assert 0 in window._auto_roi1_candidates
+    window._auto_rois_btn.setChecked(True)
+    window._roi_viewport.set_draft(RoiRect(5, 5, 27, 27))
+    window._save_draft_as("falx.roi1")
 
-    window._auto_roi1_dural_rb.setChecked(True)  # no dural folds in the septum result
+    window._auto_rois_btn.setChecked(False)
 
-    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}
-    assert _slot_rect(window, "roi1") is None
-
-
-def test_unchecking_auto_rois_clears_the_drafts():
-    window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
-
-    window._auto_rois_cb.setChecked(False)
-
-    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}
-    assert _slot_rect(window, "roi1") is None and _slot_rect(window, "roi2") is None
-    assert window._set_roi1_btn.isEnabled() is False
+    assert set(window._roi_rects) == {"falx.roi1"}
+    assert _slot_rect(window, "septum.roi1") is None
 
 
 def test_segment_slice_enables_auto_rois(monkeypatch):
@@ -1544,20 +1580,205 @@ def test_segment_slice_enables_auto_rois(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     _install_passthrough_nifti_volume(window)
-    assert window._auto_rois_cb.isEnabled() is False
+    assert window._auto_rois_btn.isEnabled() is False
 
-    window._segment_slice_btn.click()
+    window._segment_slice_action.trigger()
     _pump_scheduler(window)
 
-    assert window._auto_rois_cb.isEnabled() is True
+    assert window._auto_rois_btn.isEnabled() is True
 
 
 def test_close_study_resets_auto_rois():
     window = _window_with_segmented_slices({0: _septum_result()}, num_slices=1)
-    window._auto_rois_cb.setChecked(True)
+    window._auto_rois_btn.setChecked(True)
 
     window._on_close_study_clicked()
 
-    assert window._auto_rois_cb.isChecked() is False
-    assert window._auto_rois_cb.isEnabled() is False
-    assert window._auto_roi1_candidates == {} and window._auto_roi2_candidates == {}
+    assert window._auto_rois_btn.isChecked() is False
+    assert window._auto_rois_btn.isEnabled() is False
+    assert window._roi_store.slices() == []
+    assert window._roi_rects == {}
+
+
+def _fake_result(label=1, recipe="physical", features=None):
+    return SimpleNamespace(
+            mtf_area=0.5, mtf_xaxis=np.array([0.0, 0.5, 1.0]), mtf=np.array([[1.0], [0.6], [0.2]]),
+            nps_roi1=SimpleNamespace(var_nps=2.0, var_measured=3.0, f_avg=np.array([0.0, 0.5]),
+                                     nps_measured_radagv=np.array([1.0, 0.5])),
+            nps_roi2=SimpleNamespace(var_nps=1.0, f_avg=np.array([0.0, 0.5]), nps_measured_radagv=np.array([1.0, 0.5])),
+            ratio=SimpleNamespace(ratio_lf_hf=10.0, f_int=np.array([0.1, 0.8]), ratio_nps_mtf=np.array([1.0, 0.0])),
+            contrast_roi1=0.3, contrast_roi2=0.1, predicted_label=label, decision_value=0.4 if label else -0.4,
+            feature_vector=np.zeros(7) if features is None else np.asarray(features, dtype=float), recipe=recipe,
+            nps_f_av=0.2, nps_f_peak=0.1,
+        )
+
+
+def _fake_qa(monkeypatch, label_by_call=None, recipe="physical"):
+    import bictool.application.worker as worker_module
+
+    calls = iter(label_by_call or [])
+
+    def evaluate(*args, **kwargs):
+        return _fake_result(next(calls, 1), recipe)
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
+
+
+def _run_all(window):
+    window._confirm_rois_cb.setChecked(True)
+    window._run_all_btn.click()
+    for _ in range(100):
+        _pump_scheduler(window)
+        if window._qa_jobs is None:
+            break
+
+
+def test_run_all_measures_both_pairs_and_the_results_page_switches_between_them(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    _fake_qa(monkeypatch, label_by_call=[1, 0], recipe="octave")  # legacy: falx acceptable, septum not
+
+    _run_all(window)
+
+    assert set(window._qa_results) == {(0, "falx"), (0, "septum")}
+    assert window._qa_progress_label.text() == "QA done: 2 ROI pair(s)"
+    assert window._results_pair_buttons["falx"].isChecked()
+    assert window._result_verdict_label.text() == "Acceptable"
+
+    window._results_pair_buttons["septum"].click()
+
+    assert window._result_verdict_label.text() == "Unacceptable"
+    assert "Septum" in window._results_slice_label.text()
+    lines = window._study_verdict_label.text().splitlines()
+    assert lines[0].startswith("Falx: Acceptable") and lines[1].startswith("Septum: Unacceptable")
+    assert [window._study_table.item(row, 1).text() for row in range(2)] == ["Falx", "Septum"]
+    assert window._study_provisional_label.isHidden()
+
+
+def test_physical_recipe_without_enough_falx_slices_explains_the_missing_verdict(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    _fake_qa(monkeypatch)
+
+    _run_all(window)
+
+    assert window._study_verdict_label.text() == "Study verdict: not available"
+    assert "this study has 1" in window._study_verdict_basics_label.text()
+    assert not window._study_provisional_label.isHidden()
+    assert window._study_table.horizontalHeaderItem(5).text() == "Resembles (hint)"
+    assert window._result_verdict_label.text() == ""  # falx, but no study verdict
+    window._results_pair_buttons["septum"].click()
+    assert "not used for the verdict" in window._result_verdict_label.text()
+
+
+def test_physical_recipe_shows_the_study_verdict_with_interval_and_slice_scores(monkeypatch):
+    window = _both_pairs_window(monkeypatch)
+    # Typical good-study values: mtf_area, nps_homo, nps_struct, var_struct, ratio_lf_hf, slope, loc_max.
+    good = [0.51, 20.0, 100.0, 70.0, 11.0, -1.0, 0.1]
+    window._qa_results = {
+        (i, "falx"): _fake_result(features=np.array(good) * (1 + 0.01 * (i % 3))) for i in range(8)
+    }
+    window._qa_results[(3, "falx")].feature_vector[1] = 80.0  # one very noisy slice
+    window._qa_results[(4, "septum")] = _fake_result(features=good)
+
+    window._refresh_results_page()
+
+    headline = window._study_verdict_label.text()
+    assert headline.startswith("Study verdict: ") and "likely acceptable" in headline
+    basics = window._study_verdict_basics_label.text()
+    assert "Possible artefacts:" in basics and "Unusually noisy slices: 4." in basics
+    details = window._study_verdict_details_label.text()
+    assert "from 8 falx slices" in details and "model head-ct-1" in details
+    assert "noise above 3x the study median: 4" in details  # slice numbers are 1-based
+    assert "not used for the verdict" in details  # septum note
+    rows = {
+        (window._study_table.item(r, 0).text(), window._study_table.item(r, 1).text()): r
+        for r in range(window._study_table.rowCount())
+    }
+    falx_row, septum_row = rows[("4", "Falx")], rows[("5", "Septum")]
+    assert window._study_table.item(falx_row, 5).text() in ("acceptable", "not acceptable", "unclear")
+    assert "of 1" in window._study_table.item(falx_row, 5).toolTip()
+    assert window._study_table.item(falx_row, 6).text() == "noise outlier"
+    assert window._study_table.item(septum_row, 5).text() == "—"
+
+
+def test_study_export_lists_both_pairs(monkeypatch, tmp_path):
+    import csv
+
+    window = _both_pairs_window(monkeypatch)
+    _fake_qa(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    _run_all(window)
+
+    window._perform_study_export({"csv"}, tmp_path)
+
+    slices_csv = next(tmp_path.glob("*_study_slices.csv"))
+    with open(slices_csv, newline="", encoding="ascii") as f:
+        rows = list(csv.reader(f))
+    assert rows[0][:2] == ["Slice", "Structure"]
+    assert sorted(row[1] for row in rows[1:]) == ["Falx", "Septum"]
+
+
+def test_auto_rois_skip_slices_with_too_little_brain(monkeypatch):
+    # Two identical slices; the eligibility rule (patched) says only slice 0 has enough brain.
+    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: {0} & set(masks))
+    window = _both_pairs_window(monkeypatch, {0: _both_result(), 1: _both_result()}, num_slices=2)
+
+    assert window._auto_roi1_slices("falx") == [0]
+    assert window._auto_roi1_slices("septum") == [0]
+    assert "No automatic ROIs on 1 slice(s) with < 20% of the largest brain area: 2." in (
+        window._auto_rois_status_text
+    )
+
+
+def test_a_newly_segmented_larger_slice_can_make_earlier_slices_ineligible(monkeypatch):
+    # Patched rule: only the highest segmented slice is "large enough".
+    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: {max(masks)} if masks else set())
+    window = _both_pairs_window(monkeypatch, {0: _both_result()}, num_slices=2)
+    assert window._auto_roi1_slices("falx") == [0]
+
+    window._segmentation_cache[1] = _both_result()
+    window._on_auto_rois_segmentation_landed(1)
+    _pump_scheduler(window)
+
+    assert window._auto_roi1_slices("falx") == [1]
+    assert window._roi_store.auto(0, "falx.roi2") is None
+
+
+def test_manual_rois_are_allowed_on_ineligible_slices(monkeypatch):
+    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: set())
+    window = _both_pairs_window(monkeypatch)
+
+    window._roi_store.set_manual(0, "falx.roi1", RoiRect(10, 10, 30, 30))
+    window._roi_store.set_manual(0, "falx.roi2", RoiRect(50, 10, 70, 30))
+
+    assert window._auto_roi1_slices("falx") == []
+    assert window._roi_store.complete_pairs(0) == ["falx"]
+
+
+def test_scrolling_never_hides_a_running_task_in_the_status_bar():
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=3)
+    window._segmentation_cache[0] = _fake_segmentation_result()
+    # A volume segmentation in progress (as `_on_volume_segmentation_progress` reports it).
+    window._segment_slice_action.setEnabled(False)
+    window._segment_volume_action.setEnabled(False)
+    window._segmentation_status_label.setText("Segmenting volume… 3/10")
+    bar = window._status_panel.progress_bar()
+    assert not bar.isHidden()
+
+    for index in (1, 0, 2, 0):  # browse over segmented and unsegmented slices
+        window._slice_slider.setValue(index)
+        assert window._current_slice_index == index
+        assert not bar.isHidden() and bar.value() == 3
+        assert window._segmentation_status_label.text() == "Segmenting volume… 3/10"
+        assert not window._segment_slice_action.isEnabled() and not window._segment_volume_action.isEnabled()
+
+
+def test_scrolling_or_zooming_never_cancels_the_loading_bar():
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=3)
+    window._study_status_label.setText("Loading DICOM data… (12 files scanned)")  # another series is loading
+
+    window._slice_slider.setValue(1)
+    window._update_viewer_overlay()
+
+    assert window._study_activity.is_busy() and not window._status_panel.progress_bar().isHidden()

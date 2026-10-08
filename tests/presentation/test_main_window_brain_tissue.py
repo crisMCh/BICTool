@@ -16,6 +16,7 @@ this file only covers the two disabled cases, which need no fake modules.
 
 import numpy as np
 
+import bictool.presentation.viewmodels.brain_tissue_viewmodel as brain_tissue_vm_module
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
 from bictool.presentation.views.main_window import MainWindowView
@@ -99,7 +100,7 @@ def test_brain_mask_checkbox_disabled_without_weights_configured(monkeypatch):
     _load_fake_volume(window)
 
     assert window._brain_mask_cb.isEnabled() is False
-    assert window._brain_mask_cb.toolTip() == "Segmentation model weights not configured"
+    assert "Segmentation model weights not configured" in window._brain_mask_cb.toolTip()
 
 
 def test_brain_mask_checkbox_disabled_when_slice_not_yet_segmented(monkeypatch):
@@ -110,7 +111,7 @@ def test_brain_mask_checkbox_disabled_when_slice_not_yet_segmented(monkeypatch):
     _load_fake_volume(window)  # stubs `_maybe_auto_segment_volume`, so nothing actually segments
 
     assert window._brain_mask_cb.isEnabled() is False
-    assert window._brain_mask_cb.toolTip() == "Waiting for anatomy segmentation on this slice…"
+    assert "Waiting for anatomy segmentation on this slice…" in window._brain_mask_cb.toolTip()
 
 
 def test_brain_mask_checkbox_toggle_sets_and_clears_overlay():
@@ -163,14 +164,14 @@ def test_result_is_cached_per_slice_and_not_recomputed(monkeypatch):
     window._on_brain_tissue_method_selected("HU Thresholding")
 
     call_count = 0
-    real_classify = main_window_module.classify_brain_tissue
+    real_classify = brain_tissue_vm_module.classify_brain_tissue
 
     def _counting_classify(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return real_classify(*args, **kwargs)
 
-    monkeypatch.setattr(main_window_module, "classify_brain_tissue", _counting_classify)
+    monkeypatch.setattr(brain_tissue_vm_module, "classify_brain_tissue", _counting_classify)
 
     window._white_matter_cb.setChecked(True)
     window._white_matter_cb.setChecked(False)
@@ -270,13 +271,13 @@ def test_settings_dialog_cancel_leaves_settings_unchanged(monkeypatch):
 
 def test_ensure_result_passes_configured_settings_through(monkeypatch):
     captured = {}
-    real_classify = main_window_module.classify_brain_tissue
+    real_classify = brain_tissue_vm_module.classify_brain_tissue
 
     def _capturing_classify(slice_hu, brain_mask, **kwargs):
         captured.update(kwargs)
         return real_classify(slice_hu, brain_mask, **kwargs)
 
-    monkeypatch.setattr(main_window_module, "classify_brain_tissue", _capturing_classify)
+    monkeypatch.setattr(brain_tissue_vm_module, "classify_brain_tissue", _capturing_classify)
 
     window = MainWindowView()
     _load_fake_volume(window)
@@ -293,46 +294,70 @@ def test_ensure_result_passes_configured_settings_through(monkeypatch):
     assert captured["white_matter_range"] == (15.0, 25.0)
 
 
-def test_menu_offers_all_three_methods_and_defaults_to_fcm():
+def test_method_dropdown_offers_all_three_methods_and_defaults_to_adaptive():
     window = MainWindowView()
+    combo = window._brain_tissue_method_combo
 
-    assert list(window._brain_tissue_method_actions) == ["Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding"]
-    assert window._brain_tissue_method == "Fuzzy C-Means"
-    assert window._brain_tissue_method_actions["Fuzzy C-Means"].isChecked() is True
-    assert window._brain_tissue_method_actions["HU Thresholding"].isChecked() is False
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding"]
+    assert window._brain_tissue_method == "Adaptive Thresholding"
+    assert combo.currentText() == "Adaptive Thresholding"
 
 
-def test_method_menu_actions_are_always_enabled_no_study_loaded_gate():
+def test_method_dropdown_is_always_enabled_no_study_loaded_gate():
     # Unlike the checkboxes, choosing a method is a plain preference (like
     # its own settings dialog) - no study needs to be loaded to set it up.
     window = MainWindowView()
-    for action in window._brain_tissue_method_actions.values():
-        assert action.isEnabled() is True
+    assert window._brain_tissue_method_combo.isEnabled() is True
+    assert window._brain_tissue_settings_btn.isEnabled() is True
+
+
+def test_choosing_a_method_in_the_dropdown_switches_the_classifier():
+    window = MainWindowView()
+
+    window._brain_tissue_method_combo.setCurrentText("Adaptive Thresholding")
+
+    assert window._brain_tissue_method == "Adaptive Thresholding"
+
+
+def test_settings_button_opens_the_selected_methods_dialog(monkeypatch):
+    window = MainWindowView()
+    opened = []
+    monkeypatch.setattr(window, "_on_fcm_settings_clicked", lambda: opened.append("fcm"))
+    monkeypatch.setattr(window, "_on_adaptive_settings_clicked", lambda: opened.append("adaptive"))
+    monkeypatch.setattr(window, "_on_brain_tissue_settings_clicked", lambda: opened.append("threshold"))
+
+    window._brain_tissue_settings_btn.click()
+    window._brain_tissue_method_combo.setCurrentText("HU Thresholding")
+    window._brain_tissue_settings_btn.click()
+    window._brain_tissue_method_combo.setCurrentText("Fuzzy C-Means")
+    window._brain_tissue_settings_btn.click()
+
+    assert opened == ["adaptive", "threshold", "fcm"]
 
 
 def test_switching_method_clears_cache_and_dispatches_to_the_right_function(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        main_window_module, "classify_brain_tissue_fcm", lambda *a, **k: calls.append("fcm") or _empty_result()
+        brain_tissue_vm_module, "classify_brain_tissue_fcm", lambda *a, **k: calls.append("fcm") or _empty_result()
     )
     monkeypatch.setattr(
-        main_window_module, "classify_brain_tissue_adaptive", lambda *a, **k: calls.append("adaptive") or _empty_result()
+        brain_tissue_vm_module, "classify_brain_tissue_adaptive", lambda *a, **k: calls.append("adaptive") or _empty_result()
     )
 
     window = MainWindowView()
     _load_fake_volume(window)
     window._white_matter_cb.setChecked(True)
-    assert calls == ["fcm"]  # default method is Fuzzy C-Means
+    assert calls == ["adaptive"]  # default method is Adaptive Thresholding
 
     # Checkbox is already checked, so switching methods clears the stale
     # cache AND immediately recomputes under the new method - same
     # "apply now" behavior as a settings-dialog change.
-    window._on_brain_tissue_method_selected("Adaptive Thresholding")
-    assert calls == ["fcm", "adaptive"]
+    window._on_brain_tissue_method_selected("Fuzzy C-Means")
+    assert calls == ["adaptive", "fcm"]
     assert 0 in window._brain_tissue_cache
 
     window._on_brain_tissue_method_selected("HU Thresholding")
-    assert calls == ["fcm", "adaptive"]  # real (unmocked) threshold method ran instead, not one of the fakes above
+    assert calls == ["adaptive", "fcm"]  # real (unmocked) threshold method ran instead, not one of the fakes above
     assert 0 in window._brain_tissue_cache  # still recomputed and cached, just via the real function
 
 

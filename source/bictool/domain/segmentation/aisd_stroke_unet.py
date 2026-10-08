@@ -27,7 +27,6 @@ repo's own `data_preparation/convert_trainval_dicom_to_hu_nifti.py`).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -52,25 +51,9 @@ class StrokeSegmentationResult:
 
 
 def build_model():
-    """Builds the (untrained) 2-class stroke `keras.Model` - call `load_weights` before `segment_slice`."""
+    """Builds the (untrained) 2-class stroke `keras.Model` - load its weights
+    (`integration.model_files.load_stroke_weights`) before `segment_slice_for_stroke`."""
     return build_unet(NB_CLASSES)
-
-
-def load_weights(model, weights_path: str | Path) -> None:
-    """Loads pretrained weights into `model` (from `build_model()`).
-
-    Raises `FileNotFoundError` with an actionable message rather than a
-    bare Keras/h5py error - this weights file is never bundled with
-    BICTool (see `infrastructure.config`).
-    """
-    path = Path(weights_path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Stroke segmentation weights not found at {path}. This file is not bundled with "
-            "BICTool - obtain best_stage2.weights.h5 from the AISD-HeadCT-Transfer-Learning "
-            "project and configure its path (see infrastructure.config)."
-        )
-    model.load_weights(str(path))
 
 
 def segment_slice_for_stroke(model, slice_hu: np.ndarray) -> StrokeSegmentationResult:

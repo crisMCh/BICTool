@@ -33,7 +33,7 @@ class StrokeWorker(QRunnable):
     abstraction (see `Scheduler` for dispatch). Connect to `signals` before
     handing this to `Scheduler.submit` - the job may start running, and
     emitting, on another thread immediately. `model` must already have
-    weights loaded (see `aisd_stroke_unet.load_weights`).
+    weights loaded (see `integration.model_files.load_stroke_weights`).
     """
 
     def __init__(self, model, slice_hu: np.ndarray) -> None:

@@ -41,6 +41,12 @@ def normalize_rect(xa: int, ya: int, xb: int, yb: int, image_width: int, image_h
     return RoiRect(x0, y0, x1, y1)
 
 
+def candidate_to_rect(candidate) -> RoiRect:
+    """A domain `roi_selection.structured_roi.RoiCandidate` (row/col corners)
+    as the View's `RoiRect` (x/y corners)."""
+    return RoiRect(candidate.col0, candidate.row0, candidate.col1, candidate.row1)
+
+
 def crop_roi(pixels: np.ndarray, rect: RoiRect) -> np.ndarray:
     """Crops `pixels` (2D array, row-major: [y, x]) to `rect`."""
     return pixels[rect.y0 : rect.y1, rect.x0 : rect.x1]

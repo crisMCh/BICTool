@@ -13,7 +13,10 @@ package's own bundled multi-row self-test, which passes) - see
 import numpy as np
 import pytest
 
-from bictool.domain.results.classification import classify_quality, scale_features, _load_model
+from bictool.domain.results.classification import classify_quality, scale_features
+from bictool.integration.model_files import default_chest_svm_model
+
+MODEL = default_chest_svm_model()  # the shipped chest-CT SVM
 
 # Raw (unscaled) feature vectors: rows 1 and 12 of the training set
 # (`OctaveFeatSet.mat`), and a hand-crafted vector resembling a real
@@ -30,14 +33,13 @@ CASES = [
 
 @pytest.mark.parametrize("features, expected_decision, expected_label", CASES)
 def test_classify_quality_matches_octave(features, expected_decision, expected_label):
-    label, decision = classify_quality(features)
+    label, decision = classify_quality(features, MODEL)
     assert decision == pytest.approx(expected_decision, rel=1e-9)
     assert label == expected_label
 
 
 def test_scale_features_uses_shipped_training_range():
-    model = _load_model()
     # Scaling the training set's own min should give exactly 0, and its own
     # max should give exactly 1, for every feature.
-    np.testing.assert_allclose(scale_features(model["feature_min"]), np.zeros(7), atol=1e-12)
-    np.testing.assert_allclose(scale_features(model["feature_max"]), np.ones(7), atol=1e-12)
+    np.testing.assert_allclose(scale_features(MODEL["feature_min"], MODEL), np.zeros(7), atol=1e-12)
+    np.testing.assert_allclose(scale_features(MODEL["feature_max"], MODEL), np.ones(7), atol=1e-12)

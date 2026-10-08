@@ -42,6 +42,7 @@ def test_middle_button_drag_pans_by_adjusting_scrollbar_values():
     press = QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(50, 50),
+        QPointF(50, 50),  # global position (Qt 6 constructor)
         Qt.MouseButton.MiddleButton,
         Qt.MouseButton.MiddleButton,
         Qt.KeyboardModifier.NoModifier,
@@ -50,6 +51,7 @@ def test_middle_button_drag_pans_by_adjusting_scrollbar_values():
     move = QMouseEvent(
         QMouseEvent.Type.MouseMove,
         QPointF(20, 50),
+        QPointF(20, 50),  # global position (Qt 6 constructor)
         Qt.MouseButton.NoButton,
         Qt.MouseButton.MiddleButton,
         Qt.KeyboardModifier.NoModifier,
@@ -64,6 +66,7 @@ def test_middle_button_drag_pans_by_adjusting_scrollbar_values():
     release = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
         QPointF(20, 50),
+        QPointF(20, 50),  # global position (Qt 6 constructor)
         Qt.MouseButton.MiddleButton,
         Qt.MouseButton.MiddleButton,
         Qt.KeyboardModifier.NoModifier,
@@ -115,6 +118,7 @@ def test_double_click_resets_zoom():
     double_click = QMouseEvent(
         QMouseEvent.Type.MouseButtonDblClick,
         QPointF(100, 100),
+        QPointF(100, 100),  # global position (Qt 6 constructor)
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
@@ -220,6 +224,7 @@ def _move_event(pos: tuple[int, int]) -> QMouseEvent:
     return QMouseEvent(
         QMouseEvent.Type.MouseMove,
         QPointF(*pos),
+        QPointF(*pos),  # global position (Qt 6 constructor)
         Qt.MouseButton.NoButton,
         Qt.MouseButton.LeftButton,  # buttons held during the move
         Qt.KeyboardModifier.NoModifier,
@@ -230,6 +235,7 @@ def _press_event(pos: tuple[int, int]) -> QMouseEvent:
     return QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(*pos),
+        QPointF(*pos),  # global position (Qt 6 constructor)
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
@@ -305,6 +311,7 @@ def test_live_preview_rect_matches_final_release_rect():
     release = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
         QPointF(60, 45),
+        QPointF(60, 45),  # global position (Qt 6 constructor)
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
@@ -330,6 +337,7 @@ def test_commit_current_as_saves_the_draft_and_draws_it_in_that_slots_color():
     release = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
         QPointF(60, 45),
+        QPointF(60, 45),  # global position (Qt 6 constructor)
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
@@ -588,6 +596,7 @@ def _release_event(pos: tuple[int, int]) -> QMouseEvent:
     return QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
         QPointF(*pos),
+        QPointF(*pos),  # global position (Qt 6 constructor)
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
@@ -764,3 +773,117 @@ def test_new_image_clears_committed_rois():
     viewport.set_image(np.zeros((100, 100), dtype=np.float64))
 
     assert viewport.roi("roi1") is None
+
+
+def _key_event(key):
+    from PySide6.QtGui import QKeyEvent
+
+    return QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+
+
+def test_falx_and_septum_pairs_are_drawn_side_by_side_with_labels():
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+
+    viewport = _one_to_one_viewport()
+    for key, rect in (
+        ("falx.roi1", RoiRect(10, 10, 30, 30)),
+        ("falx.roi2", RoiRect(40, 10, 60, 30)),
+        ("septum.roi1", RoiRect(10, 50, 30, 70)),
+        ("septum.roi2", RoiRect(40, 50, 60, 70)),
+    ):
+        viewport.set_roi(key, rect)
+
+    labels = sorted(
+        item.text() for item in viewport.scene().items() if isinstance(item, QGraphicsSimpleTextItem)
+    )
+    assert labels == ["F1", "F2", "S1", "S2"]
+    assert viewport.roi("septum.roi2") == RoiRect(40, 50, 60, 70)
+
+
+def test_clicking_an_roi_selects_it_and_delete_asks_to_remove_it():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("septum.roi1", RoiRect(50, 50, 70, 70))
+    selected, deleted = [], []
+    viewport.roi_selected.connect(selected.append)
+    viewport.roi_delete_requested.connect(deleted.append)
+
+    viewport.mousePressEvent(_press_event((60, 60)))
+    viewport.mouseReleaseEvent(_release_event((60, 60)))
+    viewport.keyPressEvent(_key_event(Qt.Key.Key_Delete))
+
+    assert selected == ["septum.roi1"]
+    assert viewport.selected_roi() == "septum.roi1"
+    assert deleted == ["septum.roi1"]
+
+
+def test_clicking_empty_image_clears_the_selection():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("falx.roi1", RoiRect(50, 50, 70, 70))
+    viewport.select_roi("falx.roi1")
+
+    viewport.mousePressEvent(_press_event((5, 5)))
+    viewport.mouseReleaseEvent(_release_event((5, 5)))
+
+    assert viewport.selected_roi() is None
+
+
+def test_delete_does_nothing_without_selection_or_while_locked():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("falx.roi1", RoiRect(50, 50, 70, 70))
+    deleted = []
+    viewport.roi_delete_requested.connect(deleted.append)
+
+    viewport.keyPressEvent(_key_event(Qt.Key.Key_Delete))  # nothing selected
+    viewport.select_roi("falx.roi1")
+    viewport.set_locked(True)
+    viewport.keyPressEvent(_key_event(Qt.Key.Key_Delete))  # confirmed -> locked
+
+    assert deleted == []
+
+
+def test_selection_is_cleared_when_another_slice_is_shown():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("falx.roi1", RoiRect(50, 50, 70, 70))
+    viewport.select_roi("falx.roi1")
+
+    viewport.set_image(np.zeros((100, 100)))
+
+    assert viewport.selected_roi() is None
+
+
+def test_selecting_an_roi_that_is_not_shown_selects_nothing():
+    viewport = _one_to_one_viewport()
+    viewport.select_roi("septum.roi2")
+    assert viewport.selected_roi() is None
+
+
+def _context_event(pos):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+
+    return QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(*pos), QPoint(*pos))
+
+
+def test_right_click_on_an_roi_or_the_drawn_rectangle_asks_for_its_menu():
+    viewport = _one_to_one_viewport()
+    viewport.set_roi("falx.roi1", RoiRect(50, 50, 70, 70))
+    viewport.set_draft(RoiRect(100, 100, 120, 120))
+    requested = []
+    viewport.context_menu_requested.connect(lambda key, pos: requested.append(key))
+
+    viewport.contextMenuEvent(_context_event((60, 60)))
+    viewport.contextMenuEvent(_context_event((110, 110)))
+    viewport.contextMenuEvent(_context_event((5, 5)))  # empty image: no menu
+
+    assert requested == ["falx.roi1", ""]
+
+
+def test_delete_key_without_a_selected_roi_deletes_the_drawn_rectangle():
+    viewport = _one_to_one_viewport()
+    viewport.set_draft(RoiRect(100, 100, 120, 120))
+    deleted = []
+    viewport.roi_delete_requested.connect(deleted.append)
+
+    viewport.keyPressEvent(_key_event(Qt.Key.Key_Delete))
+
+    assert deleted == [""]

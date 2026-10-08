@@ -4,6 +4,11 @@
 `NPS_int_scale` (a normalized-but-unused rescaling of the interpolated PS
 curve, referenced only by the plotting code) is computed in the original but
 never contributes to `structNpsMtfRatioResults` - it is not translated here.
+
+Kept unchanged as the "octave" QA recipe. Its frequency axes are not true
+spatial frequency (and the PS/MTF range depends on the pixel spacing) - the
+default "physical" recipe (`physical_spectra.py`) corrects that; see
+docs/qa_method/physical_qa_recipe.md.
 """
 
 from dataclasses import dataclass
@@ -22,6 +27,11 @@ class NpsMtfRatioResult:
     loc_max: float
     ratio_nps_mtf: np.ndarray
     f_int: np.ndarray
+    # Physical recipe only (`physical_spectra.ratio_ps_mtf_in_band`): the
+    # frequency band [1/mm] the features were computed on, and whether it had
+    # to be cut short because a spectrum didn't reach its upper end.
+    band: tuple[float, float] | None = None
+    band_truncated: bool = False
 
 
 def ratio_nps_mtf(f_nps, nps, f_mtf, mtf):

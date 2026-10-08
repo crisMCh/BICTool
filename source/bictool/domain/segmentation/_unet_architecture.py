@@ -40,8 +40,8 @@ _ENCODER_FILTERS = (64, 128, 256, 512, 1024)
 
 def build_unet(nb_classes: int) -> keras.Model:
     """Builds the shared U-Net architecture with an `nb_classes`-wide
-    softmax head. Weights are not loaded here - see `load_weights` in
-    `head_ct_unet.py`/`aisd_stroke_unet.py`.
+    softmax head. Weights are not loaded here (no file I/O in the domain) -
+    see `integration/model_files.py` (`load_anatomy_weights`, `load_stroke_weights`).
 
     Parameters
     ----------

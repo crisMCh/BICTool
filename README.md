@@ -16,5 +16,6 @@ pytest
 - `source/bictool/` — application source, organized by architectural layer (presentation, application, domain, integration, infrastructure)
 - `tests/` — automated tests, mirroring the source layout
 - `architecture/` — architecture description and diagram
+- `docs/` — method documentation (`docs/qa_method/`: physical QA recipe, head-CT quality classifier, model card)
 - `requirements/` — requirements specification
 - `design/` — design artifacts (UI mockups, etc.)

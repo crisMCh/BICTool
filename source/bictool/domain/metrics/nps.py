@@ -15,6 +15,11 @@ is dead code and is not translated here.
 `radialAverage.m` similarly computes a distance-weighted `values` array and
 then immediately overwrites it with the unweighted `values = IMG(mask)` -
 the weighting is dead code and is not translated.
+
+Kept unchanged as the "octave" QA recipe. Its frequency axes are not true
+spatial frequency (and the PS/MTF range depends on the pixel spacing) - the
+default "physical" recipe (`physical_spectra.py`) corrects that; see
+docs/qa_method/physical_qa_recipe.md.
 """
 
 from dataclasses import dataclass

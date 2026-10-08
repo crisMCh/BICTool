@@ -55,7 +55,6 @@ doesn't need real weights at all.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -97,26 +96,9 @@ class SegmentationResult:
 
 
 def build_model():
-    """Builds the (untrained) 17-class anatomy `keras.Model` - call `load_weights` before `segment_slice`."""
+    """Builds the (untrained) 17-class anatomy `keras.Model` - load its
+    weights (`integration.model_files.load_anatomy_weights`) before `segment_slice`."""
     return build_unet(NB_CLASSES)
-
-
-def load_weights(model, weights_path: str | Path) -> None:
-    """Loads pretrained weights into `model` (from `build_model()`).
-
-    Raises `FileNotFoundError` with an actionable message rather than
-    letting a bare Keras/h5py error surface - this weights file is never
-    bundled with BICTool (see `infrastructure.config`), so a missing path
-    is an expected, user-actionable situation, not a bug.
-    """
-    path = Path(weights_path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Anatomy segmentation weights not found at {path}. This file is not bundled with "
-            "BICTool - download it from https://github.com/jasonccai/HeadCTSegmentation and "
-            "configure its path (see infrastructure.config)."
-        )
-    model.load_weights(str(path))
 
 
 def segment_slice(model, slice_hu: np.ndarray) -> SegmentationResult:

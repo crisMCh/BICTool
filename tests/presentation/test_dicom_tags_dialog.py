@@ -1,6 +1,5 @@
-import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
-from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+from pydicom.uid import ExplicitVRLittleEndian
 
 from bictool.presentation.views.dicom_tags_dialog import DicomTagsDialog
 

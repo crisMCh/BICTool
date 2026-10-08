@@ -7,6 +7,11 @@ MATLAB-vs-Octave (`ENV_TYPE`) branching, and file-path/server-host
 returned numeric results. `edgePixels`/gradient-magnitude bookkeeping used
 only by the original's (partly already-commented-out) plotting helpers is
 likewise not translated.
+
+Kept unchanged as the "octave" QA recipe. Its frequency axes are not true
+spatial frequency (and the PS/MTF range depends on the pixel spacing) - the
+default "physical" recipe (`physical_spectra.py`) corrects that; see
+docs/qa_method/physical_qa_recipe.md.
 """
 
 import numpy as np

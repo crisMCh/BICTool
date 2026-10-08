@@ -7,7 +7,6 @@ argmax, per-class mask decode, crop-back) in isolation.
 """
 
 import numpy as np
-import pytest
 
 from bictool.domain.segmentation import head_ct_unet
 
@@ -57,10 +56,3 @@ def test_background_class_zero_is_not_a_named_structure():
     assert 0 not in head_ct_unet._CLASS_NAMES
     assert len(head_ct_unet._CLASS_NAMES) == head_ct_unet.NB_CLASSES - 1
 
-
-def test_load_weights_raises_a_clear_error_for_a_missing_file(tmp_path):
-    model = _FakeModel(np.zeros((512, 512), dtype=np.int64), nb_classes=head_ct_unet.NB_CLASSES)
-    missing_path = tmp_path / "does_not_exist.hdf5"
-
-    with pytest.raises(FileNotFoundError, match="not found"):
-        head_ct_unet.load_weights(model, missing_path)

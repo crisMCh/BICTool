@@ -17,6 +17,9 @@ science = ["numpy", "scipy", "scikit-image"]
 # PySide6 (Qt6) chosen 2026-09-10 over PySide2 - see architecture/layers_description.md,
 # "User Interface Framework". Requires Windows 10 (1809+); no Windows 7/8 support.
 gui = ["PySide6"]
+# Only for training the image-quality classifier (application/train_classifier.py);
+# the app itself evaluates the exported model with NumPy.
+train = ["scikit-learn"]
 # TensorFlow/Keras chosen over the architecture doc's PyTorch (layers_description.md,
 # "Image Processing and Analysis") for FR-02 anatomy segmentation and the stroke-detection
 # module - both available pretrained models (jasonccai/HeadCTSegmentation,

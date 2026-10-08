@@ -9,6 +9,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from bictool.domain.core_api import evaluate_slice_quality
+from bictool.integration.model_files import default_chest_svm_model
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class Worker(QRunnable):
         act_cont_mask_x: int = 10,
         act_cont_mask_y: int = 10,
         mtf_seeds: Sequence[tuple[int, int]] | None = None,
+        recipe: str | None = None,
+        svm_model=None,
     ) -> None:
         super().__init__()
         self._img_roi1 = img_roi1
@@ -48,6 +51,8 @@ class Worker(QRunnable):
         self._act_cont_mask_x = act_cont_mask_x
         self._act_cont_mask_y = act_cont_mask_y
         self._mtf_seeds = mtf_seeds
+        self._recipe = recipe
+        self._svm_model = svm_model  # None: the shipped chest-CT SVM (legacy per-slice verdict)
         self.signals = WorkerSignals()
 
     def run(self) -> None:
@@ -67,7 +72,9 @@ class Worker(QRunnable):
                 self._pix_spc,
                 self._act_cont_mask_x,
                 self._act_cont_mask_y,
+                svm_model=self._svm_model if self._svm_model is not None else default_chest_svm_model(),
                 mtf_seeds=self._mtf_seeds,
+                **({"recipe": self._recipe} if self._recipe else {}),
             )
         except Exception as exc:  # report to the GUI thread instead of crashing the pool thread
             logger.exception("Worker failed: evaluate_slice_quality raised %s", type(exc).__name__)

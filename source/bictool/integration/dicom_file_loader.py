@@ -221,6 +221,9 @@ class SeriesCandidate:
     sorted_paths: list[Path]
     slice_locations_mm: list[float | None]
     _reference_header: pydicom.Dataset = field(repr=False, compare=False)
+    # Whether the slices form an axial stack (see `_stack_is_axial`); None =
+    # not determined, then the reference header's orientation decides.
+    axial: bool | None = None
 
     @property
     def num_slices(self) -> int:
@@ -444,13 +447,15 @@ def _build_candidate(group: list[pydicom.Dataset]) -> SeriesCandidate:
     thickness = _as_float_or_none(getattr(reference, "SliceThickness", None))
     if thickness is not None:
         label_parts.append(f"{thickness:g}mm")
-    if _is_axial(reference):
+    axial = _stack_is_axial(sorted_group)
+    if axial:
         label_parts.append("axial")
     return SeriesCandidate(
         label=" · ".join(label_parts),
         sorted_paths=[Path(ds.filename) for ds in sorted_group],
         slice_locations_mm=[_slice_location_mm(ds) for ds in sorted_group],
         _reference_header=reference,
+        axial=axial,
     )
 
 
@@ -461,13 +466,22 @@ def _build_candidate(group: list[pydicom.Dataset]) -> SeriesCandidate:
 _PREFERRED_SLICE_THICKNESS_MM = 4.0
 
 
+# A slice stack counts as axial when its normal is within this angle of the
+# patient's Z axis - tilted/angulated axial head CT included (a real Siemens
+# series with 15 deg gantry tilt plus angulation sat ~47 deg off Z), true
+# coronal/sagittal stacks (90 deg) not.
+_AXIAL_MAX_ANGLE_DEG = 60.0
+
+
 def _is_axial(ds: pydicom.Dataset) -> bool:
     """True if `ImageOrientationPatient`'s row/column direction cosines
-    describe a (near-)axial slice - i.e. the slice normal (their cross
-    product) points predominantly along the patient's Z axis, the same test
-    dcm2niix/most DICOM toolkits use to classify slice orientation. Unknown
-    (tag absent) is treated as *not* axial - it's a guess either way, and a
-    missing tag shouldn't be scored as if it positively confirmed axial.
+    describe an axial slice - the slice normal (their cross product) within
+    `_AXIAL_MAX_ANGLE_DEG` of the patient's Z axis. Unknown (tag absent) is
+    treated as *not* axial - it's a guess either way, and a missing tag
+    shouldn't be scored as if it positively confirmed axial.
+
+    Only a fallback - see `_stack_is_axial`: some scanners write the source
+    volume's orientation into coronal/sagittal reformats.
     """
     orientation = getattr(ds, "ImageOrientationPatient", None)
     if orientation is None or len(orientation) != 6:
@@ -478,8 +492,36 @@ def _is_axial(ds: pydicom.Dataset) -> bool:
     # `_parse_decimal`'s docstring.
     row = np.array([_parse_decimal(v) for v in orientation[0:3]])
     col = np.array([_parse_decimal(v) for v in orientation[3:6]])
-    normal = np.cross(row, col)
-    return bool(np.argmax(np.abs(normal)) == 2)
+    return _normal_is_axial(np.cross(row, col))
+
+
+def _normal_is_axial(normal: np.ndarray) -> bool:
+    norm = np.linalg.norm(normal)
+    if norm == 0:
+        return False
+    return bool(abs(normal[2]) / norm >= np.cos(np.radians(_AXIAL_MAX_ANGLE_DEG)))
+
+
+def _stack_is_axial(group: list[pydicom.Dataset]) -> bool:
+    """Whether a series' slices are stacked axially - judged from where the
+    slices actually are (`ImagePositionPatient`), not from the orientation
+    tag: real Siemens photon-counting exports write the source volume's
+    axial `ImageOrientationPatient` (and ImageType "AXIAL") into their
+    coronal ("kor") and sagittal ("sag") MPR reformats, whose slices then
+    step along Y/X. The stacking direction is the main axis of all slice
+    positions (order-independent, robust to a stray slice). Series with
+    fewer than 3 positioned slices fall back to `_is_axial`.
+    """
+    positions = []
+    for ds in group:
+        position = getattr(ds, "ImagePositionPatient", None)
+        if position is not None and len(position) == 3:
+            positions.append([_parse_decimal(v) for v in position])
+    points = np.array(positions, dtype=np.float64)
+    if len(points) < 3 or np.allclose(points, points[0]):
+        return _is_axial(group[0])
+    _, _, vt = np.linalg.svd(points - points.mean(axis=0), full_matrices=False)
+    return _normal_is_axial(vt[0])
 
 
 def _candidate_sort_key(candidate: SeriesCandidate) -> tuple:
@@ -491,7 +533,7 @@ def _candidate_sort_key(candidate: SeriesCandidate) -> tuple:
     """
     ref = candidate._reference_header
     is_ct = getattr(ref, "Modality", None) == "CT"
-    is_axial = _is_axial(ref)
+    is_axial = candidate.axial if candidate.axial is not None else _is_axial(ref)
     thickness = _as_float_or_none(getattr(ref, "SliceThickness", None))
     thickness_distance = abs(thickness - _PREFERRED_SLICE_THICKNESS_MM) if thickness is not None else float("inf")
     return (

@@ -34,7 +34,7 @@ class SegmentationWorker(QRunnable):
     abstraction (see `Scheduler` for dispatch). Connect to `signals` before
     handing this to `Scheduler.submit` - the job may start running, and
     emitting, on another thread immediately. `model` must already have
-    weights loaded (see `head_ct_unet.load_weights`) - loading isn't this
+    weights loaded (see `integration.model_files.load_anatomy_weights`) - loading isn't this
     worker's job, so the same loaded model can be reused across slices
     without reloading weights each time.
     """

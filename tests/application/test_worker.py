@@ -88,4 +88,18 @@ def test_run_passes_mtf_seeds_through(monkeypatch):
 
     Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, mtf_seeds=[(6, 7), (3, 3)]).run()
 
-    assert received_kwargs == [{"mtf_seeds": [(6, 7), (3, 3)]}]
+    assert received_kwargs[0]["mtf_seeds"] == [(6, 7), (3, 3)]
+
+
+def test_run_passes_the_shipped_svm_unless_one_is_given(monkeypatch):
+    from bictool.integration.model_files import default_chest_svm_model
+
+    received_kwargs = []
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: received_kwargs.append(k) or object())
+    own_model = {"custom": np.zeros(1)}
+
+    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC).run()
+    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=own_model).run()
+
+    assert received_kwargs[0]["svm_model"] is default_chest_svm_model()
+    assert received_kwargs[1]["svm_model"] is own_model

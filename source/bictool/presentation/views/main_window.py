@@ -114,9 +114,7 @@ analysis.
 from __future__ import annotations
 
 import logging
-import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -124,8 +122,10 @@ import numpy as np
 import pydicom
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QPainter
+from PySide6.QtGui import QActionGroup, QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
+    QScrollArea,
+    QSplitter,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -138,11 +138,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QButtonGroup,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QSlider,
     QStackedWidget,
     QTabWidget,
@@ -152,21 +152,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bictool.application.brain_tissue_volume_worker import BrainTissueVolumeWorker
 from bictool.application.dicom_load_worker import DicomLoadWorker
 from bictool.application.scheduler import Scheduler
 from bictool.application.worker import Worker
-from bictool.domain.metrics.mtf_seed import mtf_seed_candidates
-from bictool.domain.results.study_quality import SliceQualityResult
-from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict, summarize_metrics
-from bictool.domain.roi_selection.homogeneous_roi import FALLBACK, VENTRICLE, WHITE_MATTER, find_roi2_candidate
+from bictool.domain.results.study_quality import (
+    RECIPE_OCTAVE,
+    RECIPE_PHYSICAL,
+    SliceQualityResult,
+)
+from bictool.domain.results.study_summary import summarize_metrics
+from bictool.domain.roi_selection.homogeneous_roi import (
+    FALLBACK,
+    VENTRICLE,
+    WHITE_MATTER,
+)
 from bictool.domain.roi_selection.structured_roi import (
     DURAL_FOLDS,
     SEPTUM_PELLUCIDUM,
-    STRUCTURES,
-    RoiCandidate,
-    estimate_midline_direction,
-    find_roi1_candidate,
 )
 from bictool.domain.segmentation.brain_tissue import (
     DEFAULT_AIR_HU_CUTOFF,
@@ -176,10 +178,7 @@ from bictool.domain.segmentation.brain_tissue import (
     DEFAULT_MIN_COMPONENT_SIZE,
     DEFAULT_SMOOTHING_SIZE,
     DEFAULT_WHITE_MATTER_RANGE,
-    classify_brain_tissue,
-    extract_brain_mask,
 )
-from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
 from bictool.domain.segmentation.brain_tissue_adaptive import (
     DEFAULT_BLOCK_SIZE,
     DEFAULT_PLAUSIBLE_RANGE,
@@ -187,7 +186,6 @@ from bictool.domain.segmentation.brain_tissue_adaptive import (
 from bictool.domain.segmentation.brain_tissue_adaptive import (
     DEFAULT_MIN_COMPONENT_SIZE as ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
 )
-from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
 from bictool.domain.segmentation.brain_tissue_fcm import (
     DEFAULT_FUZZINESS,
     DEFAULT_MAX_ITER,
@@ -196,23 +194,59 @@ from bictool.domain.segmentation.brain_tissue_fcm import (
 from bictool.domain.segmentation.brain_tissue_fcm import (
     DEFAULT_MIN_COMPONENT_SIZE as FCM_DEFAULT_MIN_COMPONENT_SIZE,
 )
-from bictool.domain.segmentation.brain_tissue_fcm import classify_brain_tissue_fcm
 from bictool.infrastructure.config import load_config
 from bictool.infrastructure.logging_config import QtLogHandler, configure_logging
-from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate, load_series
-from bictool.integration.results_export import (
-    ExportContext,
-    StudyExportContext,
-    export_metrics_csv,
-    export_metrics_excel,
-    export_study_csv,
-    export_study_excel,
+from bictool.infrastructure.ui_settings import (
+    MAIN_SPLITTER,
+    ROI_DETAILS_OPEN,
+    SHOW_TRACE_LOG,
+    TRACE_SPLITTER,
+    VERDICT_DETAILS_OPEN,
+    UiSettings,
+    section_key,
 )
+from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate, load_series
+from bictool.integration.model_files import default_head_ct_model
 from bictool.presentation.viewmodels.chart_data import mtf_display_curve
-from bictool.presentation.viewmodels.roi_selection import RoiRect, crop_roi
+from bictool.presentation.viewmodels.display_text import format_dicom_date
+from bictool.presentation.viewmodels.head_ct_verdict_text import (
+    PROVISIONAL_NOTE,
+    PROVISIONAL_SHORT,
+    TONE_BAD,
+    TONE_GOOD,
+    TONE_NEUTRAL,
+)
+from bictool.presentation.viewmodels.help_text import STEP_HINTS, TAB_TOOLTIPS, TOOLTIPS
+from bictool.presentation.viewmodels.roi_pairs import (
+    FALX,
+    PAIR_LABELS,
+    PAIRS,
+    ROI_KEYS,
+    SEPTUM,
+    ROLE_LABELS,
+    ROLE_SHORT,
+    key_label,
+)
+from bictool.presentation.viewmodels.brain_tissue_viewmodel import (
+    METHOD_ADAPTIVE as _BRAIN_TISSUE_METHOD_ADAPTIVE,
+    METHOD_FCM as _BRAIN_TISSUE_METHOD_FCM,
+    METHOD_THRESHOLD as _BRAIN_TISSUE_METHOD_THRESHOLD,
+    METHODS as _BRAIN_TISSUE_METHODS,
+    BrainTissueViewModel,
+)
+from bictool.presentation.viewmodels.export_viewmodel import ExportViewModel
+from bictool.presentation.viewmodels.qa_run_viewmodel import QaRunViewModel
+from bictool.presentation.viewmodels.results_viewmodel import ResultsViewModel
+from bictool.presentation.viewmodels.roi_viewmodel import RoiViewModel
+from bictool.presentation.viewmodels.segmentation_viewmodel import SegmentationViewModel
+from bictool.presentation.viewmodels.stroke_viewmodel import StrokeViewModel
+from bictool.presentation.viewmodels.study_viewmodel import StudyViewModel
+from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.viewmodels.segmentation_overlay import decode_masks_for_checkboxes
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS
 from bictool.presentation.views.adaptive_settings_dialog import AdaptiveSettings, AdaptiveSettingsDialog
+from bictool.presentation.views.collapsible_section import CollapsibleSection
+from bictool.presentation.views.status_bar import StatusPanel
 from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueSettings, BrainTissueSettingsDialog
 from bictool.presentation.views.custom_window_dialog import CustomWindowDialog
 from bictool.presentation.views.dicom_tags_dialog import DicomTagsDialog
@@ -228,14 +262,11 @@ if TYPE_CHECKING:
     # costs a real ~3s at import time, which would otherwise tax every
     # single app launch even for users who never touch segmentation.
     from bictool.application.segmentation_worker import SegmentationWorker
-    from bictool.application.stroke_worker import StrokeWorker
     from bictool.application.volume_segmentation_worker import VolumeSegmentationWorker
     # `NiftiConversionWorker` doesn't import TensorFlow, but does import
     # `dicom2nifti` (a native/SWIG-backed dependency) - deferred for the
     # same "don't tax every launch for a feature not every user touches"
     # reason, not TF's cost specifically.
-    from bictool.application.nifti_conversion_worker import NiftiConversionWorker
-    from bictool.domain.segmentation._nifti_alignment import DicomNiftiVolume
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +281,7 @@ ACCENT = "#49c8de"
 ACCENT_2 = "#d98bd8"
 GOOD = "#5fbf83"
 CRITICAL = "#e0685c"
+WARNING = "#d9a441"
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
@@ -262,6 +294,20 @@ QGroupBox {{
     margin-top: 14px; padding: 10px; font-weight: 600;
 }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; color: {TEXT_MUTED}; }}
+QGroupBox#subBox {{ margin-top: 12px; padding: 4px 6px 6px 6px; border-radius: 6px; font-weight: 500; }}
+QFrame#collapsibleSection {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; }}
+QToolButton#sectionHeader {{
+    background: transparent; border: none; padding: 6px 6px; color: {TEXT};
+    font-weight: 700; font-size: 12px; text-align: left;
+}}
+QToolButton#sectionHeader:hover {{ color: {ACCENT}; }}
+QStatusBar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
+QStatusBar::item {{ border: none; }}
+QStatusBar QProgressBar {{ background: {SURFACE_SUNKEN}; border: 1px solid {BORDER}; border-radius: 4px; }}
+QStatusBar QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
+QPushButton#statusCancelBtn {{ padding: 1px 8px; font-size: 11px; }}
+QSplitter::handle {{ background: {BORDER}; }}
+QSplitter::handle:hover {{ background: {ACCENT}; }}
 QPushButton {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 5px 11px; color: {TEXT};
@@ -367,24 +413,16 @@ _BRAIN_TISSUE_COLORS: dict[str, str] = {
     "Brain Mask": "#8d96a0",  # neutral gray - the skull-strip result itself, not a tissue class
 }
 
-# The three WM/GM classification methods, selected from Tools -> WM/GM
-# Classification (a radio-style submenu, not the sidebar) - each is a
-# separate domain module with its own module docstring explaining its
-# approach/trade-offs, and its own settings dialog (also under Tools).
-# Fuzzy C-Means is the default per explicit request (2026-09-25) after
-# comparing all three candidates the user tried; GMM+MRF (a fourth
+# The three WM/GM classification methods, selected in the Brain Tissue box's
+# Method dropdown (no single method works best on every scan, so it's
+# switched often) - each is a separate domain module with its own module
+# docstring explaining its approach/trade-offs, and its own settings dialog
+# (the box's gear button, also under Tools). Adaptive Thresholding is the
+# default per explicit request (2026-10-01; Fuzzy C-Means was before); GMM+MRF (a fourth
 # candidate briefly implemented for comparison) was removed entirely -
 # see brain_tissue_fcm.py/brain_tissue_adaptive.py's own docstrings for
 # the surviving two, and brain_tissue.py for the original threshold method.
-_BRAIN_TISSUE_METHOD_FCM = "Fuzzy C-Means"
-_BRAIN_TISSUE_METHOD_THRESHOLD = "HU Thresholding"
-_BRAIN_TISSUE_METHOD_ADAPTIVE = "Adaptive Thresholding"
-_BRAIN_TISSUE_METHODS = [
-    _BRAIN_TISSUE_METHOD_FCM,
-    _BRAIN_TISSUE_METHOD_THRESHOLD,
-    _BRAIN_TISSUE_METHOD_ADAPTIVE,
-]
-_BRAIN_TISSUE_DEFAULT_METHOD = _BRAIN_TISSUE_METHOD_FCM
+# WM/GM methods: see `viewmodels.brain_tissue_viewmodel` (imported above).
 
 
 _ROI2_REGION_LABELS = {
@@ -394,25 +432,26 @@ _ROI2_REGION_LABELS = {
 }
 
 
-_STUDY_TABLE_COLUMNS = ["Slice", "MTF area [1/mm]", "NPS ROI2 [HU²mm²]", "PS/MTF LF/HF", "Decision", "Verdict"]
+_STUDY_TABLE_COLUMNS = [
+    "Slice", "Structure", "MTF area [1/mm]", "NPS ROI2 [HU²mm²]", "PS/MTF LF/HF", "Decision", "Verdict",
+]
+# Physical recipe: the last two columns show the study model's per-slice
+# view instead of the legacy chest-CT SVM (docs/qa_method/head_ct_classifier.md).
+_STUDY_TABLE_COLUMNS_PHYSICAL = [*_STUDY_TABLE_COLUMNS[:5], "Resembles (hint)", "Note"]
 
-
-def _candidate_to_rect(candidate: RoiCandidate) -> RoiRect:
-    return RoiRect(candidate.col0, candidate.row0, candidate.col1, candidate.row1)
-
-
-def _format_slice_ranges(slice_indices: list[int]) -> str:
-    """Sorted 0-based indices -> 1-based display ranges, e.g. [19, 20, 21, 30] -> "20–22, 31"."""
-    parts = []
-    start = previous = slice_indices[0]
-    for index in slice_indices[1:] + [None]:
-        if index is not None and index == previous + 1:
-            previous = index
-            continue
-        parts.append(f"{start + 1}" if start == previous else f"{start + 1}–{previous + 1}")
-        if index is not None:
-            start = previous = index
-    return ", ".join(parts)
+# ROI pair -> the segmentation structure its ROI1 sits on.
+_PAIR_STRUCTURES = {FALX: DURAL_FOLDS, SEPTUM: SEPTUM_PELLUCIDUM}
+# Tone (from the ViewModels) -> colour.
+_TONE_COLORS = {TONE_GOOD: GOOD, TONE_BAD: CRITICAL, TONE_NEUTRAL: TEXT_MUTED}
+# Same colors `RoiViewport._ROI_STYLES` draws each slot in.
+# The labels the ROIs carry on the image (`RoiViewport._ROI_STYLES`).
+_ROI_SHORT_LABELS = {"falx.roi1": "F1", "falx.roi2": "F2", "septum.roi1": "S1", "septum.roi2": "S2"}
+_ROI_TABLE_COLORS = {
+    "falx.roi1": "#49c8de",
+    "falx.roi2": "#d98bd8",
+    "septum.roi1": "#6fcf97",
+    "septum.roi2": "#f2994a",
+}
 
 
 class MainWindowView(QMainWindow):
@@ -425,36 +464,21 @@ class MainWindowView(QMainWindow):
         self.setStyleSheet(STYLESHEET)
 
         self._scheduler = Scheduler()
-        self._loaded_volume: DicomVolume | None = None
-        self._current_slice_index: int = 0
+        # Which study/series is open and which slice is shown (MVVM: the
+        # window binds to it; `_loaded_volume` etc. below delegate to it).
+        self._study = StudyViewModel(self._scheduler.submit, self)
+        # ROI pairs per slice (falx + septum, `viewmodels.roi_pairs`): automatic
+        # ROIs, manual ones (saved drawings, moved ROIs - they win) and
+        # deletions. `_roi_rects` is the displayed slice's effective ROIs.
         self._roi_rects: dict[str, RoiRect] = {}
-        # ROIs are per slice: `_roi_rects` is the displayed slice's effective
-        # ROIs (see `_effective_rois`) - hand-set ones (`_manual_rois`,
-        # Set ROI1/ROI2) override automatically selected ones.
-        self._manual_rois: dict[int, dict[str, RoiRect]] = {}
         # Transient line shown in the image's bottom-right corner overlay -
         # live cursor/pixel-value while hovering, or the in-progress
         # rectangle's size while drawing (see `_on_cursor_moved`/
         # `_on_draft_changed`); empty when neither is happening.
         self._interaction_line: str = ""
-        self._active_worker: Worker | None = None
-        # Run All = QA on every slice with both ROIs, one `Worker` at a time
-        # (see `_run_next_qa_slice`). `_qa_jobs` is the queue while a batch
-        # runs (None otherwise); results/errors are kept per slice for the
-        # Results page and the study summary.
-        self._qa_jobs: list[int] | None = None
-        self._qa_total = 0
-        self._qa_active_slice: int | None = None
-        self._qa_cancel_requested = False
-        self._qa_results: dict[int, SliceQualityResult] = {}
-        self._qa_errors: dict[int, str] = {}
-        self._active_dicom_load_worker: DicomLoadWorker | None = None
-        self._series_candidates: list[SeriesCandidate] = []
         # The most recently computed result (and the non-identifying context
         # describing where it came from) - what Export Results (FR-07)
         # actually writes out. `None` until Run All succeeds at least once.
-        self._last_result: SliceQualityResult | None = None
-        self._last_export_context: ExportContext | None = None
 
         # Segmentation (FR-02) and stroke detection - both wrap external
         # pretrained models (see domain.segmentation's module docstring for
@@ -465,33 +489,26 @@ class MainWindowView(QMainWindow):
         # .build_unet`'s docstring for the ~157s-to-~1-2s XLA fix), so this
         # is more about avoiding pointless recompute on repeated navigation
         # than about tolerating an otherwise-unusable wait.
-        self._segmentation_config = load_config()
-        self._anatomy_model = None
-        self._stroke_model = None
-        self._segmentation_cache: dict[int, object] = {}  # slice index -> head_ct_unet.SegmentationResult
-        # Auto ROIs (ROI Selection box): per slice, an ROI1 and an ROI2
-        # candidate (or the user's moved version), computed for every segmented
-        # slice while the checkbox is on. Derived from `_segmentation_cache`
-        # (and, for white-matter ROI2s, `_brain_tissue_cache`), so cleared
-        # along with it. `_auto_roi2_moved` = slices whose ROI2 the user moved
-        # by hand - not re-placed when their ROI1 moves.
-        self._auto_roi1_candidates: dict[int, RoiCandidate] = {}
-        self._auto_roi2_candidates: dict[int, RoiCandidate] = {}
-        self._auto_roi2_moved: set[int] = set()
-        self._auto_midline = None  # volume-wide midline direction (structured_roi.estimate_midline_direction)
+        # The anatomy segmentation of the shown series (MVVM; `_segmentation_cache`
+        # etc. below delegate to it).
+        self._segmentation = SegmentationViewModel(
+            self._scheduler.submit, load_config(), lambda: self._loaded_volume, _SEGMENTATION_MAPPING, self
+        )
+        # Investigational stroke-lesion check (hidden feature; MVVM).
+        self._stroke = StrokeViewModel(
+            self._scheduler.submit, lambda: self._segmentation_config, lambda: self._loaded_volume, self
+        )
+        # Auto ROIs (ROI Selection box): the automatic ROIs live in
+        # `_roi_store`; derived from `_segmentation_cache` (and, for
+        # white-matter ROI2s, `_brain_tissue_cache`), so cleared along with
+        # it. Per pair and slice, which region each automatic ROI2 landed in
+        # (ventricle / white matter / fallback) - for the status line.
         self._has_hand_drawn_draft = False  # see `_on_draft_changed`
-        self._active_auto_tissue_worker: BrainTissueVolumeWorker | None = None
-        self._stroke_cache: dict[int, object] = {}  # slice index -> aisd_stroke_unet.StrokeSegmentationResult
         # HU-threshold-only white/gray matter classification (domain.
         # segmentation.brain_tissue) - a separate, non-ML feature, so unlike
         # anatomy/stroke there's no model to load and no config-gated
         # enablement; the checkboxes just run this synchronously per slice
         # (milliseconds, not the CNN's ~160s) and cache the result.
-        self._brain_tissue_cache: dict[int, object] = {}  # slice index -> brain_tissue.BrainTissueResult
-        # Which of the three methods is active - chosen from Tools -> WM/GM
-        # Classification (an app-level preference, like the settings below,
-        # not per-study state - see `_reset_brain_tissue_display`).
-        self._brain_tissue_method = _BRAIN_TISSUE_DEFAULT_METHOD
         # Tunable via Tools → HU Thresholding Settings… (`_on_brain_tissue_settings_clicked`)
         # - starts at brain_tissue.py's own defaults.
         self._brain_tissue_default_settings = BrainTissueSettings(
@@ -506,7 +523,6 @@ class MainWindowView(QMainWindow):
             smoothing_size=DEFAULT_SMOOTHING_SIZE,
             min_component_size=DEFAULT_MIN_COMPONENT_SIZE,
         )
-        self._brain_tissue_settings = self._brain_tissue_default_settings
         # Tunable via Tools → Fuzzy C-Means Settings…
         self._fcm_default_settings = FcmSettings(
             fuzziness=DEFAULT_FUZZINESS,
@@ -514,7 +530,6 @@ class MainWindowView(QMainWindow):
             spatial_weight=DEFAULT_SPATIAL_WEIGHT,
             min_component_size=FCM_DEFAULT_MIN_COMPONENT_SIZE,
         )
-        self._fcm_settings = self._fcm_default_settings
         # Tunable via Tools → Adaptive Threshold Settings…
         self._adaptive_default_settings = AdaptiveSettings(
             block_size=DEFAULT_BLOCK_SIZE,
@@ -522,10 +537,37 @@ class MainWindowView(QMainWindow):
             plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
             min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
         )
-        self._adaptive_settings = self._adaptive_default_settings
-        self._active_segmentation_worker: SegmentationWorker | None = None
-        self._active_stroke_worker: StrokeWorker | None = None
-        self._active_volume_segmentation_worker: VolumeSegmentationWorker | None = None
+        # WM/GM separation: method, settings and per-slice results (MVVM;
+        # `_brain_tissue_cache` etc. below delegate to it).
+        self._brain_tissue = BrainTissueViewModel(
+            lambda: self._loaded_volume,
+            lambda: self._segmentation_cache,
+            self._brain_tissue_default_settings,
+            self._fcm_default_settings,
+            self._adaptive_default_settings,
+            self,
+        )
+        # The ROI pairs of every slice and their automatic placement (MVVM;
+        # `_roi_store` etc. below delegate to it).
+        self._roi = RoiViewModel(
+            self._scheduler.submit,
+            lambda: self._loaded_volume,
+            lambda: self._current_slice_index,
+            lambda: self._segmentation_cache,
+            lambda: self._brain_tissue_cache,
+            lambda: self._tissue_classifier(),
+            self,
+        )
+        # The QA run over the confirmed ROI pairs: recipe, job queue, results
+        # (MVVM; `_qa_results` etc. below delegate to it).
+        self._qa = QaRunViewModel(
+            self._scheduler.submit, lambda: self._loaded_volume, self._effective_rois, lambda: self._segmentation_cache, self
+        )
+        # What the Results page shows: slices with results, the shown pair,
+        # the study verdict and table (MVVM).
+        self._results = ResultsViewModel(self._qa, default_head_ct_model, self)
+        # Saving results - the shown slice or the whole study (MVVM).
+        self._export = ExportViewModel(self._qa, self._results, lambda: self._loaded_volume, self)
         # Segmentation runs on a NIfTI conversion of the loaded DICOM series,
         # not the raw DICOM pixel arrays directly - the model expects
         # orientation-canonicalized input the way its own training/reference
@@ -534,18 +576,12 @@ class MainWindowView(QMainWindow):
         # loaded study, on first segmentation request - not eagerly on every
         # volume load, since many users may never segment at all, and QA/
         # display never need it (they stay on DicomVolume throughout).
-        self._dicom_nifti_volume: DicomNiftiVolume | None = None
-        self._active_nifti_conversion_worker: NiftiConversionWorker | None = None
         # Backup of the primary series' segmentation state (see
         # `_on_volume_loaded`), so switching to another series and back
         # restores rather than re-segmenting from scratch - explicitly
         # scoped to the primary series only (2026-09-24 request), not every
         # series visited, to avoid keeping every series' full NIfTI volume +
         # per-slice masks resident in memory at once.
-        self._primary_series_segmentation_cache: dict[int, object] | None = None
-        self._primary_series_dicom_nifti_volume: DicomNiftiVolume | None = None
-        self._current_series_is_primary = False
-        self._segmentation_masks_for_current_slice: dict[str, np.ndarray] | None = None
         # Which structures the user wants overlaid - a whole-volume-scoped
         # choice (per explicit request), not a per-slice one: surviving
         # slice navigation is the point, and it's only cleared (back to
@@ -558,16 +594,16 @@ class MainWindowView(QMainWindow):
         # not for opting in from nothing; `_show_segments_cb` ("Show
         # Segments") is the separate, single switch for whether *any* of
         # them are drawn at all.
-        self._selected_segmentation_names: set[str] = set(_SEGMENTATION_MAPPING)
         self._segment_selection_dialog: SegmentationSelectionDialog | None = None
         # Overlay opacity (0.0-1.0), set from the "Select Segments…" dialog's
         # vertical slider - applies to every currently-shown structure at
         # once, not per-structure. Default matches `RoiViewport.set_overlay`'s
         # own prior hardcoded default (0.6), so introducing the slider
         # doesn't change anything until the user actually moves it.
-        self._segmentation_opacity: float = 0.6
-        self._stroke_mask_for_current_slice: np.ndarray | None = None
 
+        # Remembered view choices (trace log, ROI details, verdict details).
+        self._ui_settings = UiSettings()
+        self._build_status_bar_items()
         self._build_menu_bar()
 
         central = QWidget()
@@ -575,22 +611,318 @@ class MainWindowView(QMainWindow):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
-        content = QWidget()
-        content_layout = QHBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(1)
-        content_layout.addWidget(self._build_viewer_pane(), 3)
-        content_layout.addWidget(self._build_sidebar(), 0)
-        outer_layout.addWidget(content, 1)
+        # Viewer | sidebar and content | trace log are split by draggable
+        # handles (positions remembered), so the user decides how much room
+        # the image and the controls get.
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.setHandleWidth(5)
+        self._main_splitter.addWidget(self._build_viewer_pane())
+        # The sidebar scrolls vertically when its boxes don't fit the window
+        # (e.g. both ROI pairs + a multi-line status) instead of Qt squeezing
+        # every box below its size - which clipped table rows.
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidget(self._build_sidebar())
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setMinimumWidth(320)  # sidebar minimum + room for the scrollbar
+        sidebar_scroll.setStyleSheet("QScrollArea { border: none; }")
+        self._main_splitter.addWidget(sidebar_scroll)
+        # Extra width (full screen, bigger window) goes 3:1 to viewer and sidebar.
+        self._main_splitter.setStretchFactor(0, 3)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setSizes([1100, 400])
 
-        outer_layout.addWidget(self._build_trace_bar())
+        self._trace_box = self._build_trace_bar()
+        self._trace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._trace_splitter.setChildrenCollapsible(False)
+        self._trace_splitter.setHandleWidth(5)
+        self._trace_splitter.addWidget(self._main_splitter)
+        self._trace_splitter.addWidget(self._trace_box)
+        self._trace_splitter.setStretchFactor(0, 1)
+        self._trace_splitter.setStretchFactor(1, 0)
+        outer_layout.addWidget(self._trace_splitter, 1)
+        for splitter, key in ((self._main_splitter, MAIN_SPLITTER), (self._trace_splitter, TRACE_SPLITTER)):
+            state = self._ui_settings.get_bytes(key)
+            if state is not None:
+                splitter.restoreState(state)
+            splitter.splitterMoved.connect(lambda *_a, sp=splitter, k=key: self._ui_settings.set_bytes(k, sp.saveState()))
 
         self.setCentralWidget(central)
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(True)
+        # Permanent: Qt's temporary status messages (status tips) never hide it.
+        status_bar.addPermanentWidget(self._status_panel, 1)
 
+        # The trace panel only receives log records while it is shown
+        # (Settings > Show Trace Log); the console log is unaffected.
         self._log_handler = QtLogHandler()
         self._log_handler.message_logged.connect(self._append_trace_line)
-        configure_logging(extra_handlers=[self._log_handler])
+        configure_logging()
+        self._set_trace_visible(self._ui_settings.get_bool(SHOW_TRACE_LOG))
+        self._bind_study_viewmodel()
+        self._bind_segmentation_viewmodel()
+        self._brain_tissue.settings_changed.connect(self._on_brain_tissue_settings_changed)
+        self._bind_roi_viewmodel()
+        self._bind_qa_viewmodel()
+        self._bind_stroke_viewmodel()
+        self._apply_help_tooltips()
         logger.info("BICTool window ready.")
+
+    # ---- StudyViewModel binding ----
+
+    # Delegating attributes: the study state lives in `self._study`.
+    _loaded_volume = property(lambda self: self._study.volume, lambda self, v: setattr(self._study, "volume", v))
+    _current_slice_index = property(
+        lambda self: self._study.current_slice, lambda self, v: setattr(self._study, "current_slice", v)
+    )
+    _series_candidates = property(
+        lambda self: self._study.series_candidates, lambda self, v: setattr(self._study, "series_candidates", v)
+    )
+    _current_series_is_primary = property(
+        lambda self: self._study.is_primary_series, lambda self, v: setattr(self._study, "is_primary_series", v)
+    )
+    _active_dicom_load_worker = property(lambda self: self._study.active_load_worker)
+
+    # Delegating attributes: the segmentation state lives in `self._segmentation`.
+    @staticmethod
+    def _seg_attr(name: str):
+        return property(
+            lambda self: getattr(self._segmentation, name), lambda self, v: setattr(self._segmentation, name, v)
+        )
+
+    _segmentation_config = _seg_attr("config")
+    _segmentation_cache = _seg_attr("cache")
+    _dicom_nifti_volume = _seg_attr("nifti_volume")
+    _anatomy_model = _seg_attr("anatomy_model")
+    _active_segmentation_worker = _seg_attr("active_slice_worker")
+    _active_volume_segmentation_worker = _seg_attr("active_volume_worker")
+    _active_nifti_conversion_worker = _seg_attr("active_nifti_worker")
+    _primary_series_segmentation_cache = _seg_attr("primary_cache")
+    _primary_series_dicom_nifti_volume = _seg_attr("primary_nifti_volume")
+    _segmentation_masks_for_current_slice = _seg_attr("current_masks")
+    _selected_segmentation_names = _seg_attr("selected_names")
+    _segmentation_opacity = _seg_attr("opacity")
+
+    def _bind_segmentation_viewmodel(self) -> None:
+        seg = self._segmentation
+        seg.status_changed.connect(self._segmentation_status_label.setText)
+        seg.status_detail_changed.connect(lambda detail: self._set_tip(self._segmentation_status_label, detail))
+        seg.busy_changed.connect(self._on_segmentation_busy_changed)
+        seg.cancel_available_changed.connect(self._cancel_segment_volume_btn.setVisible)
+        seg.slice_segmented.connect(self._on_slice_segmented)
+        seg.message.connect(self._show_message)
+
+    def _show_message(self, level: str, title: str, text: str) -> None:
+        """A ViewModel's message as a dialog (ViewModels show no dialogs themselves)."""
+        show = {"warning": QMessageBox.warning, "information": QMessageBox.information}.get(level, QMessageBox.critical)
+        show(self, title, text)
+
+    def _on_segmentation_busy_changed(self, busy: bool) -> None:
+        self._segment_slice_action.setEnabled(not busy)
+        self._segment_volume_action.setEnabled(not busy)
+
+    def _on_slice_segmented(self, index: int) -> None:
+        """A slice's segmentation landed (single slice, volume job or cache hit)."""
+        if index == self._current_slice_index:
+            self._apply_segmentation_masks(self._segmentation_cache[index])
+            # This slice now has real CNN data, which `_brain_mask_for_current_slice`
+            # prefers over the HU-threshold fallback - recompute its Brain Tissue
+            # result so "Brain Mask" is right immediately.
+            self._brain_tissue.invalidate(index)
+            self._refresh_brain_tissue_for_current_slice()
+        self._on_auto_rois_segmentation_landed(index)
+
+    # Delegating attributes: the WM/GM state lives in `self._brain_tissue`.
+    _brain_tissue_cache = property(
+        lambda self: self._brain_tissue.cache, lambda self, v: setattr(self._brain_tissue, "cache", v)
+    )
+    _brain_tissue_method = property(
+        lambda self: self._brain_tissue.method, lambda self, v: setattr(self._brain_tissue, "method", v)
+    )
+
+    @staticmethod
+    def _tissue_settings_attr(method: str):
+        return property(
+            lambda self: self._brain_tissue.settings[method],
+            lambda self, v: self._brain_tissue.settings.__setitem__(method, v),
+        )
+
+    _brain_tissue_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_THRESHOLD)
+    _fcm_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_FCM)
+    _adaptive_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_ADAPTIVE)
+
+    # Delegating attributes: the ROI state lives in `self._roi`.
+    _roi_store = property(lambda self: self._roi.store)
+    _auto_midline = property(lambda self: self._roi.midline)
+    _auto_eligible = property(lambda self: self._roi.eligible)
+    _auto_roi2_regions = property(lambda self: self._roi.roi2_regions)
+    _active_auto_tissue_worker = property(lambda self: self._roi.active_tissue_worker)
+    _auto_rois_status_text = property(lambda self: self._roi.status_text)
+
+    # Delegating attributes: the QA run state lives in `self._qa`.
+    @staticmethod
+    def _qa_attr(name: str):
+        return property(lambda self: getattr(self._qa, name), lambda self, v: setattr(self._qa, name, v))
+
+    _qa_recipe = _qa_attr("recipe")
+    _qa_jobs = _qa_attr("jobs")
+    _qa_total = _qa_attr("total")
+    _qa_active_job = _qa_attr("active_job")
+    _qa_cancel_requested = _qa_attr("cancel_requested")
+    _active_worker = _qa_attr("active_worker")
+    _qa_results = _qa_attr("results")
+    _qa_errors = _qa_attr("errors")
+
+    # Delegating attributes: the Results page state lives in `self._results`.
+    _results_slices = property(
+        lambda self: self._results.slices, lambda self, v: setattr(self._results, "slices", v)
+    )
+    _results_pair = property(lambda self: self._results.pair, lambda self, v: self._results.select_pair(v))
+    _head_ct_verdict = property(lambda self: self._results.verdict)
+    _study_table_jobs = property(lambda self: self._results.table_jobs)
+
+    _last_result = property(lambda self: self._export.last_result)
+    _last_export_context = property(lambda self: self._export.last_context)
+
+    # Delegating attributes: the stroke-check state lives in `self._stroke`.
+    _stroke_cache = property(lambda self: self._stroke.cache, lambda self, v: setattr(self._stroke, "cache", v))
+    _stroke_model = property(lambda self: self._stroke.model)
+    _active_stroke_worker = property(
+        lambda self: self._stroke.active_worker, lambda self, v: setattr(self._stroke, "active_worker", v)
+    )
+    _stroke_mask_for_current_slice = property(lambda self: self._stroke.lesion_mask(self._current_slice_index))
+
+    def _bind_stroke_viewmodel(self) -> None:
+        stroke = self._stroke
+        stroke.status_changed.connect(self._stroke_status_label.setText)
+        stroke.status_detail_changed.connect(lambda detail: self._set_tip(self._stroke_status_label, detail))
+        stroke.busy_changed.connect(lambda busy: self._check_stroke_btn.setEnabled(not busy))
+        stroke.slice_checked.connect(self._on_stroke_checked)
+        stroke.message.connect(self._show_message)
+
+    def _bind_qa_viewmodel(self) -> None:
+        self._export.message.connect(self._show_message)
+        qa = self._qa
+        qa.progress_changed.connect(self._qa_progress_label.setText)
+        qa.job_done.connect(lambda _job: self._refresh_metrics_box())
+        qa.finished.connect(self._on_qa_finished)
+
+    def _bind_roi_viewmodel(self) -> None:
+        roi = self._roi
+        roi.rois_changed.connect(self._refresh_rois_for_current_slice)
+        roi.auto_status_changed.connect(lambda _text: self._refresh_auto_rois_tip())
+        roi.tissue_progress_changed.connect(self._roi_status_label.setText)
+
+    def _on_brain_tissue_settings_changed(self) -> None:
+        """Method or settings changed (results were dropped): redraw this
+        slice's overlays and re-place the white-matter ROI2s."""
+        self._refresh_brain_tissue_for_current_slice()
+        self._restart_auto_roi2()
+
+    def _bind_study_viewmodel(self) -> None:
+        study = self._study
+        study.status_changed.connect(self._study_status_label.setText)
+        study.loading_changed.connect(self._on_study_loading_changed)
+        study.series_list_changed.connect(self._on_series_list_changed)
+        study.volume_loaded.connect(self._apply_loaded_volume)
+        study.load_failed.connect(lambda message: QMessageBox.critical(self, "Failed to open DICOM data", message))
+        study.slice_changed.connect(self._render_slice)
+        study.closed.connect(self._apply_study_closed)
+
+    def _on_study_loading_changed(self, loading: bool) -> None:
+        self._open_folder_action.setEnabled(not loading)
+        self._open_file_action.setEnabled(not loading)
+
+    def _on_series_list_changed(self, labels: list) -> None:
+        # A fresh study: whatever is backed up as "the primary series'"
+        # segmentation belongs to a study that is going away.
+        self._segmentation.forget_primary()
+        self._series_combo.blockSignals(True)
+        self._series_combo.clear()
+        self._series_combo.addItems(labels)
+        self._series_combo.blockSignals(False)
+        # Only meaningful to interact with when there's an actual choice.
+        self._series_combo.setEnabled(len(labels) > 1)
+
+    # ---- status bar: what is running / just happened ----
+
+    def _build_status_bar_items(self) -> None:
+        """The bottom bar (`views.status_bar`): the study message, replaced by a
+        full-width progress bar while loading, segmentation, ROI placement or
+        the QA run is going on (Cancel where it can be stopped); each task's
+        last state small on the right. The workflow code writes plain status
+        text into the tasks' labels."""
+        self._status_panel = StatusPanel()
+        self._study_activity = self._status_panel.message
+        self._study_status_label = self._study_activity.label
+        self._roi_activity = self._status_panel.add_item("ROIs:", busy=r"^Placing")
+        self._roi_status_label = self._roi_activity.label
+        self._segmentation_activity = self._status_panel.add_item(
+            "Segmentation:", busy=r"^(Segmenting|Converting|Cancelling)"
+        )
+        self._segmentation_status_label = self._segmentation_activity.label
+        self._cancel_segment_volume_btn = self._segmentation_activity.add_cancel(self._on_cancel_segment_volume_clicked)
+        self._qa_activity = self._status_panel.add_item("", busy=r"^QA \d+/\d+")
+        self._qa_progress_label = self._qa_activity.label
+        self._cancel_run_btn = self._qa_activity.add_cancel(self._on_cancel_run_clicked)
+
+    # ---- hover help (presentation.viewmodels.help_text) ----
+
+    def _help_target(self, name: str):
+        attr, _, key = name.partition(":")
+        target = getattr(self, attr, None)
+        return target.get(key) if key and isinstance(target, dict) else target
+
+    def _apply_help_tooltips(self) -> None:
+        """Gives every control its hover help; a reason set earlier (e.g. why
+        it is disabled) is kept below the help."""
+        for name, text in TOOLTIPS.items():
+            target = self._help_target(name)
+            if target is None:
+                continue
+            reason = target.property("tipReason")
+            if reason is None:
+                reason = target.toolTip()
+            target.setProperty("helpText", text)
+            self._set_tip(target, reason or "")
+
+    @staticmethod
+    def _set_tip(target, reason: str = "") -> None:
+        """Tooltip = the control's help text, then the current reason (why it is
+        disabled, what it is waiting for) - so neither overwrites the other."""
+        target.setProperty("tipReason", reason)
+        help_text = target.property("helpText") or ""
+        target.setToolTip("\n\n".join(text for text in (help_text, reason) if text))
+
+    def _section(self, title: str, name: str) -> CollapsibleSection:
+        """A collapsible sidebar step whose open/closed state is remembered."""
+        section = CollapsibleSection(title)
+        section.set_expanded(self._ui_settings.get_bool(section_key(name), default=True))
+        section.toggled.connect(lambda expanded: self._ui_settings.set_bool(section_key(name), expanded))
+        return section
+
+    @staticmethod
+    def _hint_label(text: str) -> QLabel:
+        """A one-line instruction under a step's title."""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        return label
+
+    def _set_trace_visible(self, visible: bool) -> None:
+        """Settings > Show Trace Log: shows the panel and feeds it log records,
+        or hides it and detaches it from logging (remembered)."""
+        self._trace_box.setVisible(visible)
+        bictool_logger = logging.getLogger("bictool")
+        if visible and self._log_handler not in bictool_logger.handlers:
+            self._log_handler.setFormatter(bictool_logger.handlers[0].formatter if bictool_logger.handlers else None)
+            bictool_logger.addHandler(self._log_handler)
+        elif not visible and self._log_handler in bictool_logger.handlers:
+            bictool_logger.removeHandler(self._log_handler)
+        if self._show_trace_action.isChecked() != visible:
+            self._show_trace_action.setChecked(visible)
+        self._ui_settings.set_bool(SHOW_TRACE_LOG, visible)
 
     # ---- trace / log panel ----
 
@@ -601,7 +933,7 @@ class MainWindowView(QMainWindow):
         self._trace_log = QPlainTextEdit()
         self._trace_log.setReadOnly(True)
         self._trace_log.setMaximumBlockCount(5000)  # cap memory growth on a long session
-        self._trace_log.setFixedHeight(160)
+        self._trace_log.setMinimumHeight(60)
         self._trace_log.setStyleSheet(
             f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: 10px; "
             f"background: {SURFACE_SUNKEN}; color: {TEXT}; border: 1px solid {BORDER};"
@@ -632,15 +964,15 @@ class MainWindowView(QMainWindow):
         study_menu = menu_bar.addMenu("&Study")
         self._close_study_action = study_menu.addAction("Close Study", self._on_close_study_clicked)
         self._close_study_action.setEnabled(False)
-        self._close_study_action.setToolTip("Open a study first")
+        self._set_tip(self._close_study_action, "Open a study first")
         self._reload_series_action = study_menu.addAction("Reload Series", self._on_reload_series_clicked)
         self._reload_series_action.setEnabled(False)
-        self._reload_series_action.setToolTip("Open a study first")
+        self._set_tip(self._reload_series_action, "Open a study first")
 
         view_menu = menu_bar.addMenu("&View")
         self._view_tags_action = view_menu.addAction("DICOM Tags…", self._on_view_dicom_tags_clicked)
         self._view_tags_action.setEnabled(False)
-        self._view_tags_action.setToolTip("Open a study first")
+        self._set_tip(self._view_tags_action, "Open a study first")
 
         # Configuration/adjustment dialogs - distinct from View's display
         # toggles and File's I/O. None of these actions need a study-loaded
@@ -651,31 +983,58 @@ class MainWindowView(QMainWindow):
         # (and worth setting up) before any study is even opened.
         tools_menu = menu_bar.addMenu("&Tools")
 
-        # One radio-style submenu picks which of the three WM/GM
-        # classification methods is active; each method's own tunable
-        # parameters live in its own settings dialog, listed right below it
-        # here rather than inside the submenu itself (a checkable action and
-        # a "open a dialog" action are different enough interactions that
-        # mixing them in one menu would be confusing).
-        wm_gm_menu = tools_menu.addMenu("WM/GM Classification")
-        self._brain_tissue_method_actions: dict[str, QAction] = {}
-        method_group = QActionGroup(self)
-        method_group.setExclusive(True)
-        for method in _BRAIN_TISSUE_METHODS:
-            action = wm_gm_menu.addAction(method)
-            action.setCheckable(True)
-            action.setChecked(method == self._brain_tissue_method)
-            action.triggered.connect(lambda checked, m=method: self._on_brain_tissue_method_selected(m))
-            method_group.addAction(action)
-            self._brain_tissue_method_actions[method] = action
+        # Segmentation runs automatically for a new volume (see
+        # `_maybe_auto_segment_volume`), so its manual triggers live here
+        # instead of taking sidebar space; tooltips explain a disabled entry.
+        segmentation_menu = tools_menu.addMenu("Segmentation")
+        segmentation_menu.setToolTipsVisible(True)
+        self._segment_slice_action = segmentation_menu.addAction("Segment Current Slice", self._on_segment_slice_clicked)
+        self._segment_slice_action.setEnabled(False)
+        self._set_tip(self._segment_slice_action, "Open a study first")
+        self._segment_volume_action = segmentation_menu.addAction("Segment Volume", self._on_segment_volume_clicked)
+        self._segment_volume_action.setEnabled(False)
+        self._set_tip(self._segment_volume_action, "Open a study first")
+        tools_menu.addSeparator()
 
+        # The WM/GM method itself is chosen in the Brain Tissue box (no single
+        # method works best on every scan, so it's switched often); each
+        # method's tunable parameters stay reachable here as well.
         tools_menu.addAction("HU Thresholding Settings…", self._on_brain_tissue_settings_clicked)
         tools_menu.addAction("Fuzzy C-Means Settings…", self._on_fcm_settings_clicked)
         tools_menu.addAction("Adaptive Threshold Settings…", self._on_adaptive_settings_clicked)
         tools_menu.addSeparator()
         self._custom_window_action = tools_menu.addAction("Custom Window…", self._on_custom_window_clicked)
+
+        # Deliberately tucked away: the legacy Octave recipe only exists to
+        # reproduce Octave-era numbers (its frequency axes are mis-scaled -
+        # docs/qa_method/physical_qa_recipe.md). While it is active, the Run
+        # Metrics box says so.
+        tools_menu.addSeparator()
+        advanced_menu = tools_menu.addMenu("Advanced")
+        recipe_menu = advanced_menu.addMenu("QA Recipe")
+        recipe_menu.setToolTipsVisible(True)
+        recipe_group = QActionGroup(self)
+        recipe_group.setExclusive(True)
+        self._qa_recipe_actions = {}
+        for recipe, text, tooltip in (
+            (RECIPE_PHYSICAL, "Physical (default)", "True frequency axes, fixed 0.1-0.8 1/mm band"),
+            (RECIPE_OCTAVE, "Octave (legacy)", "Original Octave/thesis code - reproduces old results only"),
+        ):
+            action = recipe_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(recipe == self._qa_recipe)
+            action.setToolTip(tooltip)
+            action.triggered.connect(lambda checked, r=recipe: self._on_qa_recipe_selected(r))
+            recipe_group.addAction(action)
+            self._qa_recipe_actions[recipe] = action
         self._custom_window_action.setEnabled(False)
-        self._custom_window_action.setToolTip("Open a study first")
+        self._set_tip(self._custom_window_action, "Open a study first")
+
+        settings_menu = menu_bar.addMenu("S&ettings")
+        settings_menu.setToolTipsVisible(True)
+        self._show_trace_action = settings_menu.addAction("Show Trace Log")
+        self._show_trace_action.setCheckable(True)
+        self._show_trace_action.toggled.connect(self._set_trace_visible)
 
         export_menu = menu_bar.addMenu("&Export")
         self._export_action = export_menu.addAction("Export Results…", self._open_export_dialog)
@@ -684,17 +1043,16 @@ class MainWindowView(QMainWindow):
         # visibility-of-system-status problem (NFR-07) - stays disabled
         # until Run All has actually produced a result to export.
         self._export_action.setEnabled(False)
-        self._export_action.setToolTip("Run metrics first")
+        self._set_tip(self._export_action, "Run metrics first")
 
     def _on_close_study_clicked(self) -> None:
-        logger.info("Study closed by user")
-        self._loaded_volume = None
-        self._series_candidates = []
+        self._study.close()
+
+    def _apply_study_closed(self) -> None:
+        """The StudyViewModel closed the study: back to the no-study state."""
         # A future study's primary series is unrelated to this one's - don't
         # let its saved segmentation state leak into the next study opened.
-        self._primary_series_segmentation_cache = None
-        self._primary_series_dicom_nifti_volume = None
-        self._current_series_is_primary = False
+        self._segmentation.forget_primary()
         self._series_combo.blockSignals(True)
         self._series_combo.clear()
         self._series_combo.setEnabled(False)
@@ -702,12 +1060,12 @@ class MainWindowView(QMainWindow):
 
         self._roi_viewport.clear()  # also clears every seg_*/stroke_lesion overlay - see RoiViewport.clear_all_overlays
         self._roi_rects = {}
-        self._manual_rois = {}
+        self._roi.reset()
         self._reset_roi_table()
         self._confirm_rois_cb.setChecked(False)
         self._confirm_rois_cb.setEnabled(False)
-        self._set_roi1_btn.setEnabled(False)
-        self._set_roi2_btn.setEnabled(False)
+        self._has_hand_drawn_draft = False
+        self._update_roi_edit_buttons()
 
         self._reset_segmentation_display()
         self._reset_stroke_display()
@@ -718,29 +1076,22 @@ class MainWindowView(QMainWindow):
         self._slice_slider.setValue(0)
         self._slice_slider.blockSignals(False)
         self._slice_label.setText("No slices loaded")
-        self._study_status_label.setText("No study loaded — File → Open DICOM Folder/File…")
 
         self._reset_qa_results()
 
         self._close_study_action.setEnabled(False)
-        self._close_study_action.setToolTip("Open a study first")
+        self._set_tip(self._close_study_action, "Open a study first")
         self._reload_series_action.setEnabled(False)
-        self._reload_series_action.setToolTip("Open a study first")
+        self._set_tip(self._reload_series_action, "Open a study first")
         self._view_tags_action.setEnabled(False)
-        self._view_tags_action.setToolTip("Open a study first")
+        self._set_tip(self._view_tags_action, "Open a study first")
         self._custom_window_action.setEnabled(False)
-        self._custom_window_action.setToolTip("Open a study first")
+        self._set_tip(self._custom_window_action, "Open a study first")
 
         self._show_view_page(0)
 
     def _on_reload_series_clicked(self) -> None:
-        if not self._series_candidates:
-            return
-        index = self._series_combo.currentIndex()
-        if index < 0:
-            index = 0
-        logger.info("Reloading series from disk: %s", self._series_candidates[index].label)
-        self._load_selected_series(index, force_reload=True)
+        self._study.reload_series()
 
     def _on_view_dicom_tags_clicked(self) -> None:
         if self._loaded_volume is None:
@@ -757,18 +1108,11 @@ class MainWindowView(QMainWindow):
 
     def _on_brain_tissue_settings_clicked(self) -> None:
         dialog = BrainTissueSettingsDialog(self._brain_tissue_settings, self._brain_tissue_default_settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._brain_tissue_settings = dialog.settings()
-        # Every already-computed result was made with the old parameters -
-        # discard it so the next checkbox check/slice view recomputes fresh,
-        # exactly like `_reset_brain_tissue_display` does on a new study.
-        self._brain_tissue_cache = {}
-        self._refresh_brain_tissue_for_current_slice()
-        self._restart_auto_roi2()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_THRESHOLD, dialog.settings())
 
     def _open_export_dialog(self) -> None:
-        if self._last_result is None or self._last_export_context is None:
+        if not self._export.can_export_slice():
             return
         # Opened from the Study summary tab -> whole study preselected.
         dialog = ExportDialog(
@@ -783,79 +1127,24 @@ class MainWindowView(QMainWindow):
         else:
             self._perform_export(dialog.selected_items(), dialog.destination())
 
-    @staticmethod
-    def _safe_file_stem(series_label: str) -> str:
-        # Filesystem-safe stem - the series label has "·"/"×" and spaces
-        # from its human-readable form (see `dicom_file_loader._build_candidate`);
-        # collapsed runs of "_" (one per replaced character otherwise) so
-        # e.g. "CT · 1 slice(s) · 512×434" doesn't become "CT___1_slice_s_..._".
-        return re.sub(r"_+", "_", "".join(c if c.isalnum() else "_" for c in series_label)).strip("_")
 
     def _perform_study_export(self, items: set[str], destination: Path) -> None:
-        """Study averages + one row per slice, from every QA result (failed
-        slices listed, not averaged). Chart images are per slice - not here.
-        """
-        if not self._qa_results or self._loaded_volume is None:
-            return
-        context = StudyExportContext(
-            series_label=self._series_combo.currentText() or "Series",
-            slice_count=self._loaded_volume.num_slices,
-            pixel_spacing_mm=self._loaded_volume.pixel_spacing_mm,
-            acquisition_date=self._loaded_volume.acquisition_date,
-            failed_slices=[index + 1 for index in sorted(self._qa_errors)],
-        )
-        stem = f"{self._safe_file_stem(context.series_label)}_study"
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            written: list[Path] = []
-            if "excel" in items:
-                path = destination / f"{stem}_metrics.xlsx"
-                export_study_excel(self._qa_results, context, path)
-                written.append(path)
-            if "csv" in items:
-                summary_path = destination / f"{stem}_summary.csv"
-                slices_path = destination / f"{stem}_slices.csv"
-                export_study_csv(self._qa_results, context, summary_path, slices_path)
-                written += [summary_path, slices_path]
-        except OSError as exc:
-            logger.exception("Study export failed")
-            QMessageBox.critical(self, "Export failed", str(exc))
-            return
-        logger.info("Exported study (%d slice(s)) to %d file(s) in %s", len(self._qa_results), len(written), destination)
-        QMessageBox.information(self, "Export complete", f"Wrote {len(written)} file(s) to:\n{destination}")
+        self._export.export_study(items, destination, self._series_combo.currentText())
 
     def _perform_export(self, items: set[str], destination: Path) -> None:
-        result = self._last_result
-        context = self._last_export_context
-        stem = f"{self._safe_file_stem(context.series_label)}_slice{context.slice_number:03d}"
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            written: list[Path] = []
-            if "excel" in items:
-                path = destination / f"{stem}_metrics.xlsx"
-                export_metrics_excel(result, context, path)
-                written.append(path)
-            if "csv" in items:
-                path = destination / f"{stem}_metrics.csv"
-                export_metrics_csv(result, context, path)
-                written.append(path)
-            if "jpg" in items:
-                charts = [
-                    ("mtf", self._mtf_chart_view),
-                    ("nps", self._nps_chart_view),
-                    ("ps", self._ps_chart_view),
-                    ("ratio", self._ratio_chart_view),
-                ]
-                for name, chart_view in charts:
-                    path = destination / f"{stem}_{name}.jpg"
-                    chart_view.grab().save(str(path), "JPG")
-                    written.append(path)
-        except OSError as exc:
-            logger.exception("Export failed")
-            QMessageBox.critical(self, "Export failed", str(exc))
-            return
-        logger.info("Exported %d file(s) to %s", len(written), destination)
-        QMessageBox.information(self, "Export complete", f"Wrote {len(written)} file(s) to:\n{destination}")
+        self._export.export_slice(items, destination, self._save_chart_images)
+
+    def _save_chart_images(self, destination: Path, stem: str) -> list[Path]:
+        """The four result charts of the shown slice as JPG (needs the widgets)."""
+        written = []
+        for name, chart_view in (
+            ("mtf", self._mtf_chart_view), ("nps", self._nps_chart_view),
+            ("ps", self._ps_chart_view), ("ratio", self._ratio_chart_view),
+        ):
+            path = destination / f"{stem}_{name}.jpg"
+            chart_view.grab().save(str(path), "JPG")
+            written.append(path)
+        return written
 
     def _on_open_dicom_folder_clicked(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Open DICOM series folder")
@@ -868,90 +1157,39 @@ class MainWindowView(QMainWindow):
             self._load_volume_from(path)
 
     def _load_volume_from(self, path: str) -> None:
-        # A recursive folder scan is real disk I/O over potentially hundreds
-        # of files - run it on a background thread (like Worker does for
-        # evaluate_slice_quality) so the window stays responsive instead of
-        # freezing for however long the scan takes.
-        logger.info("Open DICOM: %s", path)
-        self._open_folder_action.setEnabled(False)
-        self._open_file_action.setEnabled(False)
-        self._study_status_label.setText("Loading DICOM data…")
-
-        loader = DicomLoadWorker(path)
-        loader.signals.finished.connect(self._on_series_discovered)
-        loader.signals.error.connect(self._on_volume_load_error)
-        loader.signals.progress.connect(self._on_volume_load_progress)
-        self._active_dicom_load_worker = loader  # keep a reference alive while it runs
-        self._scheduler.submit(loader)
-
-    def _on_volume_load_progress(self, files_scanned: int) -> None:
-        self._study_status_label.setText(f"Loading DICOM data… ({files_scanned} files scanned)")
+        self._study.open_path(path)
 
     def _on_series_discovered(self, candidates: list[SeriesCandidate]) -> None:
-        logger.info("Discovered %d series candidate(s): %s", len(candidates), [c.label for c in candidates])
-        self._active_dicom_load_worker = None
-        self._open_folder_action.setEnabled(True)
-        self._open_file_action.setEnabled(True)
-
-        # A fresh study discovery - even without an explicit "Close Study"
-        # first (e.g. opening a new folder straight over an already-loaded
-        # one) - means whatever's backed up as "the primary series'"
-        # segmentation belongs to a study that's going away; without this,
-        # `_on_volume_loaded`'s restore-on-return-to-primary logic below
-        # could otherwise resurrect a *previous, unrelated* study's cached
-        # results under the new study's own primary series.
-        self._primary_series_segmentation_cache = None
-        self._primary_series_dicom_nifti_volume = None
-        self._current_series_is_primary = False
-
-        self._series_candidates = candidates
-        self._series_combo.blockSignals(True)
-        self._series_combo.clear()
-        self._series_combo.addItems([c.label for c in candidates])
-        self._series_combo.blockSignals(False)
-        # Only meaningful to interact with when there's an actual choice -
-        # with one candidate it just documents what was found.
-        self._series_combo.setEnabled(len(candidates) > 1)
-
-        self._load_selected_series(0)
+        self._study.on_series_discovered(candidates)
 
     def _on_series_combo_changed(self, index: int) -> None:
-        if index < 0:  # combo cleared/being repopulated
-            return
-        logger.info("Series selection changed to: %s", self._series_candidates[index].label)
-        self._load_selected_series(index)
+        if index >= 0:  # -1 while the combo is cleared/repopulated
+            self._study.select_series(index)
 
     def _load_selected_series(self, index: int, *, force_reload: bool = False) -> None:
-        volume = load_series(self._series_candidates[index])
-        # Index 0 is always `discover_series`'s own best-guess default (CT
-        # modality, most slices - see this module's docstring) - the one
-        # auto-loaded when a study is first opened, and the only one
-        # `_maybe_auto_segment_volume` ever triggers for automatically, per
-        # explicit request - any other series (picked from the combo, or a
-        # reload of one) only segments on an explicit Segment Slice/Volume
-        # click, even if the user later navigates back to index 0.
-        self._on_volume_loaded(volume, is_primary_series=(index == 0), force_reload=force_reload)
+        self._study.select_series(index, force_reload=force_reload)
 
     def _on_volume_loaded(
         self, volume: DicomVolume, *, is_primary_series: bool = True, force_reload: bool = False
     ) -> None:
-        logger.info(
-            "Volume loaded: %d slice(s), patient=%s, pixel_spacing=%.4f mm",
-            volume.num_slices,
-            volume.patient_id,
-            volume.pixel_spacing_mm,
-        )
-        self._active_dicom_load_worker = None
+        """A volume loaded by other means (e.g. tests) becomes the shown series."""
+        self._study.adopt_volume(volume, is_primary_series=is_primary_series, force_reload=force_reload)
+
+    def _apply_loaded_volume(
+        self, volume: DicomVolume, is_primary_series: bool, force_reload: bool, previous_was_primary: bool
+    ) -> None:
+        """The StudyViewModel loaded a series: reset everything that belonged to
+        the previous one and show the first slice."""
         self._open_folder_action.setEnabled(True)
         self._open_file_action.setEnabled(True)
         self._close_study_action.setEnabled(True)
-        self._close_study_action.setToolTip("")
+        self._set_tip(self._close_study_action, "")
         self._reload_series_action.setEnabled(True)
-        self._reload_series_action.setToolTip("Re-reads the current series from disk")
+        self._set_tip(self._reload_series_action, "Re-reads the current series from disk")
         self._view_tags_action.setEnabled(True)
-        self._view_tags_action.setToolTip("")
+        self._set_tip(self._view_tags_action, "")
         self._custom_window_action.setEnabled(True)
-        self._custom_window_action.setToolTip("")
+        self._set_tip(self._custom_window_action, "")
 
         # A different volume (new series, reload, or a fresh open) means any
         # cached segmentation/stroke results (keyed by slice index) belong
@@ -964,35 +1202,29 @@ class MainWindowView(QMainWindow):
         # explicit request - primary series only, not every series visited,
         # to avoid keeping every series' full NIfTI volume + masks resident
         # at once).
-        if self._current_series_is_primary and self._loaded_volume is not None:
-            self._primary_series_segmentation_cache = self._segmentation_cache
-            self._primary_series_dicom_nifti_volume = self._dicom_nifti_volume
+        if previous_was_primary:
+            self._segmentation.backup_primary()
         self._reset_segmentation_display()
         self._reset_stroke_display()
         self._reset_brain_tissue_display()
-        self._manual_rois = {}
+        self._roi.store.clear()
         self._confirm_rois_cb.setChecked(False)
         self._reset_qa_results()
         self._update_segmentation_availability()
-        self._current_series_is_primary = is_primary_series
 
         if is_primary_series and force_reload:
             # The underlying file(s) may have changed - the previous cache
             # (if any) is no longer trustworthy.
-            self._primary_series_segmentation_cache = None
-            self._primary_series_dicom_nifti_volume = None
-        elif is_primary_series and self._primary_series_segmentation_cache is not None:
+            self._segmentation.forget_primary()
+        elif is_primary_series and self._segmentation.restore_primary():
             # Returning to the primary series after visiting another one -
             # restore instead of starting empty. `_maybe_auto_segment_volume`
             # below still runs, but `_on_segment_volume_clicked` already
             # no-ops ("Done") once every slice is present, or resumes just
             # the slices that weren't finished yet if the batch was
             # cancelled mid-way by switching away earlier.
-            self._segmentation_cache = self._primary_series_segmentation_cache
-            self._dicom_nifti_volume = self._primary_series_dicom_nifti_volume
+            pass
 
-        self._loaded_volume = volume
-        self._current_slice_index = 0
         self._slice_slider.setMinimum(0)
         self._slice_slider.setMaximum(volume.num_slices - 1)
         self._slice_slider.setEnabled(volume.num_slices > 1)
@@ -1035,16 +1267,11 @@ class MainWindowView(QMainWindow):
             return
         self._on_segment_volume_clicked()
 
-    def _on_volume_load_error(self, message: str) -> None:
-        logger.error("Failed to open DICOM data: %s", message)
-        self._active_dicom_load_worker = None
-        self._open_folder_action.setEnabled(True)
-        self._open_file_action.setEnabled(True)
-        self._study_status_label.setText("No study loaded — File → Open DICOM Folder/File…")
-        QMessageBox.critical(self, "Failed to open DICOM data", message)
-
     def _show_slice(self, index: int) -> None:
-        self._current_slice_index = index
+        self._study.set_slice(index)
+
+    def _render_slice(self, index: int) -> None:
+        """The StudyViewModel moved to slice `index`: show it and everything on it."""
         self._slice_label.setText(f"Slice {index + 1} / {self._loaded_volume.num_slices}")
         self._roi_viewport.set_image(self._loaded_volume.get_slice_hu(index))  # also clears every overlay
         self._refresh_rois_for_current_slice()
@@ -1095,7 +1322,7 @@ class MainWindowView(QMainWindow):
         self._results_tab_btn.setObjectName("navTabBtn")
         self._results_tab_btn.setCheckable(True)
         self._results_tab_btn.setEnabled(False)
-        self._results_tab_btn.setToolTip("Run metrics to see results")
+        self._set_tip(self._results_tab_btn, "Run metrics to see results")
         self._viewer_tab_btn.clicked.connect(lambda: self._show_view_page(0))
         self._results_tab_btn.clicked.connect(lambda: self._show_view_page(1))
         toolbar.addWidget(self._viewer_tab_btn)
@@ -1139,8 +1366,22 @@ class MainWindowView(QMainWindow):
         is_viewer_page = index == 0
         self._viewer_controls_widget.setVisible(is_viewer_page)
         self._segmentation_roi_widget.setVisible(is_viewer_page)
+        self._series_box.setVisible(is_viewer_page)
         self._run_all_btn.setVisible(is_viewer_page)
+        self._metrics_hint.setVisible(is_viewer_page)
+        self._update_metrics_box_title()
         self._refresh_metrics_box()
+
+    def _update_metrics_box_title(self) -> None:
+        """Step 3 on the viewer; on the Results page the box shows the shown
+        slice's measurements, or the study averages on the summary tab."""
+        if self._view_stack.currentIndex() == 0:
+            title = "3. Run QA metrics"
+        elif self._results_tabs.currentIndex() == 1:
+            title = f"Study averages ({PAIR_LABELS[self._results_pair]})"
+        else:
+            title = "Slice results"
+        self._metrics_box.setTitle(title)
 
     def _build_viewer_page(self) -> QWidget:
         page = QWidget()
@@ -1151,6 +1392,9 @@ class MainWindowView(QMainWindow):
         self._roi_viewport.setMinimumHeight(420)
         self._roi_viewport.draft_changed.connect(self._on_draft_changed)
         self._roi_viewport.draft_moved.connect(self._on_draft_moved)
+        self._roi_viewport.roi_selected.connect(self._on_roi_selected)
+        self._roi_viewport.roi_delete_requested.connect(self._on_roi_delete_requested)
+        self._roi_viewport.context_menu_requested.connect(self._on_roi_context_menu)
         self._roi_viewport.cursor_moved.connect(self._on_cursor_moved)
         self._roi_viewport.slice_scroll.connect(self._on_viewport_slice_scroll)
         # Zoom% is part of the bottom-right corner overlay - keep it live as
@@ -1169,21 +1413,19 @@ class MainWindowView(QMainWindow):
         slice_row.addWidget(self._slice_slider, 1)
         layout.addLayout(slice_row)
 
-        self._study_status_label = QLabel("No study loaded — File → Open DICOM Folder/File…")
-        self._study_status_label.setProperty("role", "muted")
-        layout.addWidget(self._study_status_label)
+        self._study_status_label.setText("No study loaded — File → Open DICOM Folder/File…")
 
         return page
 
     def _on_draft_changed(self, rect: RoiRect | None) -> None:
         """A rectangle was just drawn (or cleared, e.g. by a slice change) -
-        drawing no longer directly produces ROI1/ROI2 (see `RoiViewport`'s
-        draw-then-assign model); it just makes Set ROI1/Set ROI2 available
-        to save it. Also drives the live "Selecting: WxH px" line in the
-        image's bottom-right corner overlay while dragging.
+        drawing doesn't directly produce an ROI (see `RoiViewport`'s
+        draw-then-assign model); it makes the "Save drawn rectangle as"
+        buttons available. Also drives the live "Selecting: WxH px" line in
+        the image's bottom-right corner overlay while dragging.
         """
         self._has_hand_drawn_draft = rect is not None
-        self._update_set_roi_buttons()
+        self._update_roi_edit_buttons()
         self._interaction_line = f"Selecting: {rect.width}×{rect.height} px" if rect is not None else ""
         self._update_viewer_overlay()
 
@@ -1202,309 +1444,232 @@ class MainWindowView(QMainWindow):
             self._interaction_line = f"X: {x}  Y: {y}  Val: {value:.0f} HU"
         self._update_viewer_overlay()
 
-    def _on_set_roi_clicked(self, key: str) -> None:
+    def _save_draft_as(self, key: str) -> None:
+        """Saves the hand-drawn rectangle into slot `key` (e.g. "falx.roi1") on
+        this slice - a manual ROI that wins over the automatic one (right-click
+        > Save as). Saving a ROI1 re-places that pair's automatic ROI2 around
+        it (unless that ROI2 is manual too).
+        """
         rect = self._roi_viewport.commit_current_as(key)
         if rect is None:
-            return  # button is disabled whenever there's nothing to commit - defensive only
-        logger.info("%s set: x=%d-%d, y=%d-%d (%dx%d)", key, rect.x0, rect.x1, rect.y0, rect.y1, rect.width, rect.height)
-        self._manual_rois.setdefault(self._current_slice_index, {})[key] = rect
-        self._refresh_rois_for_current_slice()
-        # Redrawing/re-saving an ROI after confirmation should force a fresh review.
+            return  # the menu only offers this on a drawn rectangle - defensive only
+        self._roi_viewport.clear_draft()
+        index = self._current_slice_index
+        logger.info(
+            "%s set on slice %d: x=%d-%d, y=%d-%d (%dx%d)",
+            key_label(key), index + 1, rect.x0, rect.x1, rect.y0, rect.y1, rect.width, rect.height,
+        )
+        # Redrawing/re-saving an ROI after confirmation forces a fresh review.
         self._confirm_rois_cb.setChecked(False)
+        self._roi.save_manual(index, key, rect)
         self._update_confirm_availability()
+
+    def _reassign_roi(self, source: str, target: str) -> None:
+        """An existing ROI saved as another role on this slice (right-click > Save as)."""
+        self._roi_viewport.select_roi(None)
+        self._roi.reassign(self._current_slice_index, source, target)
+        self._update_confirm_availability()
+
+    def _roi_context_menu(self, key: str) -> QMenu:
+        """Right-click menu of an ROI (`key`) or of the drawn rectangle (""):
+        Delete, and Save as one of the four roles."""
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        title = menu.addAction(
+            "Drawn rectangle" if not key else f"{_ROI_SHORT_LABELS[key]} · {ROLE_LABELS[key]}"
+        )
+        title.setEnabled(False)
+        menu.addSeparator()
+        locked = self._confirm_rois_cb.isChecked()
+        delete = menu.addAction("Delete")
+        delete.triggered.connect(lambda _checked=False: self._on_roi_delete_requested(key))
+        save_menu = menu.addMenu("Save as")
+        save_menu.setToolTipsVisible(True)
+        for target in ROI_KEYS:
+            action = save_menu.addAction(ROLE_LABELS[target])
+            action.setEnabled(target != key and not locked)
+            action.triggered.connect(lambda _checked=False, t=target: self._save_roi_as(key, t))
+        if locked:
+            delete.setEnabled(False)
+            save_menu.setEnabled(False)
+            menu.addSeparator()
+            note = menu.addAction("ROIs are confirmed - untick 'ROIs checked' to edit")
+            note.setEnabled(False)
+        return menu
+
+    def _on_roi_context_menu(self, key: str, global_pos) -> None:
+        self._roi_context_menu(key).exec(global_pos)
+
+    def _save_roi_as(self, source: str, target: str) -> None:
+        if source:
+            self._reassign_roi(source, target)
+        else:
+            self._save_draft_as(target)
 
     def _update_confirm_availability(self) -> None:
         # One confirmation covers every slice: available as soon as any slice
-        # has both ROIs (and no QA batch is running).
-        ready = self._loaded_volume is not None and bool(self._qa_ready_slices()) and self._qa_jobs is None
+        # has a complete ROI pair (and no QA batch is running).
+        ready = self._loaded_volume is not None and bool(self._qa_ready_jobs()) and self._qa_jobs is None
         self._confirm_rois_cb.setEnabled(ready or self._confirm_rois_cb.isChecked())
 
     def _effective_rois(self, slice_index: int) -> dict[str, RoiRect]:
-        """A slice's ROIs: hand-set ones (Set ROI1/ROI2) over automatic ones."""
-        rois = {}
-        auto_on = self._auto_rois_cb.isChecked()
-        for key, candidates in (("roi1", self._auto_roi1_candidates), ("roi2", self._auto_roi2_candidates)):
-            manual = self._manual_rois.get(slice_index, {}).get(key)
-            if manual is not None:
-                rois[key] = manual
-            elif auto_on and slice_index in candidates:
-                rois[key] = _candidate_to_rect(candidates[slice_index])
-        return rois
+        return self._roi.effective(slice_index)
 
-    def _qa_ready_slices(self) -> list[int]:
-        """Every slice with both ROIs - what one confirmation + Run All covers."""
-        slices = set(self._manual_rois) | set(self._auto_roi1_candidates)
-        return sorted(index for index in slices if len(self._effective_rois(index)) == 2)
+    def _qa_ready_jobs(self) -> list[tuple[int, str]]:
+        return self._roi.ready_jobs()
 
     def _refresh_rois_for_current_slice(self) -> None:
-        """Shows the displayed slice's ROIs on the image and in the Position/Size table."""
+        """Shows the displayed slice's ROIs (both pairs) on the image and in the table."""
         rois = self._effective_rois(self._current_slice_index) if self._loaded_volume is not None else {}
         self._roi_rects = rois
+        selected = self._roi_viewport.selected_roi()
         self._roi_viewport.clear_rois()
-        for key in ("roi1", "roi2"):
+        for key in ROI_KEYS:
             if key in rois:
                 self._roi_viewport.set_roi(key, rois[key])
                 self._update_roi_table_row(key, rois[key])
             else:
                 self._reset_roi_table_row(key)
+        if selected is not None and selected not in rois:
+            self._roi_viewport.select_roi(None)
         self._update_confirm_availability()
-        self._update_set_roi_buttons()
+        self._update_roi_edit_buttons()
 
-    # ---- auto ROIs (domain.roi_selection: structured_roi -> ROI1, homogeneous_roi -> ROI2) ----
+    # ---- auto ROIs (domain.roi_selection: structured_roi -> ROI1, homogeneous_roi -> ROI2), per pair ----
 
-    def _auto_roi1_structure(self) -> str:
-        return SEPTUM_PELLUCIDUM if self._auto_roi1_septum_rb.isChecked() else DURAL_FOLDS
+    def _auto_pairs(self) -> list[str]:
+        """Auto ROIs always place both pairs (falx and septum)."""
+        return list(PAIRS)
 
     def _update_auto_rois_availability(self) -> None:
         confirmed = self._confirm_rois_cb.isChecked()
         available = self._loaded_volume is not None and bool(self._segmentation_cache) and not confirmed
-        self._auto_rois_cb.setEnabled(available)
-        self._auto_roi1_septum_rb.setEnabled(not confirmed)
-        self._auto_roi1_dural_rb.setEnabled(not confirmed)
-        if confirmed:
-            self._auto_rois_cb.setToolTip("ROIs are confirmed - uncheck Confirmed to change them")
+        self._auto_rois_btn.setEnabled(available)
+        self._refresh_auto_rois_tip()
+
+    def _refresh_auto_rois_tip(self) -> None:
+        """The auto-ROI button's tooltip: why it is disabled, else where the
+        automatic ROIs are (this slice, all slices, skipped slices)."""
+        if self._confirm_rois_cb.isChecked():
+            reason = "ROIs are confirmed - untick 'ROIs checked' to change them"
+        elif not self._auto_rois_btn.isEnabled():
+            reason = "Needs anatomy segmentation first"
         else:
-            self._auto_rois_cb.setToolTip("" if available else "Needs anatomy segmentation first")
+            reason = self._roi.status_text if self._auto_rois_btn.isChecked() else ""
+        self._set_tip(self._auto_rois_btn, reason)
 
-    def _segmentation_masks_by_slice(self) -> dict[int, dict[str, np.ndarray]]:
-        return {index: result.masks for index, result in self._segmentation_cache.items()}
-
-    def _compute_auto_roi1_for_slice(self, slice_index: int) -> None:
-        result = self._segmentation_cache.get(slice_index)
-        if result is None:
-            return
-        candidate = find_roi1_candidate(
-            result.masks,
-            self._auto_roi1_structure(),
-            self._loaded_volume.pixel_spacing_mm,
-            midline_direction=self._auto_midline,
-            image=self._loaded_volume.get_slice_hu(slice_index),
-        )
-        if candidate is None:
-            self._auto_roi1_candidates.pop(slice_index, None)
-            self._auto_roi2_candidates.pop(slice_index, None)
-            self._auto_roi2_moved.discard(slice_index)
-            return
-        self._auto_roi1_candidates[slice_index] = candidate
-        self._compute_auto_roi2_for_slice(slice_index)
-
-    def _compute_auto_roi2_for_slice(self, slice_index: int) -> None:
-        """ROI2 next to this slice's ROI1. Stays pending (absent) while it needs
-        white matter and the WM/GM classification for this slice hasn't
-        arrived from `_start_auto_tissue_worker` yet. A ROI2 the user moved
-        by hand is kept as is.
-        """
-        if slice_index in self._auto_roi2_moved:
-            return
-        roi1 = self._auto_roi1_candidates.get(slice_index)
-        if roi1 is None:
-            self._auto_roi2_candidates.pop(slice_index, None)
-            return
-        tissue = self._brain_tissue_cache.get(slice_index)
-        candidate = find_roi2_candidate(
-            roi1,
-            self._segmentation_cache[slice_index].masks,
-            self._loaded_volume.pixel_spacing_mm,
-            None if tissue is None else tissue.masks,
-        )
-        if candidate is None:
-            self._auto_roi2_candidates.pop(slice_index, None)
-        else:
-            self._auto_roi2_candidates[slice_index] = candidate
-
-    def _recompute_auto_rois(self) -> None:
-        """ROI1 (and ROI2 where possible right away) for every segmented slice,
-        not just the displayed one - the per-slice groundwork for local and
-        study-level QA. White-matter ROI2s follow as the background WM/GM
-        classification lands.
-        """
-        self._stop_auto_tissue_worker()
-        self._auto_roi1_candidates = {}
-        self._auto_roi2_candidates = {}
-        self._auto_roi2_moved = set()
-        self._auto_midline = estimate_midline_direction(self._segmentation_masks_by_slice())
-        for slice_index in self._segmentation_cache:
-            self._compute_auto_roi1_for_slice(slice_index)
-        logger.info(
-            "Auto ROIs (%s): ROI1 on %d of %d segmented slice(s), ROI2 ready on %d",
-            self._auto_roi1_structure(),
-            len(self._auto_roi1_candidates),
-            len(self._segmentation_cache),
-            len(self._auto_roi2_candidates),
-        )
-        self._start_auto_tissue_worker()
-
-    def _start_auto_tissue_worker(self) -> None:
-        """Classifies WM/GM (the method selected in Tools) in the background for
-        every slice whose ROI2 is waiting on white matter. If one is already
-        running, its `finished` handler calls this again to pick up slices
-        that became pending meanwhile.
-        """
-        if self._active_auto_tissue_worker is not None or self._loaded_volume is None:
-            return
-        pending = [
-            index
-            for index in sorted(self._auto_roi1_candidates)
-            if index not in self._auto_roi2_candidates and index not in self._brain_tissue_cache
-        ]
-        if not pending:
-            return
-        classify = self._tissue_classifier()
-        brain_masks = brain_mask_from_segmentation(self._segmentation_masks_by_slice(), self._loaded_volume.num_slices)
-        get_slice_hu = self._loaded_volume.get_slice_hu
-        worker = BrainTissueVolumeWorker(lambda index: classify(get_slice_hu(index), brain_masks[index]), pending)
-        worker.signals.slice_finished.connect(self._on_auto_tissue_slice_finished)
-        worker.signals.finished.connect(self._on_auto_tissue_finished)
-        worker.signals.error.connect(self._on_auto_tissue_error)
-        self._active_auto_tissue_worker = worker  # keep a reference alive while it runs
-        logger.info("Auto ROIs: classifying WM/GM for %d slice(s) in the background", len(pending))
-        self._scheduler.submit(worker)
-
-    def _on_auto_tissue_slice_finished(self, slice_index: int, result) -> None:
-        self._brain_tissue_cache.setdefault(slice_index, result)
-        if not self._auto_rois_cb.isChecked():
-            return
-        self._compute_auto_roi2_for_slice(slice_index)
-        if slice_index == self._current_slice_index:
-            self._show_auto_rois_for_current_slice()
-        else:
-            self._update_auto_rois_status()
-
-    def _on_auto_tissue_finished(self) -> None:
-        self._active_auto_tissue_worker = None
-        if self._auto_rois_cb.isChecked():
-            self._start_auto_tissue_worker()
-
-    def _on_auto_tissue_error(self, slice_index: int, message: str) -> None:
-        logger.error("Auto ROIs: WM/GM classification failed on slice %d: %s", slice_index + 1, message)
-        self._active_auto_tissue_worker = None
-        self._auto_rois_status_label.setText(f"WM/GM classification failed on slice {slice_index + 1}: {message}")
-
-    def _stop_auto_tissue_worker(self) -> None:
-        # cancel() only stops future slices; blockSignals silences the one
-        # already running (same pattern as the segmentation workers).
-        worker = self._active_auto_tissue_worker
-        if worker is not None:
-            worker.cancel()
-            worker.signals.blockSignals(True)
-            self._active_auto_tissue_worker = None
+    def _auto_roi1_slices(self, pair: str) -> list[int]:
+        return self._roi.auto_roi1_slices(pair)
 
     def _restart_auto_roi2(self) -> None:
-        """The WM/GM method or its settings changed: white-matter ROI2s are
-        stale. Ventricle ROI2s and hand-moved ones stay.
-        """
-        if not self._auto_rois_cb.isChecked() or self._confirm_rois_cb.isChecked():
-            return  # confirmed ROIs are locked
-        self._stop_auto_tissue_worker()
-        for slice_index in list(self._auto_roi1_candidates):
-            self._compute_auto_roi2_for_slice(slice_index)
-        self._start_auto_tissue_worker()
-        self._show_auto_rois_for_current_slice()
+        self._roi.restart_roi2()
 
     def _show_auto_rois_for_current_slice(self) -> None:
         if self._loaded_volume is None:
             return
         self._refresh_rois_for_current_slice()
-        if self._auto_rois_cb.isChecked():
-            self._update_auto_rois_status()
+        self._roi.update_status()
 
     def _update_auto_rois_status(self) -> None:
-        name = "septum pellucidum" if self._auto_roi1_structure() == SEPTUM_PELLUCIDUM else "dural folds"
-        slices = sorted(self._auto_roi1_candidates)
-        if not slices:
-            self._auto_rois_status_label.setText(f"No {name} ROI1 candidate on any segmented slice.")
-            return
-        roi2 = self._auto_roi2_candidates.get(self._current_slice_index)
-        if self._current_slice_index not in self._auto_roi1_candidates:
-            here = f"No {name} on this slice."
-        elif roi2 is None:
-            here = "ROI2 here: waiting for WM/GM classification…"
-        else:
-            here = f"ROI2 here: {_ROI2_REGION_LABELS[roi2.structure]}."
-        waiting = sum(1 for index in slices if index not in self._auto_roi2_candidates)
-        waiting_text = f", {waiting} waiting for WM/GM" if waiting else ""
-        self._auto_rois_status_label.setText(
-            f"{here} ROI1 on {len(slices)} slice(s): {_format_slice_ranges(slices)}{waiting_text}."
-        )
+        self._roi.update_status()
 
     def _on_auto_rois_toggled(self, checked: bool) -> None:
-        if checked:
-            self._recompute_auto_rois()
-            self._show_auto_rois_for_current_slice()
-        else:
-            self._clear_auto_rois()
-            self._refresh_rois_for_current_slice()
-
-    def _on_auto_roi1_structure_toggled(self, _button, checked: bool) -> None:
-        if not checked or not self._auto_rois_cb.isChecked():
-            return  # the group fires once for the unchecked button too - act only on the newly checked one
-        self._recompute_auto_rois()
-        self._show_auto_rois_for_current_slice()
+        self._auto_rois_btn.setText("Remove auto ROIs" if checked else "Start auto ROIs")
+        self._roi.set_auto(checked)
+        self._refresh_auto_rois_tip()
 
     def _on_auto_rois_segmentation_landed(self, slice_index: int) -> None:
         """A slice just got segmented: Auto ROIs may become available, and
-        while they're on, that slice gets its ROIs right away.
-        """
+        while they're on, that slice gets its ROIs right away."""
         self._update_auto_rois_availability()
-        if not self._auto_rois_cb.isChecked():
-            return
-        self._auto_midline = estimate_midline_direction(self._segmentation_masks_by_slice())
-        self._compute_auto_roi1_for_slice(slice_index)
-        self._start_auto_tissue_worker()
-        if slice_index == self._current_slice_index:
-            self._show_auto_rois_for_current_slice()
-        else:
-            self._update_auto_rois_status()
+        self._roi.on_slice_segmented(slice_index)
 
     def _on_draft_moved(self, key: str, rect: RoiRect) -> None:
-        """The user dragged a committed ROI (only possible while not
-        confirmed): remember it for this slice. Moving an automatic ROI1
-        re-places an automatic ROI2 around it (unless ROI2 was itself moved
-        by hand). A hand-drawn draft ("") isn't an ROI yet.
-        """
-        index = self._current_slice_index
-        if not key:
-            return
-        manual = self._manual_rois.get(index, {})
-        if key in manual:
-            manual[key] = rect
-        elif key == "roi1" and index in self._auto_roi1_candidates:
-            structure = self._auto_roi1_candidates[index].structure
-            self._auto_roi1_candidates[index] = RoiCandidate(rect.y0, rect.x0, rect.width, structure)
-            if index not in self._auto_roi2_moved and "roi2" not in manual:
-                self._compute_auto_roi2_for_slice(index)
-        elif key == "roi2" and index in self._auto_roi2_candidates:
-            region = self._auto_roi2_candidates[index].structure
-            self._auto_roi2_candidates[index] = RoiCandidate(rect.y0, rect.x0, rect.width, region)
-            self._auto_roi2_moved.add(index)
-        self._show_auto_rois_for_current_slice()
+        """The user dragged an ROI (only possible while not confirmed): it
+        becomes that slot's manual ROI on this slice - the automatic one is
+        kept for "Restore automatic". A hand-drawn draft ("") isn't an ROI yet."""
+        if key:
+            self._roi.save_manual(self._current_slice_index, key, rect)
 
-    def _clear_auto_rois(self) -> None:
-        self._stop_auto_tissue_worker()
-        self._auto_roi1_candidates = {}
-        self._auto_roi2_candidates = {}
-        self._auto_roi2_moved = set()
-        self._auto_rois_status_label.setText("")
+    def _on_roi_selected(self, key: str | None) -> None:
+        """An ROI was clicked on the image (or the selection cleared): mirror it in the table."""
+        self._roi_table.blockSignals(True)
+        if key is None:
+            self._roi_table.clearSelection()
+        else:
+            self._roi_table.selectRow(ROI_KEYS.index(key))
+        self._roi_table.blockSignals(False)
+        self._update_roi_edit_buttons()
+
+    def _on_roi_table_clicked(self, row: int, _column: int) -> None:
+        key = ROI_KEYS[row]
+        self._roi_viewport.select_roi(key if key in self._roi_rects else None)
+        if key not in self._roi_rects:
+            self._roi_table.clearSelection()
+
+    def _on_roi_delete_requested(self, key: str) -> None:
+        """Delete key / "Delete ROI" / right-click > Delete: the slot shows
+        nothing on this slice any more (manual and automatic) until a new ROI
+        is saved into it or the slice is restored. Key "" = the hand-drawn
+        rectangle, which is simply discarded."""
+        if self._confirm_rois_cb.isChecked():
+            return  # confirmed ROIs are locked
+        if not key:
+            logger.info("Drawn rectangle discarded")
+            self._roi_viewport.clear_draft()
+            self._update_roi_edit_buttons()
+            return
+        self._roi_viewport.select_roi(None)
+        self._roi.delete(self._current_slice_index, key)
+
+    def _on_delete_roi_clicked(self) -> None:
+        key = self._roi_viewport.selected_roi()
+        if key is not None:
+            self._on_roi_delete_requested(key)
+        elif self._roi_viewport.has_draft():
+            self._on_roi_delete_requested("")
+
+    def _on_restore_auto_clicked(self) -> None:
+        """Back to the automatic ROIs on this slice: manual ROIs and deletions dropped."""
+        self._roi.restore_slice(self._current_slice_index)
 
     def _reset_auto_rois(self) -> None:
-        self._clear_auto_rois()
-        self._auto_rois_cb.blockSignals(True)
-        self._auto_rois_cb.setChecked(False)
-        self._auto_rois_cb.blockSignals(False)
+        self._roi.clear_auto()
+        self._roi.auto_on = False
+        self._auto_rois_btn.blockSignals(True)
+        self._auto_rois_btn.setChecked(False)
+        self._auto_rois_btn.setText("Start auto ROIs")
+        self._auto_rois_btn.blockSignals(False)
         self._update_auto_rois_availability()
 
-    def _update_set_roi_buttons(self) -> None:
-        """Set ROI1/ROI2 are available while there's a hand-drawn draft (it
-        stays committable to the other slot after the first commit) and the
-        ROIs aren't confirmed.
+    def _update_roi_edit_buttons(self) -> None:
+        """"Delete ROI" while an ROI is selected or a drawn rectangle is shown,
+        "Restore automatic" while this slice has manual ROIs or deletions -
+        neither once the ROIs are confirmed.
         """
         confirmed = self._confirm_rois_cb.isChecked()
-        for button in (self._set_roi1_btn, self._set_roi2_btn):
-            button.setEnabled(self._has_hand_drawn_draft and not confirmed)
-            if confirmed:
-                button.setToolTip("ROIs are confirmed - uncheck Confirmed to change them")
-            else:
-                button.setToolTip("" if self._has_hand_drawn_draft else "Draw a rectangle on the image first")
+        locked_tip = "ROIs are confirmed - untick 'ROIs checked' to change them"
+        selected = self._roi_viewport.selected_roi()
+        draft = self._roi_viewport.has_draft()
+        self._delete_roi_btn.setEnabled((selected is not None or draft) and not confirmed)
+        if confirmed:
+            self._set_tip(self._delete_roi_btn, locked_tip)
+        elif selected is not None:
+            self._set_tip(self._delete_roi_btn, f"Delete {ROLE_LABELS[selected]} on this slice (or press Del)")
+        elif draft:
+            self._set_tip(self._delete_roi_btn, "Delete the drawn rectangle (or press Del)")
+        else:
+            self._set_tip(self._delete_roi_btn, "Select an ROI on the image or in the table first")
+        has_edits = self._loaded_volume is not None and self._roi.has_edits(self._current_slice_index)
+        self._restore_auto_btn.setEnabled(has_edits and not confirmed)
+        if confirmed:
+            self._set_tip(self._restore_auto_btn, locked_tip)
+        else:
+            self._set_tip(self._restore_auto_btn, 
+                "Drop this slice's manual ROIs and deletions - back to the automatic ones"
+                if has_edits
+                else "Nothing changed by hand on this slice"
+            )
 
     def _build_results_page(self) -> QWidget:
         """Two tabs: "Per slice" - one slice's QA result at a time, scrolled
@@ -1538,9 +1703,20 @@ class MainWindowView(QMainWindow):
         nav_row.addWidget(self._results_slider, 1)
         nav_row.addWidget(self._results_next_btn)
         nav_row.addWidget(self._results_slice_label)
+        # Falx / Septum: which ROI pair's result the curves (and the Run
+        # Metrics box) show; a pair without a result on the slice is greyed out.
+        self._results_pair_buttons: dict[str, QPushButton] = {}
+        pair_group = QButtonGroup(page)
+        pair_group.setExclusive(True)
+        for pair in PAIRS:
+            button = QPushButton(PAIR_LABELS[pair])
+            button.setCheckable(True)
+            button.setChecked(pair == FALX)
+            button.clicked.connect(lambda _checked=False, p=pair: self._on_results_pair_clicked(p))
+            pair_group.addButton(button)
+            nav_row.addWidget(button)
+            self._results_pair_buttons[pair] = button
         layout.addLayout(nav_row)
-        # Sorted slice indices that have a result or an error - the slider's positions.
-        self._results_slices: list[int] = []
 
         score_row = QHBoxLayout()
         self._result_verdict_label = QLabel("—")
@@ -1581,7 +1757,7 @@ class MainWindowView(QMainWindow):
         self._advanced_toggle_btn.clicked.connect(self._on_advanced_toggle_clicked)
         layout.addWidget(self._advanced_toggle_btn)
 
-        feature_box = QGroupBox("Feature vector — classify_quality input")
+        feature_box = QGroupBox("Feature vector (per slice)")
         feature_form = QFormLayout(feature_box)
         self._feature_labels: dict[str, QLabel] = {}
         for name in _FEATURE_NAMES:
@@ -1599,7 +1775,33 @@ class MainWindowView(QMainWindow):
         summary_layout.setContentsMargins(0, 8, 0, 0)
         self._study_verdict_label = QLabel("—")
         self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setWordWrap(True)
         summary_layout.addWidget(self._study_verdict_label)
+        # What a user needs (reasons in plain words, artefacts, unusual
+        # slices); the numbers behind it are under "Details".
+        self._study_verdict_basics_label = QLabel("")
+        self._study_verdict_basics_label.setWordWrap(True)
+        self._study_verdict_basics_label.setStyleSheet(f"color: {TEXT};")
+        self._study_verdict_basics_label.setVisible(False)
+        summary_layout.addWidget(self._study_verdict_basics_label)
+        self._verdict_details_btn = QPushButton("▸ Details")
+        self._verdict_details_btn.setCheckable(True)
+        self._verdict_details_btn.setFlat(True)
+        self._verdict_details_btn.setStyleSheet("text-align: left;")
+        self._verdict_details_btn.setVisible(False)
+        self._verdict_details_btn.toggled.connect(self._on_verdict_details_toggled)
+        summary_layout.addWidget(self._verdict_details_btn)
+        self._study_verdict_details_label = QLabel("")
+        self._study_verdict_details_label.setWordWrap(True)
+        self._study_verdict_details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._study_verdict_details_label.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self._study_verdict_details_label.setVisible(False)
+        summary_layout.addWidget(self._study_verdict_details_label)
+        self._verdict_details_btn.setChecked(self._ui_settings.get_bool(VERDICT_DETAILS_OPEN))
+        self._study_provisional_label = QLabel(PROVISIONAL_SHORT)
+        self._study_provisional_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._study_provisional_label.setVisible(False)
+        summary_layout.addWidget(self._study_provisional_label)
         self._study_table = QTableWidget(0, len(_STUDY_TABLE_COLUMNS))
         self._study_table.setHorizontalHeaderLabels(_STUDY_TABLE_COLUMNS)
         self._study_table.verticalHeader().setVisible(False)
@@ -1609,6 +1811,8 @@ class MainWindowView(QMainWindow):
         self._study_table.cellClicked.connect(self._on_study_table_clicked)
         summary_layout.addWidget(self._study_table, 1)
         self._results_tabs.addTab(summary, "Study summary")
+        self._results_tabs.setTabToolTip(0, TAB_TOOLTIPS["per_slice"])
+        self._results_tabs.setTabToolTip(1, TAB_TOOLTIPS["summary"])
         # Connected only now - adding the first tab emits currentChanged too.
         self._results_tabs.currentChanged.connect(self._on_results_tab_changed)
         return page
@@ -1641,102 +1845,136 @@ class MainWindowView(QMainWindow):
             self._slice_slider.setValue(index)
 
     def _on_study_table_clicked(self, row: int, _column: int) -> None:
-        if 0 <= row < len(self._results_slices):
-            self._results_slider.setValue(row)
-            self._results_tabs.setCurrentIndex(0)
+        if not 0 <= row < len(self._study_table_jobs):
+            return
+        index, pair = self._study_table_jobs[row]
+        self._results_pair = pair
+        self._results_tabs.setCurrentIndex(0)
+        position = self._results_slices.index(index)
+        if self._results_slider.value() != position:
+            self._results_slider.setValue(position)
+        else:
+            self._show_result_for_slice(index)
+
+    def _on_results_pair_clicked(self, pair: str) -> None:
+        """The Falx/Septum switch above the per-slice curves (also drives the Run Metrics box)."""
+        self._results_pair = pair
+        if self._results_slices:
+            self._show_result_for_slice(self._results_slices[self._results_slider.value()])
+        self._refresh_metrics_box()
+
+    def _results_by_pair(self, pair: str) -> dict[int, SliceQualityResult]:
+        return self._qa.results_by_pair(pair)
 
     def _refresh_results_page(self) -> None:
-        """Rebuilds the slice list/slider and the study summary from `_qa_results`.
-        Failed slices aren't listed - only counted in the study verdict line.
-        """
-        self._results_slices = sorted(self._qa_results)
+        """Rebuilds the slice slider and the study summary from the
+        ResultsViewModel (failed jobs are only counted in the verdict)."""
+        self._results.refresh()
+        slices = self._results.slices
         self._results_slider.blockSignals(True)
-        self._results_slider.setRange(0, max(len(self._results_slices) - 1, 0))
+        self._results_slider.setRange(0, max(len(slices) - 1, 0))
         self._results_slider.blockSignals(False)
-        self._results_slider.setEnabled(len(self._results_slices) > 1)
+        self._results_slider.setEnabled(len(slices) > 1)
 
-        self._study_table.setRowCount(len(self._results_slices))
-        for row, index in enumerate(self._results_slices):
-            result = self._qa_results[index]
-            acceptable = result.predicted_label == 1
-            cells = [
-                str(index + 1),
-                f"{result.mtf_area:.3f}",
-                f"{result.nps_roi2.var_nps:.3f}",
-                f"{result.ratio.ratio_lf_hf:.2f}",
-                f"{result.decision_value:+.2f}",
-                "Acceptable" if acceptable else "Unacceptable",
-            ]
+        physical = self._results.is_physical()
+        self._study_table.setHorizontalHeaderLabels(self._results.table_columns())
+        rows = self._results.table_rows()
+        self._study_table.setRowCount(len(rows))
+        for row, table_row in enumerate(rows):
+            cells = table_row.cells
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if column == len(cells) - 1:
-                    item.setForeground(QColor(GOOD if acceptable else CRITICAL))
+                    item.setForeground(QColor(_TONE_COLORS[table_row.last_tone]))
+                elif physical and column == len(cells) - 2:
+                    item.setToolTip(table_row.hint_tooltip)
                 self._study_table.setItem(row, column, item)
 
-        verdict = study_verdict(self._qa_results.values())
-        if verdict is None:
+        self._study_verdict_basics_label.setVisible(physical)
+        self._verdict_details_btn.setVisible(physical)
+        self._study_verdict_details_label.setVisible(physical and self._verdict_details_btn.isChecked())
+        self._study_provisional_label.setVisible(physical)
+        if physical:
+            self._show_head_ct_verdict()
+            return
+
+        # Legacy recipe: one majority-vote line per pair (chest-CT SVM).
+        lines, tones = self._results.legacy_verdict()
+        if not lines:
             self._study_verdict_label.setText("—")
             self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
             return
-        color = {ACCEPTABLE: GOOD, UNACCEPTABLE: CRITICAL}.get(verdict.verdict, TEXT_MUTED)
-        failed = f" ({len(self._qa_errors)} failed, not shown)" if self._qa_errors else ""
-        self._study_verdict_label.setText(
-            f"Study: {verdict.verdict} — {verdict.acceptable} of {verdict.total} slice(s) acceptable{failed}"
-        )
+        color = _TONE_COLORS[tones[0]] if len(set(tones)) == 1 else TEXT
+        self._study_verdict_label.setText("\n".join(lines))
         self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
 
+    def _results_are_physical(self) -> bool:
+        return self._results.is_physical()
+
+    def _show_head_ct_verdict(self) -> None:
+        """Study summary of the physical recipe: the study-level head-CT verdict
+        (basics, and the details behind "Details")."""
+        text, details = self._results.head_ct_text(model_available=default_head_ct_model() is not None)
+        color = {TONE_GOOD: GOOD, TONE_BAD: CRITICAL}.get(text.tone, WARNING if self._head_ct_verdict else TEXT_MUTED)
+        self._study_verdict_label.setText(text.headline)
+        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_basics_label.setText("\n".join(text.basics))
+        self._study_verdict_details_label.setText(details)
+        self._set_tip(self._study_provisional_label, PROVISIONAL_NOTE)
+
+    def _on_verdict_details_toggled(self, open_: bool) -> None:
+        self._study_verdict_details_label.setVisible(open_ and not self._verdict_details_btn.isHidden())
+        self._verdict_details_btn.setText(("▾" if open_ else "▸") + " Details")
+        self._ui_settings.set_bool(VERDICT_DETAILS_OPEN, open_)
+
+    def _shown_pair(self, index: int) -> str | None:
+        return self._results.shown_pair(index)
+
     def _show_result_for_slice(self, index: int) -> None:
-        """The Per-slice tab's content for `index` (a slice with a result)."""
-        if index not in self._results_slices:
+        """The Per-slice tab's content for `index` (a slice with at least one result)."""
+        view = self._results.slice_view(index)
+        if view is None:
             return
-        position = self._results_slices.index(index)
+        pair, position = view.pair, view.position
         self._results_slider.blockSignals(True)
         self._results_slider.setValue(position)
         self._results_slider.blockSignals(False)
         self._results_prev_btn.setEnabled(position > 0)
-        self._results_next_btn.setEnabled(position < len(self._results_slices) - 1)
+        self._results_next_btn.setEnabled(position < view.count - 1)
+        for p, button in self._results_pair_buttons.items():
+            button.setEnabled(p in view.available_pairs)
+            button.setChecked(p == pair)
         self._results_slice_label.setText(
-            f"Slice {index + 1} / {self._loaded_volume.num_slices}  ({position + 1} of {len(self._results_slices)})"
+            f"Slice {index + 1} / {self._loaded_volume.num_slices} — {PAIR_LABELS[pair]}  "
+            f"({position + 1} of {view.count})"
         )
+        self._result_verdict_label.setText(view.verdict_text)
+        self._set_tip(self._result_verdict_label, view.verdict_tooltip)
+        self._result_verdict_label.setStyleSheet(
+            f"color: {_TONE_COLORS[view.verdict_tone]}; font-size: 15px; font-weight: 700;"
+        )
+        self._result_decision_label.setText(view.note_text)
 
-        result = self._qa_results[index]
+        result = self._qa_results[(index, pair)]
 
-        # "Acceptable"/"Unacceptable" matches WP1's own terminology for this
-        # decision (e.g. "acceptable images show higher [PS/MTF] ratios...
-        # unacceptable images show lower ratios and faster decay") rather
-        # than an invented label.
-        is_acceptable = result.predicted_label == 1
-        self._result_verdict_label.setText("Acceptable" if is_acceptable else "Unacceptable")
-        verdict_color = GOOD if is_acceptable else CRITICAL
-        self._result_verdict_label.setStyleSheet(f"color: {verdict_color}; font-size: 15px; font-weight: 700;")
-        self._result_decision_label.setText(f"decision {result.decision_value:+.2f}")
         for name, value in zip(_FEATURE_NAMES, result.feature_vector):
             self._feature_labels[name].setText(f"{value:.4g}")
 
         # Plot the mean across edges, truncated to the first half (see
         # `mtf_display_curve`'s docstring for why) - not one series per
-        # edge, which for a busy ROI producing dozens of detected edges
-        # (a known, separate issue - see project memory on the MTF
-        # bump-removal mismatch) made the chart an unreadable tangle.
+        # edge, which for a busy ROI producing dozens of detected edges made
+        # the chart an unreadable tangle.
         mtf_x, mtf_y = mtf_display_curve(result.mtf_xaxis, result.mtf)
         self._update_line_chart(self._mtf_chart_view, mtf_x, [mtf_y] if mtf_y.size else [])
         # NPS = ROI2 (homogeneous, true noise spectrum); PS = ROI1
-        # (structured ROI, WP2's "PS") - both computed by the same
-        # `nps_complete_roi` function, just on different ROIs.
+        # (structured ROI, WP2's "PS") - the same estimator on different ROIs.
         self._update_line_chart(self._nps_chart_view, result.nps_roi2.f_avg, [result.nps_roi2.nps_measured_radagv])
         self._update_line_chart(self._ps_chart_view, result.nps_roi1.f_avg, [result.nps_roi1.nps_measured_radagv])
         self._update_line_chart(self._ratio_chart_view, result.ratio.f_int, [result.ratio.ratio_nps_mtf])
 
-        # Export covers the slice shown here.
-        self._last_result = result
-        self._last_export_context = ExportContext(
-            series_label=self._series_combo.currentText() or "Series",
-            slice_number=index + 1,
-            slice_count=self._loaded_volume.num_slices,
-            pixel_spacing_mm=self._loaded_volume.pixel_spacing_mm,
-            acquisition_date=self._loaded_volume.acquisition_date,
-        )
+        # Export covers the slice and pair shown here.
+        self._export.show_slice(index, pair, result, self._series_combo.currentText())
 
     def _on_advanced_toggle_clicked(self, checked: bool) -> None:
         self._feature_box.setVisible(checked)
@@ -1818,13 +2056,15 @@ class MainWindowView(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setMinimumWidth(360)
-        sidebar.setMaximumWidth(420)
+        # Minimum only: the sidebar grows with the window and with the
+        # viewer | sidebar handle (no maximum), and its boxes grow with it.
+        sidebar.setMinimumWidth(310)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
-        layout.addWidget(self._build_study_info_box())
+        self._series_box = self._build_study_info_box()
+        layout.addWidget(self._series_box)
 
         # Wrapped in one widget (not just a bare layout) so `_show_view_page`
         # can hide Segmentation + ROI Selection together on the Results page
@@ -1835,11 +2075,15 @@ class MainWindowView(QMainWindow):
         self._segmentation_roi_widget = QWidget()
         column = QVBoxLayout(self._segmentation_roi_widget)
         column.setContentsMargins(0, 0, 0, 0)
-        column.addWidget(self._build_segmentation_box())
-        # HU-threshold-only, no-ML feature - kept visually separate from the
-        # CNN Segmentation box above (different method, different purpose)
-        # per explicit request (2026-09-24).
-        column.addWidget(self._build_brain_tissue_box())
+        column.setSpacing(6)
+        # Step 1: anatomy (CNN) and WM/GM separation (HU-based, no ML) as two
+        # sub-boxes of one step - different methods, one purpose: finding where
+        # the ROIs go.
+        self._step1_section = self._section("1. Segmentation", "segmentation")
+        self._step1_section.content_layout.addWidget(self._hint_label(STEP_HINTS["segmentation"]))
+        self._step1_section.content_layout.addWidget(self._build_segmentation_box())
+        self._step1_section.content_layout.addWidget(self._build_brain_tissue_box())
+        column.addWidget(self._step1_section)
         column.addWidget(self._build_roi_box())
         # Placed after (not merged with) the QC-relevant Segmentation/ROI
         # boxes - stroke detection is a diagnostic-adjacent capability, not
@@ -1866,8 +2110,10 @@ class MainWindowView(QMainWindow):
         # convention (RadiAnt/OsiriX/Weasis), and it frees up this sidebar
         # for upcoming segmentation controls. Only the series picker (an
         # actual interactive control, not a readout) stays here.
-        box = QGroupBox("Series")
-        form = QFormLayout(box)
+        box = self._section("Series", "series")
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        box.content_layout.addLayout(form)
 
         # `discover_series` can find more than one coherent stack under one
         # folder (real scout/localizer series, or a nominal series that
@@ -1927,7 +2173,7 @@ class MainWindowView(QMainWindow):
             [
                 volume.institution_name or "—",
                 volume.manufacturer_model or "—",
-                f"Acquired: {self._format_dicom_date(volume.acquisition_date)} {volume.acquisition_time or ''}".strip(),
+                f"Acquired: {format_dicom_date(volume.acquisition_date)} {volume.acquisition_time or ''}".strip(),
             ],
         )
 
@@ -1973,22 +2219,7 @@ class MainWindowView(QMainWindow):
             bottom_right_lines.append(self._interaction_line)
         self._roi_viewport.set_overlay_text("bottom_right", bottom_right_lines)
 
-        study_label = volume.study_id or volume.patient_id or "DICOM data"
-        self._study_status_label.setText(f"Loaded: {study_label} ({volume.num_slices} slice(s))")
 
-    @staticmethod
-    def _format_dicom_date(raw: str | None) -> str:
-        """DICOM `DA` values are `YYYYMMDD` with no separators - reformatted
-        to `DD-Mon-YYYY` for display (matching MicroDicom's overlay, e.g.
-        "11-September-2025"). Falls back to the raw string for anything that
-        doesn't match the expected shape rather than raising on odd data.
-        """
-        if not raw or len(raw) != 8 or not raw.isdigit():
-            return raw or "—"
-        try:
-            return datetime.strptime(raw, "%Y%m%d").strftime("%d-%B-%Y")
-        except ValueError:
-            return raw
 
     def _build_segmentation_box(self) -> QWidget:
         # FR-02: wires in `domain.segmentation.head_ct_unet`, a pretrained
@@ -2016,36 +2247,19 @@ class MainWindowView(QMainWindow):
         # The sidebar's own "Show Segments" checkbox (per a later request)
         # is a quick on/off switch for whatever's currently selected,
         # without needing to open that dialog just to hide/show it.
-        box = QGroupBox("Segmentation")
+        box = QGroupBox("Anatomical")
+        box.setObjectName("subBox")
+        self._anatomical_box = box
         layout = QVBoxLayout(box)
+        layout.setSpacing(4)
 
-        header = QVBoxLayout()
-        self._segmentation_status_label = QLabel("—")
-        self._segmentation_status_label.setProperty("role", "muted")
-        header.addWidget(self._segmentation_status_label)
-
-        button_row = QHBoxLayout()
-        self._segment_slice_btn = QPushButton("Segment Slice")
-        self._segment_slice_btn.setEnabled(False)
-        self._segment_slice_btn.setToolTip("Open a study first")
-        self._segment_slice_btn.clicked.connect(self._on_segment_slice_clicked)
-        button_row.addWidget(self._segment_slice_btn)
-        self._segment_volume_btn = QPushButton("Segment Volume")
-        self._segment_volume_btn.setEnabled(False)
-        self._segment_volume_btn.setToolTip("Open a study first")
-        self._segment_volume_btn.clicked.connect(self._on_segment_volume_clicked)
-        button_row.addWidget(self._segment_volume_btn)
-        self._cancel_segment_volume_btn = QPushButton("Cancel")
-        self._cancel_segment_volume_btn.setVisible(False)
-        self._cancel_segment_volume_btn.clicked.connect(self._on_cancel_segment_volume_clicked)
-        button_row.addWidget(self._cancel_segment_volume_btn)
-        header.addLayout(button_row)
-        layout.addLayout(header)
-
+        # Select Segments / Show Segments. Progress (and Cancel) of the
+        # segmentation runs is in the status bar; the manual Segment
+        # Slice/Volume triggers are under Tools > Segmentation.
         segments_row = QHBoxLayout()
         self._select_segments_btn = QPushButton("Select Segments…")
         self._select_segments_btn.setEnabled(False)
-        self._select_segments_btn.setToolTip("Open a study first")
+        self._set_tip(self._select_segments_btn, "Open a study first")
         self._select_segments_btn.clicked.connect(self._on_select_segments_clicked)
         segments_row.addWidget(self._select_segments_btn)
         # A quick on/off switch for the *currently selected* structures'
@@ -2058,9 +2272,10 @@ class MainWindowView(QMainWindow):
         self._show_segments_cb = QCheckBox("Show Segments")
         self._show_segments_cb.setChecked(False)  # per explicit request (2026-09-24) - opt in, not on by default
         self._show_segments_cb.setEnabled(False)
-        self._show_segments_cb.setToolTip("Open a study first")
+        self._set_tip(self._show_segments_cb, "Open a study first")
         self._show_segments_cb.toggled.connect(self._on_show_segments_toggled)
         segments_row.addWidget(self._show_segments_cb)
+        segments_row.addStretch(1)
         layout.addLayout(segments_row)
 
         return box
@@ -2079,52 +2294,6 @@ class MainWindowView(QMainWindow):
         self._segment_selection_dialog.show()
         self._segment_selection_dialog.raise_()
         self._segment_selection_dialog.activateWindow()
-
-    def _ensure_nifti_volume_then(self, on_ready) -> None:
-        """Runs `on_ready()` once `self._dicom_nifti_volume` exists for the
-        current study - immediately if it's already built (cached for the
-        lifetime of the loaded volume, cleared in `_reset_segmentation_
-        display`), or after a background `NiftiConversionWorker` finishes
-        building it otherwise. Both `_on_segment_slice_clicked` and
-        `_on_segment_volume_clicked` need this same "build once, on first
-        use" step before they can actually run inference - see
-        `integration.dicom_to_nifti`'s module docstring for why
-        segmentation needs a NIfTI conversion at all.
-        """
-        if self._dicom_nifti_volume is not None:
-            on_ready()
-            return
-        if self._active_nifti_conversion_worker is not None:
-            return  # already converting (e.g. a fast double-click) - it'll call on_ready via the queued signal below only once, so just wait
-
-        from bictool.application.nifti_conversion_worker import NiftiConversionWorker
-
-        logger.info("Converting DICOM series to NIfTI for segmentation...")
-        self._segmentation_status_label.setText("Converting to NIfTI…")
-        self._segment_slice_btn.setEnabled(False)
-        self._segment_volume_btn.setEnabled(False)
-        worker = NiftiConversionWorker(self._loaded_volume.slice_paths, self._loaded_volume.get_slice_hu)
-        worker.signals.finished.connect(lambda result: self._on_nifti_conversion_finished(result, on_ready))
-        worker.signals.error.connect(self._on_nifti_conversion_error)
-        self._active_nifti_conversion_worker = worker  # keep a reference alive while it runs
-        self._scheduler.submit(worker)
-
-    def _on_nifti_conversion_finished(self, result, on_ready) -> None:
-        logger.info("NIfTI conversion finished.")
-        self._active_nifti_conversion_worker = None
-        self._dicom_nifti_volume = result
-        self._segmentation_status_label.setText("—")
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        on_ready()
-
-    def _on_nifti_conversion_error(self, message: str) -> None:
-        logger.error("NIfTI conversion failed: %s", message)
-        self._active_nifti_conversion_worker = None
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._segmentation_status_label.setText("Error")
-        self._segmentation_status_label.setToolTip(message)
 
     def _on_segmentation_selection_changed(self, display_name: str, checked: bool) -> None:
         if checked:
@@ -2175,107 +2344,23 @@ class MainWindowView(QMainWindow):
         for display_name in self._selected_segmentation_names:
             self._apply_segment_overlay(display_name)
 
+    # ---- segmentation commands (SegmentationViewModel) ----
+
+    def _ensure_nifti_volume_then(self, on_ready) -> None:
+        self._segmentation.ensure_nifti_then(on_ready)
+
     def _on_segment_slice_clicked(self) -> None:
-        if self._loaded_volume is None:
-            return
-        if self._active_volume_segmentation_worker is not None:
-            return  # defensive only - both buttons are disabled while a volume batch runs
-        cached = self._segmentation_cache.get(self._current_slice_index)
-        if cached is not None:
-            self._apply_segmentation_result(cached, from_cache=True)
-            return
+        self._segmentation.segment_slice(self._current_slice_index)
 
-        weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
-        if not weights_path:
-            QMessageBox.warning(
-                self,
-                "Segmentation model not configured",
-                "No anatomy segmentation weights are configured. Set BICTOOL_HEADCT_WEIGHTS "
-                "or the segmentation.anatomy_weights_path config key - see "
-                "domain.segmentation.head_ct_unet for where to obtain the weights file.",
-            )
-            return
+    def _on_segment_volume_clicked(self) -> None:
+        self._segmentation.segment_volume()
 
-        try:
-            # Deferred to first actual use - see the TYPE_CHECKING import
-            # block's comment for why (TensorFlow's import cost).
-            # `SegmentationWorker` isn't used directly here any more (that
-            # moved to `_do_segment_slice`) but is still imported here too -
-            # this whole try/except exists to fail fast with one clear
-            # message if *either* module is unavailable, before spending
-            # time on a NIfTI conversion the click can't actually finish.
-            from bictool.application.segmentation_worker import SegmentationWorker  # noqa: F401
-            from bictool.domain.segmentation import head_ct_unet
-        except ImportError as exc:
-            QMessageBox.critical(
-                self, "TensorFlow not installed", f"Segmentation requires TensorFlow (pip install bictool[ml]): {exc}"
-            )
-            return
+    def _on_cancel_segment_volume_clicked(self) -> None:
+        self._segmentation.cancel_volume()
 
-        if self._anatomy_model is None:
-            self._anatomy_model = head_ct_unet.build_model()
-        try:
-            head_ct_unet.load_weights(self._anatomy_model, weights_path)
-        except FileNotFoundError as exc:
-            QMessageBox.critical(self, "Segmentation weights not found", str(exc))
-            return
-
-        self._ensure_nifti_volume_then(self._do_segment_slice)
-
-    def _do_segment_slice(self) -> None:
-        # `SegmentationWorker`/`head_ct_unet` imports and the model/weights
-        # were already resolved in `_on_segment_slice_clicked` before this
-        # was scheduled (possibly after a NIfTI-conversion detour) - re-import
-        # here is just picking the already-imported module back up, not a
-        # second TensorFlow load.
-        from bictool.application.segmentation_worker import SegmentationWorker
-
-        if not self._dicom_nifti_volume.is_segmentable(self._current_slice_index):
-            self._segmentation_status_label.setText("Not segmentable")
-            self._segmentation_status_label.setToolTip(
-                "This slice has no corresponding processed volume slice (e.g. a scout/localizer "
-                "sharing this series' geometry) - see integration.dicom_to_nifti."
-            )
-            return
-
-        logger.info("Segmenting slice %d...", self._current_slice_index)
-        self._segmentation_status_label.setText("Segmenting…")
-        self._segment_slice_btn.setEnabled(False)
-        self._segment_volume_btn.setEnabled(False)
-        slice_hu = self._dicom_nifti_volume.get_nifti_slice_hu(self._current_slice_index)
-        worker = SegmentationWorker(self._anatomy_model, slice_hu)
-        worker.signals.finished.connect(self._on_segmentation_finished)
-        worker.signals.error.connect(self._on_segmentation_error)
-        self._active_segmentation_worker = worker  # keep a reference alive while it runs
-        self._scheduler.submit(worker)
-
-    def _on_segmentation_finished(self, result) -> None:
-        logger.info("Segmentation finished for slice %d.", self._current_slice_index)
-        self._active_segmentation_worker = None
-        # `result` was computed on a NIfTI-space slice (`_dicom_nifti_volume
-        # .get_nifti_slice_hu`) - map it back onto this DICOM slice's own
-        # pixel grid before it reaches the cache/overlays/selection dialog,
-        # so every consumer downstream keeps working in DICOM pixel space
-        # exactly as before. This mapping is pure array logic with no Qt
-        # involvement, so it lives on the Domain-layer alignment object
-        # itself (`DicomNiftiVolume.remap_result_to_dicom_space`), not here.
-        result = self._dicom_nifti_volume.remap_result_to_dicom_space(result)
-        self._segmentation_cache[self._current_slice_index] = result
-        self._apply_segmentation_result(result, from_cache=False)
-        # This slice now has real CNN segmentation data, which
-        # `_brain_mask_for_current_slice` prefers over the HU-threshold
-        # fallback - drop any already-cached (fallback-based) Brain Tissue
-        # result and refresh, so "Brain Mask" becomes available/correct
-        # immediately rather than only on the next slice re-visit.
-        self._brain_tissue_cache.pop(self._current_slice_index, None)
-        self._refresh_brain_tissue_for_current_slice()
-        self._on_auto_rois_segmentation_landed(self._current_slice_index)
-
-    def _apply_segmentation_result(self, result, *, from_cache: bool) -> None:
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._segmentation_status_label.setText("Done (cached)" if from_cache else "Done")
-        self._apply_segmentation_masks(result)
+    def _on_volume_segmentation_cancelled(self, completed: int, total: int) -> None:
+        """What the volume job reports when cancelled (also used by tests)."""
+        self._segmentation.on_volume_cancelled(completed, total)
 
     def _apply_segmentation_masks(self, result) -> None:
         """Decodes `result`'s raw model-class masks into checkbox display
@@ -2296,152 +2381,7 @@ class MainWindowView(QMainWindow):
         for display_name in self._selected_segmentation_names:
             self._apply_segment_overlay(display_name)
 
-    def _on_segmentation_error(self, message: str) -> None:
-        logger.error("Segmentation failed: %s", message)
-        self._active_segmentation_worker = None
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._segmentation_status_label.setText("Error")
-        self._segmentation_status_label.setToolTip(message)
-
     # ---- anatomy segmentation: whole-volume batch (background, cancellable) ----
-
-    def _on_segment_volume_clicked(self) -> None:
-        if self._loaded_volume is None:
-            return
-        if self._active_volume_segmentation_worker is not None:
-            return  # defensive only - the button is disabled while a batch already runs
-        total_slices = self._loaded_volume.num_slices
-        if all(i in self._segmentation_cache for i in range(total_slices)):
-            self._segmentation_status_label.setText("Done (all slices already segmented)")
-            return
-
-        weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
-        if not weights_path:
-            QMessageBox.warning(
-                self,
-                "Segmentation model not configured",
-                "No anatomy segmentation weights are configured. Set BICTOOL_HEADCT_WEIGHTS "
-                "or the segmentation.anatomy_weights_path config key - see "
-                "domain.segmentation.head_ct_unet for where to obtain the weights file.",
-            )
-            return
-
-        try:
-            # Deferred to first actual use - see the TYPE_CHECKING import
-            # block's comment for why (TensorFlow's import cost).
-            # `VolumeSegmentationWorker` isn't used directly here any more
-            # (that moved to `_do_segment_volume`) but is still imported
-            # here too - see `_on_segment_slice_clicked`'s matching comment.
-            from bictool.application.volume_segmentation_worker import VolumeSegmentationWorker  # noqa: F401
-            from bictool.domain.segmentation import head_ct_unet
-        except ImportError as exc:
-            QMessageBox.critical(
-                self, "TensorFlow not installed", f"Segmentation requires TensorFlow (pip install bictool[ml]): {exc}"
-            )
-            return
-
-        if self._anatomy_model is None:
-            self._anatomy_model = head_ct_unet.build_model()
-        try:
-            head_ct_unet.load_weights(self._anatomy_model, weights_path)
-        except FileNotFoundError as exc:
-            QMessageBox.critical(self, "Segmentation weights not found", str(exc))
-            return
-
-        self._ensure_nifti_volume_then(self._do_segment_volume)
-
-    def _do_segment_volume(self) -> None:
-        from bictool.application.volume_segmentation_worker import VolumeSegmentationWorker
-
-        total_slices = self._loaded_volume.num_slices
-        pending_indices = [
-            i
-            for i in range(total_slices)
-            if i not in self._segmentation_cache and self._dicom_nifti_volume.is_segmentable(i)
-        ]
-        not_segmentable_count = sum(
-            1
-            for i in range(total_slices)
-            if i not in self._segmentation_cache and not self._dicom_nifti_volume.is_segmentable(i)
-        )
-        if not pending_indices:
-            self._segmentation_status_label.setText(
-                "Done (all segmentable slices already segmented)" if not_segmentable_count else
-                "Done (all slices already segmented)"
-            )
-            return
-
-        logger.info(
-            "Segmenting volume: %d of %d slice(s) pending (%d not segmentable)...",
-            len(pending_indices),
-            total_slices,
-            not_segmentable_count,
-        )
-        self._segmentation_status_label.setText(f"Segmenting volume… 0/{len(pending_indices)}")
-        self._segment_slice_btn.setEnabled(False)
-        self._segment_volume_btn.setEnabled(False)
-        self._cancel_segment_volume_btn.setVisible(True)
-        worker = VolumeSegmentationWorker(
-            self._anatomy_model, self._dicom_nifti_volume.get_nifti_slice_hu, pending_indices
-        )
-        worker.signals.slice_finished.connect(self._on_volume_segmentation_slice_finished)
-        worker.signals.progress.connect(self._on_volume_segmentation_progress)
-        worker.signals.finished.connect(self._on_volume_segmentation_finished)
-        worker.signals.cancelled.connect(self._on_volume_segmentation_cancelled)
-        worker.signals.error.connect(self._on_volume_segmentation_error)
-        self._active_volume_segmentation_worker = worker  # keep a reference alive while it runs
-        self._scheduler.submit(worker)
-
-    def _on_cancel_segment_volume_clicked(self) -> None:
-        if self._active_volume_segmentation_worker is not None:
-            self._active_volume_segmentation_worker.cancel()
-            self._segmentation_status_label.setText("Cancelling…")
-
-    def _on_volume_segmentation_slice_finished(self, slice_index: int, result) -> None:
-        result = self._dicom_nifti_volume.remap_result_to_dicom_space(result)
-        self._segmentation_cache[slice_index] = result
-        if slice_index == self._current_slice_index:
-            # Live-updates the currently displayed slice's checkboxes/
-            # overlay as soon as its own result is ready, without waiting
-            # for the whole batch - and without touching the batch's own
-            # progress text/buttons (`_apply_segmentation_result` does both,
-            # which would be wrong mid-batch).
-            self._apply_segmentation_masks(result)
-            # Same reasoning as `_on_segmentation_finished`: this slice now
-            # has real CNN data, so "Brain Mask" may just have become
-            # available - refresh immediately rather than on next re-visit.
-            self._brain_tissue_cache.pop(slice_index, None)
-            self._refresh_brain_tissue_for_current_slice()
-        self._on_auto_rois_segmentation_landed(slice_index)
-
-    def _on_volume_segmentation_progress(self, completed: int, total: int) -> None:
-        self._segmentation_status_label.setText(f"Segmenting volume… {completed}/{total}")
-
-    def _on_volume_segmentation_finished(self) -> None:
-        logger.info("Volume segmentation finished.")
-        self._active_volume_segmentation_worker = None
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._cancel_segment_volume_btn.setVisible(False)
-        self._segmentation_status_label.setText("Done (volume)")
-
-    def _on_volume_segmentation_cancelled(self, completed: int, total: int) -> None:
-        logger.info("Volume segmentation cancelled after %d/%d slice(s).", completed, total)
-        self._active_volume_segmentation_worker = None
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._cancel_segment_volume_btn.setVisible(False)
-        self._segmentation_status_label.setText(f"Cancelled ({completed}/{total} segmented)")
-
-    def _on_volume_segmentation_error(self, slice_index: int, message: str) -> None:
-        logger.error("Volume segmentation failed on slice %d: %s", slice_index, message)
-        self._active_volume_segmentation_worker = None
-        self._segment_slice_btn.setEnabled(True)
-        self._segment_volume_btn.setEnabled(True)
-        self._cancel_segment_volume_btn.setVisible(False)
-        self._segmentation_status_label.setText(f"Error (slice {slice_index + 1})")
-        self._segmentation_status_label.setToolTip(message)
 
     # ---- stroke detection (investigational, not a QC/image-quality measurement) ----
 
@@ -2455,153 +2395,92 @@ class MainWindowView(QMainWindow):
         # brain_tissue.py's docstring) rather than via a background worker.
         # "Brain Mask" is the exception - see
         # `_update_brain_mask_checkbox_availability`.
-        box = QGroupBox("Brain Tissue")
+        box = QGroupBox("WM/GM separation")
+        box.setObjectName("subBox")
+        self._wmgm_box = box
         layout = QVBoxLayout(box)
+        layout.setSpacing(4)
 
+        # Method row: which WM/GM classifier runs (no single method works
+        # best on every scan) + its settings dialog. A plain preference - no
+        # study needed to set it up.
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method"))
+        self._brain_tissue_method_combo = QComboBox()
+        self._brain_tissue_method_combo.addItems(_BRAIN_TISSUE_METHODS)
+        self._brain_tissue_method_combo.setCurrentText(self._brain_tissue_method)
+        self._brain_tissue_method_combo.currentTextChanged.connect(self._on_brain_tissue_method_selected)
+        method_row.addWidget(self._brain_tissue_method_combo, 1)
+        self._brain_tissue_settings_btn = QPushButton("⚙")
+        self._set_tip(self._brain_tissue_settings_btn, "Settings of the selected method")
+        self._brain_tissue_settings_btn.setFixedWidth(32)
+        self._brain_tissue_settings_btn.clicked.connect(self._on_brain_tissue_method_settings_clicked)
+        method_row.addWidget(self._brain_tissue_settings_btn)
+        layout.addLayout(method_row)
+
+        # Overlays in a 2x2 grid - half the height of a single column. The
+        # two tissue classes share the left column, CSF and the skull-strip
+        # mask the right one.
         self._csf_cb = QCheckBox("CSF")
-        self._csf_cb.setEnabled(False)
-        self._csf_cb.setToolTip("Open a study first")
-        self._csf_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['CSF']}; }}")
-        self._csf_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("CSF", checked))
-        layout.addWidget(self._csf_cb)
-
         self._white_matter_cb = QCheckBox("White Matter")
-        self._white_matter_cb.setEnabled(False)
-        self._white_matter_cb.setToolTip("Open a study first")
-        self._white_matter_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['White Matter']}; }}")
-        self._white_matter_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("White Matter", checked))
-        layout.addWidget(self._white_matter_cb)
-
         self._gray_matter_cb = QCheckBox("Gray Matter")
-        self._gray_matter_cb.setEnabled(False)
-        self._gray_matter_cb.setToolTip("Open a study first")
-        self._gray_matter_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['Gray Matter']}; }}")
-        self._gray_matter_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("Gray Matter", checked))
-        layout.addWidget(self._gray_matter_cb)
-
-        # The intermediate skull-strip result itself (extract_brain_mask),
-        # not a tissue class - shown on request so the user can judge
-        # skull-strip quality directly, since white/gray matter's own
-        # accuracy is bounded by it.
-        self._brain_mask_cb = QCheckBox("Brain Mask (skull-strip)")
-        self._brain_mask_cb.setEnabled(False)
-        self._brain_mask_cb.setToolTip("Open a study first")
-        self._brain_mask_cb.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS['Brain Mask']}; }}")
-        self._brain_mask_cb.toggled.connect(lambda checked: self._on_brain_tissue_checkbox_toggled("Brain Mask", checked))
-        layout.addWidget(self._brain_mask_cb)
+        # The intermediate skull-strip result itself, not a tissue class -
+        # shown on request so the user can judge skull-strip quality
+        # directly, since white/gray matter's own accuracy is bounded by it.
+        self._brain_mask_cb = QCheckBox("Brain Mask")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(2)
+        # One row: short names, colored like their overlays (hover for the full name).
+        self._white_matter_cb.setText("WM")
+        self._gray_matter_cb.setText("GM")
+        overlays = [
+            (self._white_matter_cb, "White Matter", 0, 0),
+            (self._gray_matter_cb, "Gray Matter", 0, 1),
+            (self._csf_cb, "CSF", 0, 2),
+            (self._brain_mask_cb, "Brain Mask", 0, 3),
+        ]
+        for checkbox, name, row, column in overlays:
+            checkbox.setEnabled(False)
+            checkbox.setToolTip("Open a study first")
+            checkbox.setStyleSheet(f"QCheckBox {{ color: {_BRAIN_TISSUE_COLORS[name]}; }}")
+            checkbox.toggled.connect(lambda checked, n=name: self._on_brain_tissue_checkbox_toggled(n, checked))
+            grid.addWidget(checkbox, row, column)
+        layout.addLayout(grid)
 
         return box
 
     def _brain_mask_for_current_slice(self, slice_hu: np.ndarray) -> np.ndarray:
-        """Prefers the CNN anatomy segmentation's merged-and-3D-volume-filtered
-        brain mask (`segmentation_brain_mask.brain_mask_from_segmentation`)
-        for the current slice when it has been segmented - more robust on
-        irregular anatomy (e.g. a postop craniotomy/hardware scan) than the
-        HU-threshold `extract_brain_mask`, which real data showed cannot
-        reliably tell true brain apart from the connected scalp/orbit/sinus
-        envelope on such scans (see `architecture/ml_segmentation_integration_notes.md`,
-        2026-09-28/29 entries for the full investigation). Falls back to
-        `extract_brain_mask` when this slice has no segmentation result yet
-        (segmentation not run, weights/TensorFlow unavailable, or this
-        specific slice hasn't been segmented) - the HU-threshold method is
-        still the only option in that case.
-        """
-        if self._segmentation_cache:
-            masks_by_slice = {index: result.masks for index, result in self._segmentation_cache.items()}
-            segmentation_masks = brain_mask_from_segmentation(masks_by_slice, self._loaded_volume.num_slices)
-            if self._current_slice_index in segmentation_masks:
-                return segmentation_masks[self._current_slice_index]
-
-        threshold_settings = self._brain_tissue_settings
-        return extract_brain_mask(slice_hu, threshold_settings.air_hu_cutoff, threshold_settings.bone_hu_cutoff)
+        return self._brain_tissue.brain_mask(self._current_slice_index, slice_hu)
 
     def _ensure_brain_tissue_result_for_current_slice(self):
-        """Returns this slice's cached `BrainTissueResult`, computing it (and
-        caching it) on first request - `None` if no study is loaded.
-        """
-        if self._loaded_volume is None:
-            return None
-        cached = self._brain_tissue_cache.get(self._current_slice_index)
-        if cached is not None:
-            return cached
-        slice_hu = self._loaded_volume.get_slice_hu(self._current_slice_index)
-        result = self._tissue_classifier()(slice_hu, self._brain_mask_for_current_slice(slice_hu))
-        self._brain_tissue_cache[self._current_slice_index] = result
-        return result
+        return self._brain_tissue.result(self._current_slice_index)
 
     def _tissue_classifier(self):
-        """`(slice_hu, brain_mask) -> BrainTissueResult` for the currently
-        selected WM/GM method and settings, snapshotted - safe to run on a
-        worker thread (see `_start_auto_tissue_worker`) while the user keeps
-        changing things in the GUI.
-        """
-        method = self._brain_tissue_method
-        threshold_settings = self._brain_tissue_settings
-        fcm_settings = self._fcm_settings
-        adaptive_settings = self._adaptive_settings
-
-        def classify(slice_hu: np.ndarray, brain_mask: np.ndarray):
-            if method == _BRAIN_TISSUE_METHOD_FCM:
-                result = classify_brain_tissue_fcm(
-                    slice_hu,
-                    brain_mask,
-                    fuzziness=fcm_settings.fuzziness,
-                    max_iter=fcm_settings.max_iter,
-                    spatial_weight=fcm_settings.spatial_weight,
-                    min_component_size=fcm_settings.min_component_size,
-                )
-            elif method == _BRAIN_TISSUE_METHOD_ADAPTIVE:
-                result = classify_brain_tissue_adaptive(
-                    slice_hu,
-                    brain_mask,
-                    block_size=adaptive_settings.block_size,
-                    plausible_range=(adaptive_settings.plausible_low, adaptive_settings.plausible_high),
-                    min_component_size=adaptive_settings.min_component_size,
-                )
-            else:
-                result = classify_brain_tissue(
-                    slice_hu,
-                    brain_mask,
-                    csf_range=(threshold_settings.csf_low, threshold_settings.csf_high),
-                    white_matter_range=(threshold_settings.white_matter_low, threshold_settings.white_matter_high),
-                    gray_matter_range=(threshold_settings.gray_matter_low, threshold_settings.gray_matter_high),
-                    smoothing_size=threshold_settings.smoothing_size,
-                    min_component_size=threshold_settings.min_component_size,
-                )
-            # Not a tissue class from any of these methods, but the same
-            # `masks: dict[str, np.ndarray]` shape happily carries it too - see
-            # `_build_brain_tissue_box`'s "Brain Mask" checkbox.
-            result.masks["Brain Mask"] = brain_mask
-            return result
-
-        return classify
+        """`(slice_hu, brain_mask) -> BrainTissueResult` for the current method
+        and settings (snapshotted - safe on a worker thread)."""
+        return self._brain_tissue.classifier()
 
     def _on_brain_tissue_method_selected(self, method: str) -> None:
-        self._brain_tissue_method = method
-        # Every already-computed result was made with the old method -
-        # discard it so the next checkbox check/slice view recomputes fresh,
-        # same as a settings-dialog change.
-        self._brain_tissue_cache = {}
-        self._refresh_brain_tissue_for_current_slice()
-        self._restart_auto_roi2()
+        self._brain_tissue.set_method(method)
+
+    def _on_brain_tissue_method_settings_clicked(self) -> None:
+        handlers = {
+            _BRAIN_TISSUE_METHOD_FCM: self._on_fcm_settings_clicked,
+            _BRAIN_TISSUE_METHOD_ADAPTIVE: self._on_adaptive_settings_clicked,
+            _BRAIN_TISSUE_METHOD_THRESHOLD: self._on_brain_tissue_settings_clicked,
+        }
+        handlers[self._brain_tissue_method]()
 
     def _on_fcm_settings_clicked(self) -> None:
         dialog = FcmSettingsDialog(self._fcm_settings, self._fcm_default_settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._fcm_settings = dialog.settings()
-        self._brain_tissue_cache = {}
-        self._refresh_brain_tissue_for_current_slice()
-        self._restart_auto_roi2()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_FCM, dialog.settings())
 
     def _on_adaptive_settings_clicked(self) -> None:
         dialog = AdaptiveSettingsDialog(self._adaptive_settings, self._adaptive_default_settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._adaptive_settings = dialog.settings()
-        self._brain_tissue_cache = {}
-        self._refresh_brain_tissue_for_current_slice()
-        self._restart_auto_roi2()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_ADAPTIVE, dialog.settings())
 
     def _apply_brain_tissue_overlay(self, name: str) -> None:
         result = self._ensure_brain_tissue_result_for_current_slice()
@@ -2616,13 +2495,14 @@ class MainWindowView(QMainWindow):
         self._apply_brain_tissue_overlay(name)
 
     def _reset_brain_tissue_display(self) -> None:
-        self._brain_tissue_cache = {}
+        self._brain_tissue.reset()
         for checkbox in (self._csf_cb, self._white_matter_cb, self._gray_matter_cb, self._brain_mask_cb):
             checkbox.blockSignals(True)
             checkbox.setChecked(False)
             checkbox.setEnabled(False)
-            checkbox.setToolTip("Open a study first")
+            self._set_tip(checkbox, "Open a study first")
             checkbox.blockSignals(False)
+
     def _update_brain_mask_checkbox_availability(self) -> None:
         """"Brain Mask" reflects `_brain_mask_for_current_slice`'s
         CNN-segmentation-derived result, which is only meaningful once real
@@ -2635,19 +2515,19 @@ class MainWindowView(QMainWindow):
         """
         if self._loaded_volume is None:
             self._brain_mask_cb.setEnabled(False)
-            self._brain_mask_cb.setToolTip("Open a study first")
+            self._set_tip(self._brain_mask_cb, "Open a study first")
             return
         weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
         if not weights_path:
             self._brain_mask_cb.setEnabled(False)
-            self._brain_mask_cb.setToolTip("Segmentation model weights not configured")
+            self._set_tip(self._brain_mask_cb, "Segmentation model weights not configured")
             return
         if self._current_slice_index not in self._segmentation_cache:
             self._brain_mask_cb.setEnabled(False)
-            self._brain_mask_cb.setToolTip("Waiting for anatomy segmentation on this slice…")
+            self._set_tip(self._brain_mask_cb, "Waiting for anatomy segmentation on this slice…")
             return
         self._brain_mask_cb.setEnabled(True)
-        self._brain_mask_cb.setToolTip("")
+        self._set_tip(self._brain_mask_cb, "")
 
     def _refresh_brain_tissue_for_current_slice(self) -> None:
         # Whole-volume-scoped checked state (like "Show Segments") - persists
@@ -2686,7 +2566,7 @@ class MainWindowView(QMainWindow):
         header.addWidget(self._stroke_status_label, 1)
         self._check_stroke_btn = QPushButton("Check for Lesion")
         self._check_stroke_btn.setEnabled(False)
-        self._check_stroke_btn.setToolTip("Open a study first")
+        self._set_tip(self._check_stroke_btn, "Open a study first")
         self._check_stroke_btn.clicked.connect(self._on_check_stroke_clicked)
         header.addWidget(self._check_stroke_btn)
         layout.addLayout(header)
@@ -2700,73 +2580,16 @@ class MainWindowView(QMainWindow):
         return box
 
     def _on_check_stroke_clicked(self) -> None:
-        if self._loaded_volume is None:
-            return
-        cached = self._stroke_cache.get(self._current_slice_index)
-        if cached is not None:
-            self._apply_stroke_result(cached, from_cache=True)
-            return
+        self._stroke.check_slice(self._current_slice_index)
 
-        weights_path = self._segmentation_config.get("segmentation", {}).get("stroke_weights_path")
-        if not weights_path:
-            QMessageBox.warning(
-                self,
-                "Stroke model not configured",
-                "No stroke segmentation weights are configured. Set BICTOOL_STROKE_WEIGHTS "
-                "or the segmentation.stroke_weights_path config key - see "
-                "domain.segmentation.aisd_stroke_unet for where to obtain the weights file.",
-            )
-            return
-
-        try:
-            # Deferred to first actual use - see the TYPE_CHECKING import
-            # block's comment for why (TensorFlow's import cost).
-            from bictool.application.stroke_worker import StrokeWorker
-            from bictool.domain.segmentation import aisd_stroke_unet
-        except ImportError as exc:
-            QMessageBox.critical(
-                self, "TensorFlow not installed", f"Stroke detection requires TensorFlow (pip install bictool[ml]): {exc}"
-            )
-            return
-
-        if self._stroke_model is None:
-            self._stroke_model = aisd_stroke_unet.build_model()
-        try:
-            aisd_stroke_unet.load_weights(self._stroke_model, weights_path)
-        except FileNotFoundError as exc:
-            QMessageBox.critical(self, "Stroke model weights not found", str(exc))
-            return
-
-        logger.info("Checking slice %d for a stroke lesion...", self._current_slice_index)
-        self._stroke_status_label.setText("Checking…")
-        self._check_stroke_btn.setEnabled(False)
-        slice_hu = self._loaded_volume.get_slice_hu(self._current_slice_index)
-        worker = StrokeWorker(self._stroke_model, slice_hu)
-        worker.signals.finished.connect(self._on_stroke_finished)
-        worker.signals.error.connect(self._on_stroke_error)
-        self._active_stroke_worker = worker  # keep a reference alive while it runs
-        self._scheduler.submit(worker)
-
-    def _on_stroke_finished(self, result) -> None:
-        logger.info("Stroke check finished for slice %d.", self._current_slice_index)
-        self._active_stroke_worker = None
-        self._stroke_cache[self._current_slice_index] = result
-        self._apply_stroke_result(result, from_cache=False)
-
-    def _apply_stroke_result(self, result, *, from_cache: bool) -> None:
+    def _on_stroke_checked(self, index: int, _from_cache: bool) -> None:
+        """A slice's stroke result is available: the lesion overlay may be shown."""
         self._check_stroke_btn.setEnabled(True)
-        self._stroke_status_label.setText("Done (cached)" if from_cache else "Done")
-        self._stroke_mask_for_current_slice = result.masks["Lesion"]
+        if index != self._current_slice_index:
+            return
         self._stroke_lesion_cb.setEnabled(True)
         if self._stroke_lesion_cb.isChecked():
             self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL, label="Suspected Lesion")
-
-    def _on_stroke_error(self, message: str) -> None:
-        logger.error("Stroke check failed: %s", message)
-        self._active_stroke_worker = None
-        self._check_stroke_btn.setEnabled(True)
-        self._stroke_status_label.setText("Error")
-        self._stroke_status_label.setToolTip(message)
 
     def _on_stroke_checkbox_toggled(self, checked: bool) -> None:
         if not checked:
@@ -2785,27 +2608,27 @@ class MainWindowView(QMainWindow):
         """
         segmentation_config = self._segmentation_config.get("segmentation", {})
         has_anatomy_weights = bool(segmentation_config.get("anatomy_weights_path"))
-        self._segment_slice_btn.setEnabled(has_anatomy_weights)
-        self._segment_slice_btn.setToolTip("" if has_anatomy_weights else "Segmentation model weights not configured")
-        self._segment_volume_btn.setEnabled(has_anatomy_weights)
-        self._segment_volume_btn.setToolTip("" if has_anatomy_weights else "Segmentation model weights not configured")
+        self._segment_slice_action.setEnabled(has_anatomy_weights)
+        self._set_tip(self._segment_slice_action, "" if has_anatomy_weights else "Segmentation model weights not configured")
+        self._segment_volume_action.setEnabled(has_anatomy_weights)
+        self._set_tip(self._segment_volume_action, "" if has_anatomy_weights else "Segmentation model weights not configured")
         self._select_segments_btn.setEnabled(has_anatomy_weights)
-        self._select_segments_btn.setToolTip("" if has_anatomy_weights else "Segmentation model weights not configured")
+        self._set_tip(self._select_segments_btn, "" if has_anatomy_weights else "Segmentation model weights not configured")
         self._show_segments_cb.setEnabled(has_anatomy_weights)
-        self._show_segments_cb.setToolTip("" if has_anatomy_weights else "Segmentation model weights not configured")
+        self._set_tip(self._show_segments_cb, "" if has_anatomy_weights else "Segmentation model weights not configured")
 
         has_stroke_weights = bool(segmentation_config.get("stroke_weights_path"))
         self._check_stroke_btn.setEnabled(has_stroke_weights)
-        self._check_stroke_btn.setToolTip("" if has_stroke_weights else "Stroke model weights not configured")
+        self._set_tip(self._check_stroke_btn, "" if has_stroke_weights else "Stroke model weights not configured")
 
         # No weights/config to gate on (HU-threshold only) - always available
         # once a study is loaded.
         self._csf_cb.setEnabled(True)
-        self._csf_cb.setToolTip("")
+        self._set_tip(self._csf_cb, "")
         self._white_matter_cb.setEnabled(True)
-        self._white_matter_cb.setToolTip("")
+        self._set_tip(self._white_matter_cb, "")
         self._gray_matter_cb.setEnabled(True)
-        self._gray_matter_cb.setToolTip("")
+        self._set_tip(self._gray_matter_cb, "")
         # "Brain Mask" has its own, segmentation-dependent availability - see
         # `_update_brain_mask_checkbox_availability`.
         self._update_brain_mask_checkbox_availability()
@@ -2829,54 +2652,29 @@ class MainWindowView(QMainWindow):
         stale-cache-under-a-new-volume fix below, just for a job that
         outlives the reset instead of one that already finished).
         """
-        if self._active_segmentation_worker is not None:
-            self._active_segmentation_worker.signals.blockSignals(True)
-            self._active_segmentation_worker = None
-        if self._active_volume_segmentation_worker is not None:
-            self._active_volume_segmentation_worker.cancel()
-            self._active_volume_segmentation_worker.signals.blockSignals(True)
-            self._active_volume_segmentation_worker = None
-        if self._active_nifti_conversion_worker is not None:
-            self._active_nifti_conversion_worker.signals.blockSignals(True)
-            self._active_nifti_conversion_worker = None
-        self._dicom_nifti_volume = None  # a different/closed study needs its own fresh conversion
-        self._segmentation_cache = {}
+        # Results, jobs (late signals blocked), NIfTI volume and the structure
+        # selection/opacity belong to the series - the ViewModel drops them.
+        self._segmentation.reset()
         self._reset_auto_rois()  # derived from the segmentation cache
-        self._segmentation_masks_for_current_slice = None
-        # The persisted structure selection is whole-volume-scoped by
-        # design (see `__init__`'s comment) - a new/closed study means a
-        # different, not-yet-segmented volume, so the old selection no
-        # longer applies and is reset back to its default (all 16
-        # structures selected) along with everything else here.
-        self._selected_segmentation_names = set(_SEGMENTATION_MAPPING)
-        self._segment_slice_btn.setEnabled(False)
-        self._segment_slice_btn.setToolTip("Open a study first")
-        self._segment_volume_btn.setEnabled(False)
-        self._segment_volume_btn.setToolTip("Open a study first")
+        self._segment_slice_action.setEnabled(False)
+        self._set_tip(self._segment_slice_action, "Open a study first")
+        self._segment_volume_action.setEnabled(False)
+        self._set_tip(self._segment_volume_action, "Open a study first")
         self._cancel_segment_volume_btn.setVisible(False)
         self._select_segments_btn.setEnabled(False)
-        self._select_segments_btn.setToolTip("Open a study first")
+        self._set_tip(self._select_segments_btn, "Open a study first")
         self._show_segments_cb.setEnabled(False)
-        self._show_segments_cb.setToolTip("Open a study first")
+        self._set_tip(self._show_segments_cb, "Open a study first")
         self._show_segments_cb.blockSignals(True)
         self._show_segments_cb.setChecked(False)  # back to its default (2026-09-24) - opt in, not on by default
         self._show_segments_cb.blockSignals(False)
-        self._segmentation_status_label.setText("—")
-        self._segmentation_status_label.setToolTip("")
-        self._segmentation_opacity = 0.6  # matches the dialog's own slider reset, below
         if self._segment_selection_dialog is not None:
             self._segment_selection_dialog.reset()
 
     def _reset_stroke_display(self) -> None:
-        if self._active_stroke_worker is not None:
-            self._active_stroke_worker.signals.blockSignals(True)
-            self._active_stroke_worker = None
-        self._stroke_cache = {}
-        self._stroke_mask_for_current_slice = None
+        self._stroke.reset()
         self._check_stroke_btn.setEnabled(False)
-        self._check_stroke_btn.setToolTip("Open a study first")
-        self._stroke_status_label.setText("—")
-        self._stroke_status_label.setToolTip("")
+        self._set_tip(self._check_stroke_btn, "Open a study first")
         self._stroke_lesion_cb.blockSignals(True)
         self._stroke_lesion_cb.setChecked(False)
         self._stroke_lesion_cb.setEnabled(False)
@@ -2898,90 +2696,67 @@ class MainWindowView(QMainWindow):
         """
         self._segmentation_masks_for_current_slice = None
         cached = self._segmentation_cache.get(self._current_slice_index)
+        # Browsing only redraws this slice's cached overlay: the status bar
+        # and the Segment actions belong to the segmentation *task* (e.g. a
+        # running volume segmentation) and must not change on a slice change.
         if cached is not None:
-            self._apply_segmentation_result(cached, from_cache=True)
-        else:
-            self._segmentation_status_label.setText("—")
+            self._apply_segmentation_masks(cached)
 
     def _refresh_stroke_for_current_slice(self) -> None:
-        self._stroke_mask_for_current_slice = None
         self._stroke_lesion_cb.blockSignals(True)
         self._stroke_lesion_cb.setChecked(False)
         self._stroke_lesion_cb.setEnabled(False)
         self._stroke_lesion_cb.blockSignals(False)
-        cached = self._stroke_cache.get(self._current_slice_index)
-        if cached is not None:
-            self._apply_stroke_result(cached, from_cache=True)
+        if self._current_slice_index in self._stroke.cache:
+            self._stroke_status_label.setText("Done (cached)")
+            self._on_stroke_checked(self._current_slice_index, True)
         else:
             self._stroke_status_label.setText("—")
 
     def _build_roi_box(self) -> QWidget:
-        # Structured table (ROI/Position/Size), not per-ROI QLabels: the old
-        # labels' full coordinate text ("ROI1: 134-384 . 96-346 (250x250
-        # px)") didn't fit this box's half of the sidebar row, forcing the
-        # box wider - which grew the sidebar and shrank the viewer pane by
-        # the same amount, visibly shifting the image left the moment an ROI
-        # was drawn. A table's columns size to the sidebar's actual width
-        # instead of forcing it wider, and it reads more like the Run
-        # Metrics table already used elsewhere in this sidebar.
-        box = QGroupBox("ROI Selection")
-        layout = QVBoxLayout(box)
+        # Falx and septum ROI pairs side by side (presentation.viewmodels.
+        # roi_pairs; docs/qa_method/head_ct_classifier.md, D11). Structured
+        # table (ROI/Position/Size), not per-ROI QLabels: the old labels' full
+        # coordinate text didn't fit this box and forced the sidebar wider.
+        box = self._section("2. ROI Selection", "roi")
+        self._roi_section = box
+        layout = box.content_layout
+        layout.addWidget(self._hint_label(STEP_HINTS["roi"]))
 
-        # Set ROI1/2 live here (not the viewer toolbar) - they're an
-        # ROI-selection action, grouped with the rest of that workflow, and
-        # this box is already hidden on the Results page along with them.
-        # Draw-then-assign: drawing a rectangle on the image (any drag, no
-        # arming needed - see `RoiViewport`) enables these; clicking one
-        # saves that rectangle as that slot (`_on_set_roi_clicked`).
-        set_roi_row = QHBoxLayout()
-        self._set_roi1_btn = QPushButton("Set ROI1")
-        self._set_roi1_btn.setEnabled(False)
-        self._set_roi1_btn.setToolTip("Draw a rectangle on the image first")
-        self._set_roi1_btn.clicked.connect(lambda: self._on_set_roi_clicked("roi1"))
-        self._set_roi2_btn = QPushButton("Set ROI2")
-        self._set_roi2_btn.setEnabled(False)
-        self._set_roi2_btn.setToolTip("Draw a rectangle on the image first")
-        self._set_roi2_btn.clicked.connect(lambda: self._on_set_roi_clicked("roi2"))
-        set_roi_row.addWidget(self._set_roi1_btn)
-        set_roi_row.addWidget(self._set_roi2_btn)
-        layout.addLayout(set_roi_row)
+        # Auto ROIs (domain.roi_selection): pressed = both pairs are placed on
+        # every eligible segmented slice, each ROI draggable until confirmed;
+        # pressed again = the automatic ROIs are removed (manual ones stay).
+        self._auto_rois_btn = QPushButton("Start auto ROIs")
+        self._auto_rois_btn.setCheckable(True)
+        self._auto_rois_btn.setEnabled(False)
+        self._set_tip(self._auto_rois_btn, "Needs anatomy segmentation first")
+        self._auto_rois_btn.toggled.connect(self._on_auto_rois_toggled)
+        layout.addWidget(self._auto_rois_btn)
+        # This slice's auto-ROI state and where ROIs exist is shown in the
+        # button's tooltip (`RoiViewModel.status_text`).
 
-        # Auto ROI1 (domain.roi_selection.structured_roi): while checked, a
-        # candidate is computed for every segmented slice and shown as the
-        # draft on whichever slice is displayed - movable, then accepted with
-        # Set ROI1 like a hand-drawn one. Two target structures so they can
-        # be compared side by side.
-        auto_row = QHBoxLayout()
-        self._auto_rois_cb = QCheckBox("Auto ROIs")
-        self._auto_rois_cb.setEnabled(False)
-        self._auto_rois_cb.setToolTip("Needs anatomy segmentation first")
-        self._auto_rois_cb.toggled.connect(self._on_auto_rois_toggled)
-        self._auto_roi1_septum_rb = QRadioButton("Septum")
-        self._auto_roi1_septum_rb.setToolTip(SEPTUM_PELLUCIDUM)
-        self._auto_roi1_septum_rb.setChecked(True)
-        self._auto_roi1_dural_rb = QRadioButton("Dural folds")
-        self._auto_roi1_dural_rb.setToolTip(f"{DURAL_FOLDS} (falx + tentorium)")
-        self._auto_roi1_structure_group = QButtonGroup(box)
-        self._auto_roi1_structure_group.addButton(self._auto_roi1_septum_rb)
-        self._auto_roi1_structure_group.addButton(self._auto_roi1_dural_rb)
-        self._auto_roi1_structure_group.buttonToggled.connect(self._on_auto_roi1_structure_toggled)
-        auto_row.addWidget(self._auto_rois_cb)
-        auto_row.addWidget(self._auto_roi1_septum_rb)
-        auto_row.addWidget(self._auto_roi1_dural_rb)
-        auto_row.addStretch(1)
-        layout.addLayout(auto_row)
-        self._auto_rois_status_label = QLabel("")
-        self._auto_rois_status_label.setProperty("role", "muted")
-        self._auto_rois_status_label.setWordWrap(True)
-        layout.addWidget(self._auto_rois_status_label)
+        # Draw-then-assign: a rectangle drawn on the image (any drag on empty
+        # image - see `RoiViewport`) is saved into a slot with right-click >
+        # Save as (`_roi_context_menu`).
+        # The ROI table is optional detail - "ROI details" shows/hides it (remembered).
+        self._roi_details_btn = QPushButton("▸ ROI details")
+        self._roi_details_btn.setCheckable(True)
+        self._roi_details_btn.setFlat(True)
+        self._roi_details_btn.setStyleSheet("text-align: left;")
+        self._roi_details_btn.toggled.connect(self._on_roi_details_toggled)
 
-        self._roi_table = QTableWidget(2, 3)
+        self._roi_table = QTableWidget(len(ROI_KEYS), 3)
         self._roi_table.setHorizontalHeaderLabels(["ROI", "Position", "Size"])
         self._roi_table.verticalHeader().setVisible(False)
         self._roi_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._roi_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        # Clicking a row selects that ROI on the image (Delete then removes it).
+        self._roi_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._roi_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._roi_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._roi_table.setShowGrid(False)
+        self._roi_table.cellClicked.connect(self._on_roi_table_clicked)
+        self._roi_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._roi_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         header_view = self._roi_table.horizontalHeader()
         header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -2991,16 +2766,17 @@ class MainWindowView(QMainWindow):
             f"QHeaderView::section {{ background: {SURFACE}; color: {TEXT_MUTED}; border: none;"
             f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px; }}"
             f"QTableWidget::item {{ padding: 4px; border-bottom: 1px solid {BORDER}; }}"
+            f"QTableWidget::item:selected {{ background: {SURFACE_RAISED}; }}"
         )
 
-        # Same colors `RoiViewport` draws the rectangles in (cyan ROI1, pink
-        # ROI2), so the row and the rectangle it describes are visually tied
-        # together without needing a legend.
+        # Same colors `RoiViewport` draws the rectangles in (`_ROI_STYLES`),
+        # so the row and the rectangle it describes are visually tied together.
         self._roi_position_items: dict[str, QTableWidgetItem] = {}
         self._roi_size_items: dict[str, QTableWidgetItem] = {}
-        for row, (key, color) in enumerate((("roi1", ACCENT), ("roi2", ACCENT_2))):
-            name_item = QTableWidgetItem(key.upper())
-            name_item.setForeground(QColor(color))
+        for row, key in enumerate(ROI_KEYS):
+            name_item = QTableWidgetItem(f"{_ROI_SHORT_LABELS[key]} · {ROLE_SHORT[key]}")
+            name_item.setToolTip(ROLE_LABELS[key])
+            name_item.setForeground(QColor(_ROI_TABLE_COLORS[key]))
             name_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             position_item = QTableWidgetItem("not set")
             position_item.setForeground(QColor(TEXT_MUTED))
@@ -3014,22 +2790,53 @@ class MainWindowView(QMainWindow):
             self._roi_position_items[key] = position_item
             self._roi_size_items[key] = size_item
 
-        # Exactly 2 rows, always - a fixed height (not `QTableWidget`'s
-        # default `Expanding` vertical size policy) keeps this box compact
-        # and stops it silently soaking up sidebar space that should go to
-        # Run Metrics (which actually needs it - see project memory: this is
-        # the same "unbounded table" pattern already root-caused there once).
+        # A fixed height for the fixed rows (not `QTableWidget`'s default
+        # `Expanding` vertical size policy) keeps this box compact instead of
+        # soaking up sidebar space Run Metrics needs.
         self._roi_table.resizeRowsToContents()
         table_height = self._roi_table.horizontalHeader().sizeHint().height()
         table_height += sum(self._roi_table.rowHeight(r) for r in range(self._roi_table.rowCount()))
         self._roi_table.setFixedHeight(table_height + 2)  # +2 for the frame
         layout.addWidget(self._roi_table)
 
-        self._confirm_rois_cb = QCheckBox("Confirmed")
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self._roi_details_btn)
+        edit_row.addStretch(1)
+        self._delete_roi_btn = QPushButton("Delete ROI")
+        self._delete_roi_btn.setEnabled(False)
+        self._set_tip(self._delete_roi_btn, "Select an ROI on the image or in the table first")
+        self._delete_roi_btn.clicked.connect(self._on_delete_roi_clicked)
+        self._restore_auto_btn = QPushButton("Restore automatic")
+        self._restore_auto_btn.setEnabled(False)
+        self._set_tip(self._restore_auto_btn, "Nothing changed by hand on this slice")
+        self._restore_auto_btn.clicked.connect(self._on_restore_auto_clicked)
+        edit_row.addWidget(self._delete_roi_btn)
+        edit_row.addWidget(self._restore_auto_btn)
+        # Above the table, so opening the details doesn't move the buttons.
+        layout.insertLayout(layout.indexOf(self._roi_table), edit_row)
+
+        # Confirming locks the ROIs and enables the QA run - its own sub-box,
+        # so this step is not overlooked.
+        confirm_box = QGroupBox("Confirm ROIs")
+        confirm_box.setObjectName("subBox")
+        self._confirm_box = confirm_box
+        confirm_layout = QVBoxLayout(confirm_box)
+        confirm_layout.addWidget(self._hint_label(STEP_HINTS["confirm"]))
+        self._confirm_rois_cb = QCheckBox("ROIs checked - lock them for QA")
         self._confirm_rois_cb.setEnabled(False)
+        self._confirm_rois_cb.setStyleSheet("QCheckBox { font-weight: 700; }")
         self._confirm_rois_cb.toggled.connect(self._on_confirm_rois_toggled)
-        layout.addWidget(self._confirm_rois_cb)
+        confirm_layout.addWidget(self._confirm_rois_cb)
+        layout.addWidget(confirm_box)
+
+        self._roi_table.setVisible(False)
+        self._roi_details_btn.setChecked(self._ui_settings.get_bool(ROI_DETAILS_OPEN))
         return box
+
+    def _on_roi_details_toggled(self, open_: bool) -> None:
+        self._roi_table.setVisible(open_)
+        self._roi_details_btn.setText(("▾" if open_ else "▸") + " ROI details")
+        self._ui_settings.set_bool(ROI_DETAILS_OPEN, open_)
 
     def _update_roi_table_row(self, key: str, rect: RoiRect) -> None:
         position_item = self._roi_position_items[key]
@@ -3040,7 +2847,7 @@ class MainWindowView(QMainWindow):
         size_item.setForeground(QColor(TEXT))
 
     def _reset_roi_table(self) -> None:
-        for key in ("roi1", "roi2"):
+        for key in ROI_KEYS:
             self._reset_roi_table_row(key)
 
     def _reset_roi_table_row(self, key: str) -> None:
@@ -3050,35 +2857,45 @@ class MainWindowView(QMainWindow):
         self._roi_size_items[key].setForeground(QColor(TEXT_MUTED))
 
     def _on_confirm_rois_toggled(self, checked: bool) -> None:
-        """Confirmed = the ROIs on every slice are final: locked on the image,
-        Set ROI1/ROI2 and Auto ROIs disabled, Run All enabled. Unchecking
-        makes them editable (draggable) again.
+        """Confirmed = the ROIs on every slice are final: locked on the image
+        (no moving, drawing or deleting), the edit buttons and Auto ROIs
+        disabled, Run All enabled. Unchecking makes them editable again.
         """
+        self._roi.set_confirmed(checked)
         self._run_all_btn.setEnabled(checked)
-        self._run_all_btn.setToolTip("" if checked else "Confirm ROIs to enable")
+        self._set_tip(self._run_all_btn, "" if checked else "Confirm ROIs to enable")
         self._roi_viewport.set_locked(checked)
-        self._update_set_roi_buttons()
+        self._update_roi_edit_buttons()
         self._update_auto_rois_availability()
 
     def _build_metrics_box(self) -> QWidget:
-        box = QGroupBox("Run Metrics")
-        layout = QVBoxLayout(box)
+        box = self._section("3. Run QA metrics", "qa")
+        self._metrics_box = box
+        layout = box.content_layout
+        self._metrics_hint = self._hint_label(STEP_HINTS["qa"])
+        layout.addWidget(self._metrics_hint)
 
-        header = QHBoxLayout()
-        self._qa_progress_label = QLabel("")
-        self._qa_progress_label.setProperty("role", "muted")
-        header.addWidget(self._qa_progress_label)
-        header.addStretch(1)
-        self._cancel_run_btn = QPushButton("Cancel")
-        self._cancel_run_btn.setVisible(False)
-        self._cancel_run_btn.clicked.connect(self._on_cancel_run_clicked)
-        header.addWidget(self._cancel_run_btn)
-        self._run_all_btn = QPushButton("▶ Run All")
+        # The run button first and large - it is the step's action.
+        self._run_all_btn = QPushButton("▶  Run QA")
         self._run_all_btn.setObjectName("runAllBtn")
+        self._run_all_btn.setMinimumHeight(36)
+        self._run_all_btn.setStyleSheet(
+            f"QPushButton#runAllBtn {{ font-size: 14px; font-weight: 700; padding: 6px 18px; }}"
+            f"QPushButton#runAllBtn:enabled {{ background: {ACCENT}; color: {BG}; border: none; border-radius: 4px; }}"
+        )
         self._run_all_btn.setEnabled(False)
-        self._run_all_btn.setToolTip("Confirm ROIs to enable")
+        self._set_tip(self._run_all_btn, "Confirm ROIs to enable")
         self._run_all_btn.clicked.connect(self._on_run_all_clicked)
+
+        # Progress and Cancel of the run are in the status bar.
+        header = QHBoxLayout()
         header.addWidget(self._run_all_btn)
+        self._qa_recipe_label = QLabel("Legacy QA recipe (Octave)")
+        self._qa_recipe_label.setStyleSheet(f"color: {ACCENT_2}; font-weight: 600;")
+        self._set_tip(self._qa_recipe_label, "Tools > Advanced > QA Recipe - switch back to Physical (default)")
+        self._qa_recipe_label.setVisible(self._qa_recipe == RECIPE_OCTAVE)
+        header.addWidget(self._qa_recipe_label)
+        header.addStretch(1)
         layout.addLayout(header)
 
         # Table (Metric/Status/Value), not per-row QLabels: rows keep their
@@ -3122,22 +2939,13 @@ class MainWindowView(QMainWindow):
             self._metrics_table.setItem(row, 2, value_item)
             self._metric_status_items[key] = status_item
             self._metric_value_items[key] = value_item
+        self._metrics_table.resizeRowsToContents()
+        self._metrics_table.setMinimumHeight(
+            self._metrics_table.horizontalHeader().sizeHint().height()
+            + sum(self._metrics_table.rowHeight(r) for r in range(self._metrics_table.rowCount()))
+            + 2
+        )
         layout.addWidget(self._metrics_table, 1)
-
-        self._result_strip = QWidget()
-        self._result_strip.setVisible(False)
-        strip_layout = QHBoxLayout(self._result_strip)
-        strip_layout.setContentsMargins(0, 8, 0, 0)
-        strip_layout.addStretch(1)
-        export_btn = QPushButton("Export…")
-        # No enabled/disabled dance needed here (unlike the menu action) -
-        # `_result_strip` (this button's parent) is only ever shown once a
-        # result exists (`_on_worker_finished`) and hidden again on Close
-        # Study (`_reset_metrics_display`), so this button is only reachable
-        # when export is actually possible.
-        export_btn.clicked.connect(self._open_export_dialog)
-        strip_layout.addWidget(export_btn)
-        layout.addWidget(self._result_strip)
 
         return box
 
@@ -3147,19 +2955,27 @@ class MainWindowView(QMainWindow):
         item.setForeground(QColor(_STATUS_COLORS[role]))
         item.setToolTip(tooltip)
 
+    def _on_qa_recipe_selected(self, recipe: str) -> None:
+        dropped = self._qa.set_recipe(recipe)
+        self._qa_recipe_label.setVisible(recipe == RECIPE_OCTAVE)
+        # Results of the two recipes are on different scales - never shown
+        # side by side; the confirmed ROIs stay, Run QA recomputes.
+        if dropped:
+            self._reset_qa_results()
+            self._show_view_page(0)
+
+    def _update_qa_recipe_actions(self) -> None:
+        # No switching mid-batch - that would mix recipes within one study.
+        for action in self._qa_recipe_actions.values():
+            action.setEnabled(not self._qa.is_running())
+
     def _on_run_all_clicked(self) -> None:
-        """QA for every slice with both ROIs (the confirmed ones) - local QA
-        per slice, then the study-level summary on the Results page.
-        """
-        slices = self._qa_ready_slices()
-        if not slices:
+        """QA for every complete ROI pair on every slice (the confirmed ones) -
+        local QA per slice and pair, then the study-level summary on the
+        Results page."""
+        jobs = self._qa_ready_jobs()
+        if not jobs:
             return
-        self._qa_results = {}
-        self._qa_errors = {}
-        self._qa_jobs = list(slices)
-        self._qa_total = len(slices)
-        self._qa_cancel_requested = False
-        logger.info("Run All: QA on %d slice(s): %s", len(slices), _format_slice_ranges(slices))
         for key, _ in _METRIC_ROWS:
             self._set_metric_status(key, "statusQueued", "running")
         self._run_all_btn.setEnabled(False)
@@ -3167,127 +2983,44 @@ class MainWindowView(QMainWindow):
         self._cancel_run_btn.setEnabled(True)
         self._cancel_run_btn.setVisible(True)
         self._confirm_rois_cb.setEnabled(False)
-        self._update_qa_progress()
-        self._run_next_qa_slice()
-
-    def _run_next_qa_slice(self) -> None:
-        if not self._qa_jobs or self._qa_cancel_requested:
-            self._finish_qa_batch()
-            return
-        index = self._qa_jobs.pop(0)
-        rois = self._effective_rois(index)
-        pixels = self._loaded_volume.get_slice_hu(index)
-        img_roi1 = crop_roi(pixels, rois["roi1"])
-        img_roi2 = crop_roi(pixels, rois["roi2"])
-        pix_spc = self._loaded_volume.pixel_spacing_mm
-        # calc_mtf's active contour must start inside the edge structure, so
-        # seed it on the structure's centerline (segmentation as a hint where
-        # this slice has one), with fallbacks if a seed yields no edges.
-        seeds = mtf_seed_candidates(img_roi1, self._mtf_structure_mask(index, rois["roi1"]))
-        logger.info(
-            "Run All clicked: slice=%d, roi1 shape=%s, roi2 shape=%s, pix_spc=%.4f, mtf seeds=%s",
-            index,
-            img_roi1.shape,
-            img_roi2.shape,
-            pix_spc,
-            seeds,
-        )
-        worker = Worker(img_roi1, img_roi2, pix_spc, mtf_seeds=seeds)
-        # Bound methods (not lambdas) so Qt queues the call onto the GUI
-        # thread; which slice it was is tracked in `_qa_active_slice`.
-        worker.signals.finished.connect(self._on_worker_finished)
-        worker.signals.error.connect(self._on_worker_error)
-        self._qa_active_slice = index
-        self._active_worker = worker  # keep a reference alive while it runs
-        self._scheduler.submit(worker)
-
-    def _mtf_structure_mask(self, slice_index: int, rect: RoiRect) -> np.ndarray | None:
-        """The ROI1 structures (septum + dural folds) cropped to `rect`, or None
-        if the slice isn't segmented - only a hint for placing the MTF seed.
-        """
-        result = self._segmentation_cache.get(slice_index)
-        if result is None:
-            return None
-        masks = [result.masks[name] for name in STRUCTURES if name in result.masks]
-        if not masks:
-            return None
-        return crop_roi(np.logical_or.reduce(masks), rect)
-
-    def _on_worker_finished(self, result: SliceQualityResult) -> None:
-        index = self._qa_active_slice
-        logger.info(
-            "Run All succeeded: slice=%d, mtf_area=%.4f, predicted_label=%s, decision_value=%.4f",
-            index,
-            result.mtf_area,
-            result.predicted_label,
-            result.decision_value,
-        )
-        self._active_worker = None
-        self._qa_results[index] = result
-        self._refresh_metrics_box()
-        self._update_qa_progress()
-        self._run_next_qa_slice()
-
-    def _on_worker_error(self, message: str) -> None:
-        index = self._qa_active_slice
-        logger.error("Run All failed on slice %d: %s", index, message)
-        self._active_worker = None
-        self._qa_errors[index] = message
-        self._refresh_metrics_box()
-        self._update_qa_progress()
-        self._run_next_qa_slice()
+        self._qa.run(jobs)
+        self._update_qa_recipe_actions()
 
     def _on_cancel_run_clicked(self) -> None:
-        # The slice already running can't be interrupted; no further ones start.
-        self._qa_cancel_requested = True
+        self._qa.cancel()
         self._cancel_run_btn.setText("Cancelling…")
         self._cancel_run_btn.setEnabled(False)
 
-    def _finish_qa_batch(self) -> None:
-        cancelled = self._qa_cancel_requested
-        self._qa_jobs = None
-        self._qa_active_slice = None
-        self._qa_cancel_requested = False
+    def _on_qa_finished(self, _cancelled: bool) -> None:
+        """The QA batch is over (done or cancelled): controls back, and - if
+        anything was measured - the Results page."""
+        self._update_qa_recipe_actions()
         self._cancel_run_btn.setVisible(False)
         self._run_all_btn.setEnabled(self._confirm_rois_cb.isChecked())
         self._update_confirm_availability()
-        self._update_qa_progress(cancelled=cancelled)
         self._refresh_metrics_box()
         if not self._qa_results:
             return
         self._results_tab_btn.setEnabled(True)
-        self._results_tab_btn.setToolTip("")
+        self._set_tip(self._results_tab_btn, "")
         self._export_action.setEnabled(True)
-        self._export_action.setToolTip("")
-        self._result_strip.setVisible(True)
+        self._set_tip(self._export_action, "")
         self._refresh_results_page()
-        shown = self._current_slice_index if self._current_slice_index in self._qa_results else min(self._qa_results)
+        shown = self._current_slice_index if self._current_slice_index in self._results_slices else self._results_slices[0]
         self._show_result_for_slice(shown)
         self._show_view_page(1)
 
-    def _update_qa_progress(self, cancelled: bool = False) -> None:
-        done = len(self._qa_results) + len(self._qa_errors)
-        failed = f", {len(self._qa_errors)} failed" if self._qa_errors else ""
-        if self._qa_jobs is not None:
-            text = f"QA {done}/{self._qa_total}{failed}"
-        elif self._qa_total == 0:
-            text = ""
-        elif cancelled:
-            text = f"QA cancelled: {done}/{self._qa_total} slice(s){failed}"
-        else:
-            text = f"QA done: {done} slice(s){failed}"
-        self._qa_progress_label.setText(text)
-
     def _on_results_tab_changed(self, _tab_index: int) -> None:
+        self._update_metrics_box_title()
         self._refresh_metrics_box()
 
     def _showing_study_summary(self) -> bool:
         return self._view_stack.currentIndex() == 1 and self._results_tabs.currentIndex() == 1
 
     def _refresh_metrics_box(self) -> None:
-        """Run Metrics box = study averages while the Study summary tab is
-        shown, else the displayed slice's metrics (the Per slice tab keeps the
-        viewer on the same slice).
+        """Run Metrics box = the selected pair's study averages while the Study
+        summary tab is shown, else the displayed slice's metrics (the Per
+        slice tab keeps the viewer on the same slice).
         """
         if self._showing_study_summary() and self._qa_results:
             self._show_study_average_metrics()
@@ -3295,7 +3028,10 @@ class MainWindowView(QMainWindow):
             self._show_metrics_for_slice(self._current_slice_index)
 
     def _show_study_average_metrics(self) -> None:
-        summary = summarize_metrics(self._qa_results.values())
+        pair = self._results_pair if self._results_by_pair(self._results_pair) else next(
+            pair for pair in PAIRS if self._results_by_pair(pair)
+        )
+        summary = summarize_metrics(self._results_by_pair(pair).values())
         # Run Metrics row -> (summary metric, value format, unit), matching the per-slice rows.
         rows = {
             "mtf": ("mtf_area", "{:.3f}", " mm⁻¹"),
@@ -3314,23 +3050,25 @@ class MainWindowView(QMainWindow):
                 key,
                 "statusDone",
                 "mean",
-                tooltip=f"Mean over {metric.count} slice(s), SD {number.format(metric.std)}{unit}",
+                tooltip=f"{PAIR_LABELS[pair]}: mean over {metric.count} slice(s), SD {number.format(metric.std)}{unit}",
             )
             self._metric_value_items[key].setText(f"{number.format(metric.mean)}{unit}")
 
     def _show_metrics_for_slice(self, index: int) -> None:
-        """Sidebar metrics table = the displayed slice's QA result (or error,
-        or "—" if it has none).
+        """Sidebar metrics table = the displayed slice's QA result for the
+        selected pair (or the other one), its error, or "—" if it has none.
         """
-        result = self._qa_results.get(index)
-        error = self._qa_errors.get(index)
+        pair = self._shown_pair(index)
+        if pair is None:
+            pair = next((p for p in [self._results_pair, *PAIRS] if (index, p) in self._qa_errors), self._results_pair)
+        result = self._qa_results.get((index, pair))
+        error = self._qa_errors.get((index, pair))
         if result is not None:
             self._set_metric_status("mtf", "statusDone", "done")
             self._metric_value_items["mtf"].setText(f"{result.mtf_area:.3f} mm⁻¹")
             self._set_metric_status("nps", "statusDone", "done")
             # nps_roi2 (homogeneous ROI) is the true NPS - nps_roi1 (structured
-            # ROI) is what WP2 calls "PS" (see the PS chart); this row was
-            # previously showing nps_roi1, mislabeling PS as NPS.
+            # ROI) is what WP2 calls "PS" (see the PS chart).
             self._metric_value_items["nps"].setText(f"{result.nps_roi2.var_nps:.5f} HU²mm²")
             self._set_metric_status("ratio", "statusDone", "done")
             self._metric_value_items["ratio"].setText(f"{result.ratio.ratio_lf_hf:.2f} LF/HF")
@@ -3340,7 +3078,9 @@ class MainWindowView(QMainWindow):
             for key, _ in _METRIC_ROWS:
                 self._set_metric_status(key, "statusError", "error", tooltip=error)
                 self._metric_value_items[key].setText("")
-        elif self._qa_jobs is not None and index in self._qa_jobs + [self._qa_active_slice]:
+        elif self._qa_jobs is not None and any(
+            job[0] == index for job in self._qa_jobs + [self._qa_active_job] if job is not None
+        ):
             for key, _ in _METRIC_ROWS:
                 self._set_metric_status(key, "statusQueued", "running")
                 self._metric_value_items[key].setText("")
@@ -3351,26 +3091,16 @@ class MainWindowView(QMainWindow):
 
     def _reset_qa_results(self) -> None:
         """Drops every QA result (new/closed study) and stops a running batch."""
-        if self._active_worker is not None:
-            self._active_worker.signals.blockSignals(True)
-            self._active_worker = None
-        self._qa_jobs = None
-        self._qa_active_slice = None
-        self._qa_cancel_requested = False
-        self._qa_total = 0
-        self._qa_results = {}
-        self._qa_errors = {}
+        self._qa.reset()
         self._cancel_run_btn.setVisible(False)
-        self._update_qa_progress()
         self._refresh_results_page()
         self._results_slice_label.setText("No results yet")
         self._reset_metrics_display()
         self._results_tab_btn.setEnabled(False)
-        self._results_tab_btn.setToolTip("Run metrics to see results")
+        self._set_tip(self._results_tab_btn, "Run metrics to see results")
         self._export_action.setEnabled(False)
-        self._export_action.setToolTip("Run metrics first")
-        self._last_result = None
-        self._last_export_context = None
+        self._set_tip(self._export_action, "Run metrics first")
+        self._export.clear()
 
     def _reset_metrics_display(self) -> None:
         """Back to the idle, nothing-has-run-yet state - `_build_metrics_box`'s
@@ -3387,7 +3117,6 @@ class MainWindowView(QMainWindow):
             self._feature_labels[name].setText("—")
         for chart_view in (self._mtf_chart_view, self._nps_chart_view, self._ps_chart_view, self._ratio_chart_view):
             self._update_line_chart(chart_view, np.array([]), [])
-        self._result_strip.setVisible(False)
 
 
 def main() -> None:

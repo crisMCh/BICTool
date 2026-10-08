@@ -1,7 +1,6 @@
 """Tests use a synthetic, hand-built DICOM dataset - never real patient data."""
 
 import numpy as np
-import pydicom
 import pytest
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -480,3 +479,54 @@ class TestCommaDecimalSeparator:
         candidates = discover_series(tmp_path)  # must not raise
 
         assert candidates[0].num_slices == 2
+
+
+def test_reformats_mislabelled_as_axial_are_recognised_by_their_slice_positions(tmp_path):
+    # Real Siemens photon-counting export: the coronal MPR ("kor") carries the
+    # source volume's axial ImageOrientationPatient, but its slices step
+    # along Y. It has more slices than the real axial series and used to win.
+    axial_orientation = (1, 0, 0, 0, 1, 0)
+    coronal_uid = generate_uid()
+    for i in range(6):
+        _make_synthetic_dicom(
+            tmp_path, filename=f"kor_{i}.dcm", series_instance_uid=coronal_uid, modality="CT",
+            instance_number=i + 1, slice_thickness=4.0, image_orientation_patient=axial_orientation,
+            image_position_patient=(-70.0, -350.0 + 4 * i, -594.5), series_description="CCT 4,00 kor",
+        )
+    axial_uid = generate_uid()
+    for i in range(4):
+        _make_synthetic_dicom(
+            tmp_path, filename=f"ax_{i}.dcm", series_instance_uid=axial_uid, modality="CT",
+            instance_number=i + 1, slice_thickness=4.0, image_orientation_patient=axial_orientation,
+            image_position_patient=(-75.0, -345.0, -746.0 + 4 * i), series_description="CCT 4,00 ax",
+        )
+
+    candidates = discover_series(tmp_path)
+
+    by_description = {c._reference_header.SeriesDescription: c for c in candidates}
+    assert by_description["CCT 4,00 kor"].axial is False
+    assert by_description["CCT 4,00 ax"].axial is True
+    assert load_dicom_volume(tmp_path).num_slices == 4  # the real axial series
+
+
+def test_a_strongly_tilted_axial_series_still_counts_as_axial(tmp_path):
+    # Real Siemens ER series: gantry tilt + angulation put the slice normal
+    # ~47 deg off the Z axis (Y component slightly larger than Z).
+    normal = np.array([0.078, 0.73, 0.679])
+    normal /= np.linalg.norm(normal)
+    row = np.array([0.99, -0.1, 0.0])
+    row -= row.dot(normal) * normal
+    row /= np.linalg.norm(row)
+    col = np.cross(normal, row)
+    for i in range(4):
+        _make_synthetic_dicom(
+            tmp_path, filename=f"tilt_{i}.dcm", series_instance_uid="1.2.3.4", modality="CT",
+            instance_number=i + 1, slice_thickness=4.0,
+            image_orientation_patient=tuple(float(v) for v in (*row, *col)),
+            image_position_patient=tuple(float(v) for v in 4 * i * normal),
+        )
+
+    (candidate,) = discover_series(tmp_path)
+
+    assert candidate.axial is True
+    assert candidate.label.endswith("axial")

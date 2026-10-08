@@ -1,6 +1,19 @@
 import numpy as np
 
-from bictool.presentation.viewmodels.roi_selection import RoiRect, crop_roi, make_square, normalize_rect
+from bictool.domain.roi_selection.structured_roi import RoiCandidate
+from bictool.presentation.viewmodels.roi_selection import (
+    RoiRect,
+    candidate_to_rect,
+    crop_roi,
+    make_square,
+    normalize_rect,
+)
+
+
+def test_candidate_to_rect_swaps_row_col_into_x_y():
+    candidate = RoiCandidate(row0=30, col0=10, size=20, structure="Dural Folds")
+
+    assert candidate_to_rect(candidate) == RoiRect(10, 30, 30, 50)
 
 
 def test_normalize_rect_orders_reversed_corners():

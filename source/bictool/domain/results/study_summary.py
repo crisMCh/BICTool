@@ -1,6 +1,9 @@
 """Study-level (global) QA over the per-slice results of one series
-(FR-04's global half): each metric's mean/SD across slices and a
-majority-vote verdict. Used by the Results page and the study export alike.
+(FR-04's global half): each metric's mean/SD across slices (both QA
+recipes) and, for the legacy (octave) recipe, the majority vote of the
+chest-CT SVM's slice verdicts. The physical recipe's study verdict is the
+head-CT model's (`head_ct_verdict`). Used by the Results page and the study
+export alike.
 
 Pure NumPy - no Qt, no file I/O.
 """

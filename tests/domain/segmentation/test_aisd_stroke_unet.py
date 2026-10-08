@@ -5,7 +5,6 @@ minutes on CPU).
 """
 
 import numpy as np
-import pytest
 
 from bictool.domain.segmentation import aisd_stroke_unet
 
@@ -51,10 +50,3 @@ def test_segment_slice_for_stroke_crops_back_to_the_original_shape():
 
     assert result.masks["Lesion"].shape == (512, 434)
 
-
-def test_load_weights_raises_a_clear_error_for_a_missing_file(tmp_path):
-    model = _FakeModel(np.zeros((512, 512), dtype=np.int64), nb_classes=aisd_stroke_unet.NB_CLASSES)
-    missing_path = tmp_path / "best_stage2.weights.h5"
-
-    with pytest.raises(FileNotFoundError, match="not found"):
-        aisd_stroke_unet.load_weights(model, missing_path)

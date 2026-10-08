@@ -22,6 +22,9 @@ from bictool.domain.metrics.nps import nps_complete_roi
 from bictool.domain.metrics.ps_mtf_ratio import ratio_nps_mtf
 from bictool.domain.results.classification import classify_quality
 from bictool.domain.results.study_quality import evaluate_slice_quality
+from bictool.integration.model_files import default_chest_svm_model
+
+SVM = default_chest_svm_model()
 
 # Small synthetic (non-patient) ROIs: digits-of-pi pattern (see
 # tests/domain/metrics/test_nps.py) and a shifted variant, so ROI1 and ROI2
@@ -59,7 +62,7 @@ def test_evaluate_slice_quality_wires_nps_and_contrast_correctly(monkeypatch):
 
     monkeypatch.setattr(mtf_seed, "calc_mtf", lambda *a, **k: (fake_xaxis, fake_mtf, fake_mtf_area_per_edge))
 
-    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)
+    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, recipe="octave")
 
     expected_nps_roi1 = nps_complete_roi(IMG_ROI1, PIX_SPC)
     expected_nps_roi2 = nps_complete_roi(IMG_ROI2, PIX_SPC)
@@ -95,7 +98,7 @@ def test_evaluate_slice_quality_wires_nps_and_contrast_correctly(monkeypatch):
     ])
     np.testing.assert_allclose(result.feature_vector, expected_features)
 
-    expected_label, expected_decision = classify_quality(expected_features)
+    expected_label, expected_decision = classify_quality(expected_features, SVM)
     assert result.predicted_label == expected_label
     assert result.decision_value == expected_decision
 
@@ -113,7 +116,7 @@ def test_evaluate_slice_quality_retries_mtf_seeds_until_one_finds_edges(monkeypa
 
     monkeypatch.setattr(mtf_seed, "calc_mtf", fake_calc_mtf)
 
-    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, mtf_seeds=[(2, 2), (3, 4), (5, 5)])
+    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, mtf_seeds=[(2, 2), (3, 4), (5, 5)])
 
     assert tried == [(2, 2), (3, 4)]
     assert result.mtf_seed == (3, 4)
@@ -131,7 +134,7 @@ def test_edges_with_a_non_finite_mtf_are_dropped_everywhere(monkeypatch):
     mtf = np.column_stack([good, good, np.full(5, np.inf)])
     _stub_mtf(monkeypatch, mtf, np.array([0.3, 0.5, np.nan]))
 
-    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)
+    result = evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, recipe="octave")
 
     assert result.mtf.shape[1] == 2
     assert result.mtf_area == 0.4
@@ -146,4 +149,29 @@ def test_slice_fails_when_most_edges_have_a_non_finite_mtf(monkeypatch):
     _stub_mtf(monkeypatch, mtf, np.array([0.3, np.nan, np.nan]))
 
     with pytest.raises(ValueError, match="2 of 3 edge points"):
-        evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC)
+        evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, recipe="octave")
+
+
+def test_default_recipe_is_physical_with_finite_features_on_a_real_edge():
+    from bictool.domain.metrics.mtf_seed import mtf_seed_candidates
+
+    rng = np.random.default_rng(0)
+    roi1 = np.full((26, 26), 30.0)
+    roi1[:, 12:15] = 80.0  # a falx-like bright line
+    roi1 += rng.normal(0, 2, roi1.shape)
+    roi2 = 30.0 + rng.normal(0, 3, (26, 26))
+
+    result = evaluate_slice_quality(roi1, roi2, 0.44, svm_model=SVM, mtf_seeds=mtf_seed_candidates(roi1))
+
+    assert result.recipe == "physical"
+    assert result.ratio.band == (0.1, 0.8)
+    assert np.isfinite(result.feature_vector).all()
+    assert 0.0 < result.mtf_area <= 0.8  # integral of MTF <= 1 over [0, 0.8] 1/mm
+    assert result.mtf_xaxis[-1] <= 1 / (2 * 5 / 14) + 0.05  # mirrored half dropped
+
+
+def test_unknown_recipe_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown QA recipe"):
+        evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, recipe="matlab")

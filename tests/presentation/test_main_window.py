@@ -86,12 +86,13 @@ def _load_fake_volume(window: MainWindowView, num_slices: int = 1) -> DicomVolum
 
 def _set_roi(window: MainWindowView, key: str, rect: RoiRect) -> None:
     """Mirrors drawing `rect` on the image and clicking "Set ROI1"/"Set
-    ROI2" (`_on_set_roi_clicked`), without driving real mouse events -
+    ROI2" (`_save_draft_as`), without driving real mouse events -
     `RoiViewport`'s draw-then-assign model means a rectangle must exist as
     its current draft before a Set ROI button can save it.
     """
     window._roi_viewport._current_rect = rect
-    window._on_set_roi_clicked(key)
+    # Plain "roi1"/"roi2" = the falx pair (the app's slots are "falx.roi1", ...).
+    window._save_draft_as(key if "." in key else f"falx.{key}")
 
 
 def _fake_result() -> SimpleNamespace:
@@ -125,7 +126,7 @@ def test_window_has_expected_title_and_menus():
     window = MainWindowView()
     assert window.windowTitle() == "BICTool"
     menu_titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert menu_titles == ["File", "Study", "View", "Tools", "Export"]
+    assert menu_titles == ["File", "Study", "View", "Tools", "Settings", "Export"]
 
 
 def test_metric_status_starts_idle_not_queued():
@@ -285,14 +286,14 @@ def test_export_action_disabled_until_a_result_exists():
     # Run All has actually produced something to export.
     window = MainWindowView()
     assert window._export_action.isEnabled() is False
-    assert window._export_action.toolTip() == "Run metrics first"
+    assert "Run metrics first" in window._export_action.toolTip()
 
 
 def test_trace_panel_receives_log_messages():
     import logging
 
     window = MainWindowView()
-    assert window._trace_log.toPlainText() != ""  # startup message already logged
+    window._show_trace_action.setChecked(True)  # off by default (Settings > Show Trace Log)
 
     logging.getLogger("bictool.some.module").info("a distinctive test message")
 
@@ -304,7 +305,9 @@ def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
     # manual ROI1 (no segmentation) is seeded on its brightest central line.
     captured = {}
 
-    def fake_evaluate(img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, mtf_seeds=None):
+    def fake_evaluate(
+        img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, svm_model, mtf_seeds=None, recipe=None
+    ):
         captured["seeds"] = mtf_seeds
         return _fake_result()
 
@@ -327,6 +330,7 @@ def test_roi_selection_and_run_all_are_logged_to_the_trace_panel(monkeypatch):
     monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
 
     window = MainWindowView()
+    window._show_trace_action.setChecked(True)
     _load_fake_volume(window)
     _set_roi(window, "roi1", RoiRect(0, 0, 10, 10))
     _set_roi(window, "roi2", RoiRect(20, 20, 40, 40))
@@ -338,9 +342,9 @@ def test_roi_selection_and_run_all_are_logged_to_the_trace_panel(monkeypatch):
         QApplication.processEvents()
 
     trace_text = window._trace_log.toPlainText()
-    assert "roi1 set" in trace_text
-    assert "roi2 set" in trace_text
-    assert "Run All clicked" in trace_text
+    assert "Falx ROI1 set" in trace_text
+    assert "Falx ROI2 set" in trace_text
+    assert "Run All: slice=0 (Falx)" in trace_text
     assert "Run All succeeded" in trace_text
 
 
@@ -425,10 +429,10 @@ def test_confirm_checkbox_disabled_until_slice_and_both_rois_present():
 
     _set_roi(window, "roi2", RoiRect(20, 20, 30, 30))
     assert window._confirm_rois_cb.isEnabled() is True
-    assert window._roi_position_items["roi1"].text() == "0–10, 0–10"
-    assert window._roi_size_items["roi1"].text() == "10×10 px"
-    assert window._roi_position_items["roi2"].text() == "20–30, 20–30"
-    assert window._roi_size_items["roi2"].text() == "10×10 px"
+    assert window._roi_position_items["falx.roi1"].text() == "0–10, 0–10"
+    assert window._roi_size_items["falx.roi1"].text() == "10×10 px"
+    assert window._roi_position_items["falx.roi2"].text() == "20–30, 20–30"
+    assert window._roi_size_items["falx.roi2"].text() == "10×10 px"
 
 
 def test_drawing_a_rectangle_shows_a_live_size_preview_without_finalizing_selection():
@@ -439,27 +443,78 @@ def test_drawing_a_rectangle_shows_a_live_size_preview_without_finalizing_select
 
     assert _overlay_text(window, "bottom_right").endswith("Selecting: 15×15 px")
     # Drawing must not count as a real ROI1/ROI2 selection yet - only
-    # clicking Set ROI1/Set ROI2 does (`_on_set_roi_clicked`).
-    assert "roi1" not in window._roi_rects
+    # right-click > Save as does (`_save_draft_as`).
+    assert "falx.roi1" not in window._roi_rects
     assert window._confirm_rois_cb.isEnabled() is False
-    # But it does mean there's something to save now.
-    assert window._set_roi1_btn.isEnabled() is True
-    assert window._set_roi2_btn.isEnabled() is True
 
 
-def test_set_roi_buttons_disabled_until_a_rectangle_is_drawn():
+def _menu_actions(menu):
+    """{text: action} of a menu and its submenus (submenu entries as "Save as/<text>")."""
+    out = {}
+    for action in menu.actions():
+        if action.menu():
+            for sub in action.menu().actions():
+                out[f"{action.text()}/{sub.text()}"] = sub
+        elif action.text():
+            out[action.text()] = action
+    return out
+
+
+def test_right_click_on_a_drawn_rectangle_offers_delete_and_save_as_the_four_roles():
+    window = MainWindowView()
+    _load_fake_volume(window)
+    window._roi_viewport.set_draft(RoiRect(10, 10, 25, 25))
+
+    actions = _menu_actions(window._roi_context_menu(""))
+
+    assert {"Delete", "Save as/Falx", "Save as/White matter (next to falx)", "Save as/Septum",
+            "Save as/Ventricle (next to septum)"} <= set(actions)
+    actions["Save as/Ventricle (next to septum)"].trigger()
+    assert window._roi_rects["septum.roi2"] == RoiRect(10, 10, 25, 25)
+    assert not window._roi_viewport.has_draft()
+
+
+def test_a_drawn_rectangle_can_be_deleted_with_the_button_the_key_or_the_menu():
     window = MainWindowView()
     _load_fake_volume(window)
 
-    assert window._set_roi1_btn.isEnabled() is False
-    assert window._set_roi2_btn.isEnabled() is False
+    for delete in (
+        lambda: window._delete_roi_btn.click(),
+        lambda: window._roi_viewport.roi_delete_requested.emit(""),  # what the Del key sends
+        lambda: _menu_actions(window._roi_context_menu(""))["Delete"].trigger(),
+    ):
+        window._roi_viewport.set_draft(RoiRect(10, 10, 25, 25))
+        assert window._delete_roi_btn.isEnabled()
+        delete()
+        assert not window._roi_viewport.has_draft()
+        assert not window._delete_roi_btn.isEnabled()
 
-    window._roi_viewport.draft_changed.emit(RoiRect(10, 10, 25, 25))
-    assert window._set_roi1_btn.isEnabled() is True
 
-    window._roi_viewport.draft_changed.emit(None)
-    assert window._set_roi1_btn.isEnabled() is False
-    assert window._set_roi2_btn.isEnabled() is False
+def test_right_click_save_as_moves_an_existing_roi_to_another_role():
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _set_roi(window, "falx.roi1", RoiRect(0, 0, 10, 10))
+
+    actions = _menu_actions(window._roi_context_menu("falx.roi1"))
+    assert not actions["Save as/Falx"].isEnabled()  # its own role
+    actions["Save as/Septum"].trigger()
+
+    assert window._roi_rects.get("septum.roi1") == RoiRect(0, 0, 10, 10)
+    assert "falx.roi1" not in window._roi_rects
+
+
+def test_confirmed_rois_have_a_disabled_right_click_menu():
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _set_roi(window, "roi1", RoiRect(0, 0, 10, 10))
+    _set_roi(window, "roi2", RoiRect(20, 20, 30, 30))
+    window._confirm_rois_cb.setChecked(True)
+
+    actions = _menu_actions(window._roi_context_menu("falx.roi1"))
+
+    assert not actions["Delete"].isEnabled()
+    assert not actions["Save as/Septum"].isEnabled()
+    assert any("confirmed" in text for text in actions)
 
 
 def test_hovering_the_image_shows_cursor_position_and_value_in_the_overlay():
@@ -659,12 +714,12 @@ def test_slice_slider_navigates_and_keeps_each_slices_rois_and_the_global_confir
     assert window._current_slice_index == 3
     assert window._slice_label.text() == "Slice 4 / 5"
     assert window._confirm_rois_cb.isChecked() is True
-    assert window._roi_position_items["roi1"].text() == "not set"
-    assert window._roi_position_items["roi2"].text() == "not set"
+    assert window._roi_position_items["falx.roi1"].text() == "not set"
+    assert window._roi_position_items["falx.roi2"].text() == "not set"
 
     window._slice_slider.setValue(0)
 
-    assert window._roi_rects == {"roi1": RoiRect(0, 0, 10, 10), "roi2": RoiRect(20, 20, 30, 30)}
+    assert window._roi_rects == {"falx.roi1": RoiRect(0, 0, 10, 10), "falx.roi2": RoiRect(20, 20, 30, 30)}
 
 
 def test_confirming_locks_the_rois_and_unconfirming_unlocks_them():
@@ -675,7 +730,7 @@ def test_confirming_locks_the_rois_and_unconfirming_unlocks_them():
 
     window._confirm_rois_cb.setChecked(True)
     assert window._roi_viewport._locked is True
-    assert window._set_roi1_btn.isEnabled() is False
+    assert window._delete_roi_btn.isEnabled() is False
 
     window._confirm_rois_cb.setChecked(False)
     assert window._roi_viewport._locked is False
@@ -708,14 +763,13 @@ def test_close_study_resets_everything_to_the_no_study_state(monkeypatch):
     assert window._series_combo.count() == 0
     assert window._series_combo.isEnabled() is False
     assert window._roi_rects == {}
-    assert window._roi_position_items["roi1"].text() == "not set"
+    assert window._roi_position_items["falx.roi1"].text() == "not set"
     assert window._confirm_rois_cb.isEnabled() is False
-    assert window._set_roi1_btn.isEnabled() is False
+    assert window._delete_roi_btn.isEnabled() is False
     assert window._slice_slider.isEnabled() is False
     assert window._slice_label.text() == "No slices loaded"
     assert window._metric_status_items["mtf"].text() == "—"
     assert window._result_verdict_label.text() == "—"
-    assert window._result_strip.isHidden()
     assert window._results_tab_btn.isEnabled() is False
     assert window._export_action.isEnabled() is False
     assert window._last_result is None
@@ -800,8 +854,8 @@ def test_perform_export_only_writes_the_selected_items(monkeypatch, tmp_path):
 
 def test_roi_and_metrics_table_cells_are_center_aligned():
     window = MainWindowView()
-    assert window._roi_position_items["roi1"].textAlignment() == Qt.AlignmentFlag.AlignCenter
-    assert window._roi_size_items["roi1"].textAlignment() == Qt.AlignmentFlag.AlignCenter
+    assert window._roi_position_items["falx.roi1"].textAlignment() == Qt.AlignmentFlag.AlignCenter
+    assert window._roi_size_items["falx.roi1"].textAlignment() == Qt.AlignmentFlag.AlignCenter
     assert window._metric_value_items["mtf"].textAlignment() == Qt.AlignmentFlag.AlignCenter
     assert window._metric_status_items["mtf"].textAlignment() == Qt.AlignmentFlag.AlignCenter
 
@@ -860,10 +914,10 @@ def test_run_all_computes_qa_for_every_slice_with_both_rois(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {1, 3, 4}
+    assert set(window._qa_results) == {(1, "falx"), (3, "falx"), (4, "falx")}
     assert window._results_slices == [1, 3, 4]
     assert window._view_stack.currentIndex() == 1
-    assert window._qa_progress_label.text() == "QA done: 3 slice(s)"
+    assert window._qa_progress_label.text() == "QA done: 3 ROI pair(s)"
     assert window._study_table.rowCount() == 3
 
 
@@ -892,8 +946,9 @@ def test_study_verdict_is_the_majority_of_slice_verdicts(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert window._study_verdict_label.text() == "Study: Acceptable — 2 of 3 slice(s) acceptable"
-    assert window._study_table.item(1, 5).text() == "Unacceptable"
+    assert window._study_verdict_label.text() == "Falx: Acceptable — 2 of 3 slice(s) acceptable"
+    assert window._study_table.item(1, 1).text() == "Falx"
+    assert window._study_table.item(1, 6).text() == "Unacceptable"
 
 
 def test_a_failing_slice_does_not_stop_the_batch(monkeypatch):
@@ -912,9 +967,9 @@ def test_a_failing_slice_does_not_stop_the_batch(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {0, 2}
-    assert window._qa_errors == {1: "no edge found"}
-    assert window._qa_progress_label.text() == "QA done: 3 slice(s), 1 failed"
+    assert set(window._qa_results) == {(0, "falx"), (2, "falx")}
+    assert window._qa_errors == {(1, "falx"): "no edge found"}
+    assert window._qa_progress_label.text() == "QA done: 3 ROI pair(s), 1 failed"
     # Failed slices are left out of the results, only counted.
     assert window._results_slices == [0, 2]
     assert window._study_table.rowCount() == 2
@@ -935,8 +990,8 @@ def test_cancel_stops_the_batch_after_the_running_slice(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {0}
-    assert window._qa_progress_label.text() == "QA cancelled: 1/3 slice(s)"
+    assert set(window._qa_results) == {(0, "falx")}
+    assert window._qa_progress_label.text() == "QA cancelled: 1/3 ROI pair(s)"
     assert window._cancel_run_btn.isHidden()
 
 
@@ -989,3 +1044,200 @@ def test_study_export_writes_the_summary_and_per_slice_files(monkeypatch, tmp_pa
     assert any(name.endswith("_study_slices.csv") for name in written)
     workbook = openpyxl.load_workbook(next(tmp_path.glob("*_study_metrics.xlsx")))
     assert len(list(workbook["Per slice"].iter_rows())) == 3  # header + slices 1 and 3
+
+
+def _menu_path(window, *titles):
+    """The QMenu reached by following menu titles from the menu bar."""
+    menu = None
+    actions = window.menuBar().actions()
+    for title in titles:
+        action = next(a for a in actions if a.text().replace("&", "") == title)
+        menu = action.menu()
+        actions = menu.actions()
+    return menu
+
+
+def test_qa_recipe_defaults_to_physical_and_is_tucked_under_tools_advanced():
+    window = MainWindowView()
+
+    recipe_menu = _menu_path(window, "Tools", "Advanced", "QA Recipe")
+    assert [a.text() for a in recipe_menu.actions()] == ["Physical (default)", "Octave (legacy)"]
+    assert window._qa_recipe == "physical"
+    assert window._qa_recipe_actions["physical"].isChecked() is True
+    assert window._qa_recipe_label.isHidden() is True
+
+
+def test_legacy_recipe_is_passed_to_the_worker_and_shown_in_the_metrics_box(monkeypatch):
+    received = []
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: received.append(k) or _fake_result())
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=1)
+    _set_rois_on_slices(window, [0])
+
+    window._qa_recipe_actions["octave"].trigger()
+    _run_batch_to_completion(window)
+
+    assert received[0]["recipe"] == "octave"
+    assert window._qa_recipe_label.isHidden() is False
+
+
+def test_switching_recipe_clears_results_of_the_other_recipe(monkeypatch):
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: _fake_result())
+    window = MainWindowView()
+    _load_fake_volume(window, num_slices=2)
+    _set_rois_on_slices(window, [0, 1])
+    _run_batch_to_completion(window)
+    assert window._qa_results
+
+    window._qa_recipe_actions["octave"].trigger()
+
+    assert window._qa_results == {}
+    assert window._confirm_rois_cb.isChecked() is True  # ROIs stay confirmed, Run All recomputes
+
+
+def test_recipe_cannot_be_switched_while_a_batch_runs(monkeypatch):
+    window = MainWindowView()
+
+    def evaluate(*args, **kwargs):
+        assert window._qa_recipe_actions["octave"].isEnabled() is False
+        return _fake_result()
+
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
+    _load_fake_volume(window, num_slices=1)
+    _set_rois_on_slices(window, [0])
+    _run_batch_to_completion(window)
+
+    assert window._qa_recipe_actions["octave"].isEnabled() is True
+
+
+# ---- GUI clean-up 2026-10-07: settings, hover help, numbered steps ----
+
+def test_trace_log_is_off_by_default_and_the_choice_is_remembered():
+    import logging
+
+    window = MainWindowView()
+    assert window._trace_box.isHidden()
+    assert window._log_handler not in logging.getLogger("bictool").handlers  # nothing is fed to a hidden panel
+
+    window._show_trace_action.setChecked(True)
+    assert not window._trace_box.isHidden()
+    assert window._log_handler in logging.getLogger("bictool").handlers
+
+    again = MainWindowView()  # a new session
+    assert again._show_trace_action.isChecked() and not again._trace_box.isHidden()
+
+
+def test_roi_details_are_hidden_by_default_and_remembered():
+    window = MainWindowView()
+    assert window._roi_table.isHidden()
+
+    window._roi_details_btn.click()
+    assert not window._roi_table.isHidden()
+    assert window._roi_details_btn.text() == "▾ ROI details"
+
+    assert not MainWindowView()._roi_table.isHidden()
+
+
+def test_controls_show_help_and_why_they_are_disabled():
+    from bictool.presentation.viewmodels.help_text import TOOLTIPS
+
+    window = MainWindowView()
+
+    tip = window._run_all_btn.toolTip()
+    assert tip.startswith(TOOLTIPS["_run_all_btn"]) and tip.endswith("Confirm ROIs to enable")
+    assert window._export_action.toolTip().startswith(TOOLTIPS["_export_action"])
+
+
+def test_sidebar_steps_are_numbered_and_the_results_page_shows_slice_results():
+    from PySide6.QtWidgets import QGroupBox
+
+    from bictool.presentation.views.collapsible_section import CollapsibleSection
+
+    window = MainWindowView()
+    titles = [box.title() for box in window.findChildren(QGroupBox) + window.findChildren(CollapsibleSection)]
+    assert {"1. Segmentation", "Anatomical", "WM/GM separation", "2. ROI Selection", "Confirm ROIs",
+            "3. Run QA metrics"} <= set(titles)
+
+    window._show_view_page(1)
+    assert window._metrics_box.title() == "Slice results"
+    assert window._series_box.isHidden()
+    window._results_tabs.setCurrentIndex(1)
+    assert window._metrics_box.title() == "Study averages (Falx)"
+    window._show_view_page(0)
+    assert window._metrics_box.title() == "3. Run QA metrics" and not window._series_box.isHidden()
+
+
+def test_auto_roi_button_reads_start_or_remove():
+    window = MainWindowView()
+    assert window._auto_rois_btn.text() == "Start auto ROIs"
+
+    window._auto_rois_btn.setEnabled(True)
+    window._auto_rois_btn.setChecked(True)
+    assert window._auto_rois_btn.text() == "Remove auto ROIs"
+    window._auto_rois_btn.setChecked(False)
+    assert window._auto_rois_btn.text() == "Start auto ROIs"
+
+
+def test_sidebar_steps_collapse_and_stay_collapsed():
+    window = MainWindowView()
+    assert window._roi_section.is_expanded()
+
+    window._roi_section.header().click()
+    assert not window._roi_section.is_expanded()
+    assert window._auto_rois_btn.isHidden() is False and not window._auto_rois_btn.isVisibleTo(window._roi_section)
+
+    assert not MainWindowView()._roi_section.is_expanded()  # remembered
+
+
+def test_viewer_and_sidebar_are_split_by_a_draggable_handle_that_is_remembered():
+    window = MainWindowView()
+    window.resize(1600, 1000)
+    window.show()
+    window._main_splitter.setSizes([900, 700])
+    window._main_splitter.splitterMoved.emit(900, 1)
+
+    again = MainWindowView()
+    again.resize(1600, 1000)
+    again.show()
+    assert again._main_splitter.sizes()[1] > 600
+
+
+def test_boxes_and_tabs_describe_themselves_on_hover():
+    from bictool.presentation.viewmodels.help_text import TAB_TOOLTIPS, TOOLTIPS
+
+    window = MainWindowView()
+
+    assert window._wmgm_box.toolTip() == TOOLTIPS["_wmgm_box"]
+    assert window._roi_section.toolTip() == TOOLTIPS["_roi_section"]
+    assert window._roi_section.header().toolTip().startswith(TOOLTIPS["_roi_section"])
+    assert window._results_tabs.tabToolTip(1) == TAB_TOOLTIPS["summary"]
+
+
+def test_progress_and_status_live_in_the_status_bar():
+    window = MainWindowView()
+    status_bar = window.statusBar()
+
+    for item in (window._study_activity, window._segmentation_activity, window._qa_activity, window._roi_activity):
+        assert item.parentWidget() is not None and status_bar.isAncestorOf(item)
+    assert status_bar.isAncestorOf(window._cancel_segment_volume_btn)
+    assert status_bar.isAncestorOf(window._cancel_run_btn)
+    assert not window._metrics_box.isAncestorOf(window._qa_progress_label)
+
+
+def test_sidebar_and_its_boxes_grow_with_the_window_and_the_handle():
+    from PySide6.QtWidgets import QApplication
+
+    window = MainWindowView()
+    window.resize(1400, 900)
+    window.show()
+    QApplication.processEvents()
+    narrow = window._roi_section.width()
+
+    window._main_splitter.setSizes([700, 700])  # handle dragged left
+    QApplication.processEvents()
+    assert window._roi_section.width() > narrow + 200
+
+    before = window._main_splitter.sizes()[1]
+    window.resize(2400, 1300)  # full screen
+    QApplication.processEvents()
+    assert window._main_splitter.sizes()[1] > before

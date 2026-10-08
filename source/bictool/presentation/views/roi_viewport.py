@@ -15,8 +15,10 @@ import numpy as np
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
+    QGraphicsSimpleTextItem,
     QGraphicsScene,
     QGraphicsView,
     QLabel,
@@ -29,7 +31,19 @@ from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WIN
 
 logger = logging.getLogger(__name__)
 
-_ROI_COLORS = {"roi1": "#49c8de", "roi2": "#d98bd8"}
+# ROI slots: color, on-image label, ROI2 drawn dotted (ROI1 solid). The falx
+# pair keeps the original ROI1/ROI2 colors; the septum pair gets its own. The
+# plain "roi1"/"roi2" keys remain for callers without named pairs.
+_ROI_STYLES = {
+    "falx.roi1": ("#49c8de", "F1", False),
+    "falx.roi2": ("#d98bd8", "F2", True),
+    "septum.roi1": ("#6fcf97", "S1", False),
+    "septum.roi2": ("#f2994a", "S2", True),
+    "roi1": ("#49c8de", "ROI1", False),
+    "roi2": ("#d98bd8", "ROI2", True),
+}
+_ROI_PEN_WIDTH = 1.5
+_SELECTED_PEN_WIDTH = 3.5
 # The in-progress/uncommitted rectangle - visually distinct (amber, dashed)
 # from either committed ROI's solid color so "drawn but not yet saved" never
 # looks like it's already ROI1 or ROI2.
@@ -94,6 +108,16 @@ class RoiViewport(QGraphicsView):
     # hand-drawn draft (which also emits draft_changed), "roi1"/"roi2" a
     # committed ROI (only while not locked - see `set_locked`).
     draft_moved = Signal(str, object)
+    # The committed ROI the user clicked (its key), or None when the selection
+    # is cleared (click on empty image, slice change). See `select_roi`.
+    roi_selected = Signal(object)
+    # Delete/Backspace pressed while not locked, on the selected ROI (its key)
+    # or - with no ROI selected - on the hand-drawn rectangle (key ""). The
+    # caller decides what deleting means (see `main_window`).
+    roi_delete_requested = Signal(str)
+    # Right-click on an ROI (its key) or on the hand-drawn rectangle (""),
+    # with the global screen position for a context menu.
+    context_menu_requested = Signal(str, object)
     cursor_moved = Signal(object)  # (x: int, y: int, value_hu: float) | None - None when off-image or cursor leaves
     slice_scroll = Signal(int)  # +1 (next slice) or -1 (previous slice)
     zoom_changed = Signal(float)  # new zoom percentage - see `current_zoom_percent`
@@ -124,6 +148,8 @@ class RoiViewport(QGraphicsView):
         # sets the scrollbars' values directly, not via their widgets.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Keyboard focus on click, so Delete reaches `keyPressEvent`.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._roi_items: dict[str, QGraphicsRectItem] = {}
@@ -146,6 +172,7 @@ class RoiViewport(QGraphicsView):
         # draggable until `set_locked(True)` (the "Confirmed" state), which
         # also stops new rectangles from being drawn.
         self._committed_rois: dict[str, RoiRect] = {}
+        self._selected_key: str | None = None
         self._locked = False
         self._current_rect: RoiRect | None = None
         self._current_rect_item: QGraphicsRectItem | None = None
@@ -217,6 +244,7 @@ class RoiViewport(QGraphicsView):
         self._move_origin = None
         self._committed_rois = {}
         self.draft_changed.emit(None)
+        self._set_selection(None)
         self.clear_all_overlays()  # overlays (e.g. segmentation masks) are per-slice too
 
         pixmap = self._make_windowed_pixmap()
@@ -251,6 +279,7 @@ class RoiViewport(QGraphicsView):
         self._move_origin = None
         self._committed_rois = {}
         self.draft_changed.emit(None)
+        self._set_selection(None)
         self.clear_all_overlays()
         self._current_pixels_hu = None
         self._image_size = (0, 0)
@@ -297,6 +326,10 @@ class RoiViewport(QGraphicsView):
         self._draw_current_rect(rect)
         self.draft_changed.emit(rect)
 
+    def has_draft(self) -> bool:
+        """A hand-drawn rectangle is visible (drawn, not yet saved as an ROI)."""
+        return self._current_rect is not None and self._current_rect_item is not None
+
     def clear_draft(self) -> None:
         """Removes the draft (data and on-screen preview) without touching committed ROIs."""
         if self._current_rect_item is not None:
@@ -306,16 +339,39 @@ class RoiViewport(QGraphicsView):
         self.draft_changed.emit(None)
 
     def set_roi(self, roi_key: str, rect: RoiRect) -> None:
-        """Shows `rect` as committed ROI `roi_key` ("roi1"/"roi2") in that
-        slot's solid color, replacing whatever was shown there - e.g. an
-        automatically selected ROI, or a slice's saved ROI after navigating.
+        """Shows `rect` as committed ROI `roi_key` (e.g. "falx.roi1", see
+        `_ROI_STYLES`) in that slot's color and label, replacing whatever was
+        shown there - e.g. an automatically selected ROI, or a slice's saved
+        ROI after navigating.
         """
         self._draw_roi(roi_key, rect)
+
+    def select_roi(self, roi_key: str | None) -> None:
+        """Highlights a committed ROI (or none) - e.g. when its row is clicked
+        in the ROI table. Emits `roi_selected` when the selection changes."""
+        if roi_key is not None and roi_key not in self._committed_rois:
+            roi_key = None
+        self._set_selection(roi_key)
+
+    def selected_roi(self) -> str | None:
+        return self._selected_key
+
+    def _set_selection(self, roi_key: str | None) -> None:
+        if roi_key == self._selected_key:
+            return
+        previous, self._selected_key = self._selected_key, roi_key
+        for key in (previous, roi_key):
+            if key is not None and key in self._committed_rois:
+                self._draw_roi(key, self._committed_rois[key])
+        self.roi_selected.emit(roi_key)
 
     def roi(self, roi_key: str) -> RoiRect | None:
         return self._committed_rois.get(roi_key)
 
     def clear_rois(self) -> None:
+        """Removes every committed ROI from the image. The selection key is
+        kept, so redrawing the same ROIs (e.g. after an edit) keeps it
+        highlighted; `select_roi(None)` clears it."""
         for item in self._roi_items.values():
             self._scene.removeItem(item)
         self._roi_items = {}
@@ -358,21 +414,52 @@ class RoiViewport(QGraphicsView):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         if event.button() == Qt.MouseButton.MiddleButton:
-            self._pan_last_pos = event.pos()
+            self._pan_last_pos = event.position().toPoint()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._pixmap_item is not None and not self._locked:
-            scene_pos = self.mapToScene(event.pos())
+            self.setFocus()
+            scene_pos = self.mapToScene(event.position().toPoint())
             grabbed = self._draft_under(scene_pos)
             if grabbed is not None:
                 # Grabbing a draft or ROI moves it (e.g. to adjust an
-                # auto-selected ROI); pressing anywhere else draws a new one.
+                # auto-selected ROI) and selects it (Delete removes it);
+                # pressing anywhere else draws a new one.
                 self._move_key, self._move_origin = grabbed
                 self._move_start = scene_pos
+                self._set_selection(self._move_key or None)
             else:
+                self._set_selection(None)
                 self._drag_start = scene_pos
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        """Delete/Backspace asks the caller to delete the selected ROI, or the
+        hand-drawn rectangle when no ROI is selected."""
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and not self._locked:
+            if self._selected_key is not None:
+                self.roi_delete_requested.emit(self._selected_key)
+                event.accept()
+                return
+            if self.has_draft():
+                self.roi_delete_requested.emit("")
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        """Right-click on an ROI or the hand-drawn rectangle: selects it and
+        asks the caller for its menu (Delete, Save as ...)."""
+        if self._pixmap_item is None:
+            return
+        hit = self._draft_under(self.mapToScene(event.pos()))
+        if hit is None:
+            return
+        key = hit[0]
+        self._set_selection(key or None)
+        self.context_menu_requested.emit(key, event.globalPos())
+        event.accept()
 
     def _draft_under(self, scene_pos) -> tuple[str, RoiRect] | None:
         """(key, rect) of the visible draft or committed ROI under `scene_pos` -
@@ -407,15 +494,15 @@ class RoiViewport(QGraphicsView):
         cursor/pixel-value reading (`cursor_moved`).
         """
         if self._pan_last_pos is not None:
-            delta = event.pos() - self._pan_last_pos
-            self._pan_last_pos = event.pos()
+            delta = event.position().toPoint() - self._pan_last_pos
+            self._pan_last_pos = event.position().toPoint()
             h_bar, v_bar = self.horizontalScrollBar(), self.verticalScrollBar()
             h_bar.setValue(h_bar.value() - delta.x())
             v_bar.setValue(v_bar.value() - delta.y())
             event.accept()
             return
         if self._move_start is not None:
-            rect = self._moved_draft(event.pos())
+            rect = self._moved_draft(event.position().toPoint())
             if self._move_key:
                 if rect != self._committed_rois.get(self._move_key):
                     self.set_roi(self._move_key, rect)
@@ -426,13 +513,13 @@ class RoiViewport(QGraphicsView):
                 self.draft_changed.emit(rect)
                 self.draft_moved.emit("", rect)
         elif self._drag_start is not None:
-            rect = self._rect_from_drag_endpoint(event.pos())
+            rect = self._rect_from_drag_endpoint(event.position().toPoint())
             if rect is not None:
                 self._current_rect = rect
                 self._draw_current_rect(rect)
                 self.draft_changed.emit(rect)
         elif self._current_pixels_hu is not None:
-            self._emit_cursor_reading(event.pos())
+            self._emit_cursor_reading(event.position().toPoint())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override signature
@@ -447,7 +534,7 @@ class RoiViewport(QGraphicsView):
             super().mouseReleaseEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
-            rect = self._rect_from_drag_endpoint(event.pos())
+            rect = self._rect_from_drag_endpoint(event.position().toPoint())
             self._drag_start = None
             if rect is not None:
                 self._current_rect = rect
@@ -543,11 +630,21 @@ class RoiViewport(QGraphicsView):
         existing = self._roi_items.get(key)
         if existing is not None:
             self._scene.removeItem(existing)
-        color = QColor(_ROI_COLORS[key])
+        color_hex, label, dotted = _ROI_STYLES[key]
+        color = QColor(color_hex)
         fill = QColor(color)
         fill.setAlpha(45)
-        item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, QPen(color, 1.5), QBrush(fill))
-        item.setZValue(2)  # above overlays (z=1) and the base image (z=0)
+        selected = key == self._selected_key
+        pen = QPen(color, _SELECTED_PEN_WIDTH if selected else _ROI_PEN_WIDTH)
+        if dotted:
+            pen.setStyle(Qt.PenStyle.DotLine)
+        item = self._scene.addRect(rect.x0, rect.y0, rect.width, rect.height, pen, QBrush(fill))
+        item.setZValue(3 if selected else 2)  # above overlays (z=1) and the base image (z=0)
+        # Constant on-screen size whatever the zoom - a label, not part of the image.
+        text = QGraphicsSimpleTextItem(label, item)
+        text.setBrush(QBrush(color))
+        text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        text.setPos(rect.x0 + 0.5, rect.y0 + 0.5)
         self._roi_items[key] = item
         self._committed_rois[key] = rect
 
