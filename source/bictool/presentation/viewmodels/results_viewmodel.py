@@ -3,21 +3,24 @@
 Built from the QA run's results (`QaRunViewModel`): the slices that have a
 result (the Per-slice slider's positions), which ROI pair is shown
 (Falx/Septum switch), the study-level head-CT verdict (physical recipe) or
-the legacy majority vote (Octave recipe), the study table's rows, and the
-texts of one slice's view. Colours are a view decision - the ViewModel
+the legacy majority vote (Octave recipe), the possible-artefact flags (metal,
+posterior-fossa bands - hints, not part of the verdict), the study table's
+rows, and the texts of one slice's view. Colours are a view decision - the ViewModel
 gives tones ("good", "bad", "neutral"). QtCore only - no widgets.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Signal
 
+from bictool.domain.artefacts.artefact_flags import ArtefactFlags, evaluate_artefact_flags
 from bictool.domain.results.head_ct_verdict import evaluate_study_results
 from bictool.domain.results.study_quality import RECIPE_PHYSICAL
 from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict
+from bictool.presentation.viewmodels.artefact_text import artefact_basics, artefact_details, slice_artefact_notes
 from bictool.presentation.viewmodels.head_ct_verdict_text import (
     OUTLIER_TEXT,
     PROVISIONAL_NOTE,
@@ -33,6 +36,7 @@ from bictool.presentation.viewmodels.head_ct_verdict_text import (
     verdict_text,
 )
 from bictool.presentation.viewmodels.roi_pairs import FALX, PAIR_LABELS, PAIRS, SEPTUM
+from bictool.presentation.viewmodels.slice_steps import SliceStepsView, slice_steps_view
 
 STUDY_TABLE_COLUMNS = [
     "Slice", "Structure", "MTF area [1/mm]", "NPS ROI2 [HU²mm²]", "PS/MTF LF/HF", "Decision", "Verdict",
@@ -65,15 +69,31 @@ class SliceView:
 class ResultsViewModel(QObject):
     changed = Signal()  # results were (re)built - redraw the Results page
 
-    def __init__(self, qa, model: Callable[[], object], parent: QObject | None = None) -> None:
-        """`qa` = the QaRunViewModel; `model()` = the head-CT study model (or None)."""
+    def __init__(
+        self,
+        qa,
+        model: Callable[[], object],
+        parent: QObject | None = None,
+        *,
+        volume: Callable[[], object] | None = None,
+        segmentation_cache: Callable[[], dict] | None = None,
+    ) -> None:
+        """`qa` = the QaRunViewModel; `model()` = the head-CT study model (or None);
+        `volume()` / `segmentation_cache()` = the shown series and its anatomy
+        results, for the artefact flags (no flags without them)."""
         super().__init__(parent)
         self._qa = qa
         self._model = model
+        self._volume = volume
+        self._segmentation_cache = segmentation_cache
+        self.artefacts: ArtefactFlags | None = None
         self.slices: list[int] = []
         self.pair = FALX
         self.verdict = None  # HeadCtVerdict of the physical recipe, else None
         self.table_jobs: list[tuple[int, str]] = []
+        # Rebuilt whenever the QA results are complete or dropped.
+        qa.finished.connect(lambda _cancelled: self.refresh())
+        qa.reset_done.connect(self.refresh)
 
     # ---- building ----
 
@@ -86,7 +106,20 @@ class ResultsViewModel(QObject):
             else None
         )
         self.table_jobs = sorted(results, key=lambda job: (job[0], PAIRS.index(job[1])))
+        self.artefacts = self._artefact_flags() if results else None
         self.changed.emit()
+
+    def _artefact_flags(self) -> ArtefactFlags | None:
+        volume = self._volume() if self._volume else None
+        if volume is None:
+            return None
+        cache = self._segmentation_cache() if self._segmentation_cache else {}
+        masks = {index: result.masks for index, result in cache.items()}
+        return evaluate_artefact_flags(masks, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm)
+
+    def artefact_lines(self) -> list[str]:
+        """Plain lines about possible artefacts (metal, posterior-fossa bands)."""
+        return artefact_basics(self.artefacts)
 
     def is_physical(self) -> bool:
         return self._qa.is_physical()
@@ -120,6 +153,10 @@ class ResultsViewModel(QObject):
             acceptable = result.predicted_label == 1
             text, tooltip = ("Acceptable" if acceptable else "Unacceptable"), ""
             tone, note = (TONE_GOOD if acceptable else TONE_BAD), f"decision {result.decision_value:+.2f}"
+        artefacts = slice_artefact_notes(self.artefacts, index)
+        if artefacts:
+            artefact_note = f"Possible artefact on this slice: {', '.join(artefacts)}"
+            note = f"{note} · {artefact_note}" if note else artefact_note
         return SliceView(
             pair=pair,
             position=self.slices.index(index),
@@ -130,6 +167,16 @@ class ResultsViewModel(QObject):
             verdict_tone=tone,
             note_text=note,
         )
+
+    def slice_steps(self, index: int) -> SliceStepsView | None:
+        """The shown pair's intermediate steps on slice `index` (Advanced), if kept."""
+        if index not in self.slices:
+            return None
+        volume = self._volume() if self._volume else None
+        result = self._qa.results.get((index, self.shown_pair(index)))
+        if volume is None or result is None:
+            return None
+        return slice_steps_view(result, volume.pixel_spacing_mm)
 
     # ---- the Study summary tab ----
 
@@ -151,7 +198,8 @@ class ResultsViewModel(QObject):
             if physical:
                 score = slice_score(self.verdict, index) if pair == FALX else None
                 outlier = pair == FALX and is_outlier(self.verdict, index)
-                cells += [resembles(score) or "—", "noise outlier" if outlier else ""]
+                notes = (["noise outlier"] if outlier else []) + slice_artefact_notes(self.artefacts, index)
+                cells += [resembles(score) or "—", "; ".join(notes)]
                 rows.append(TableRow((index, pair), cells, TONE_BAD, slice_hint(score)[1]))
             else:
                 acceptable = result.predicted_label == 1
@@ -163,7 +211,11 @@ class ResultsViewModel(QObject):
         """The physical recipe's verdict text, and the details including the
         septum note, failed jobs and the provisional-model note."""
         text = verdict_text(self.verdict, len(self._qa.results_by_pair(FALX)), model_available=model_available)
-        details = list(text.details)
+        basics = list(text.basics)
+        noise_line = next((i for i, line in enumerate(basics) if line.startswith("Artefacts (")), len(basics) - 1)
+        basics[noise_line + 1:noise_line + 1] = artefact_basics(self.artefacts)
+        text = replace(text, basics=tuple(basics))
+        details = list(text.details) + artefact_details(self.artefacts)
         if self._qa.results_by_pair(SEPTUM):
             details.append(SEPTUM_NOTE)
         failed = sorted(self._qa.errors)

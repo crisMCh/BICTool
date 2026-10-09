@@ -539,6 +539,25 @@ Findings:
 | Recipe written to exports | `integration/results_export.py` ("QA recipe" rows) |
 | Tests | `tests/domain/metrics/test_physical_spectra.py`, `tests/domain/results/test_study_quality.py` |
 | Dataset run | `python -m bictool.application.batch_qa DATASET_DIR ... --out OUT_DIR` |
+| Intermediate steps (Results > Per slice > Show: Intermediate steps) | `mtf.calc_mtf_with_steps` / `MtfSteps`, `study_quality.SliceSteps` (`keep_steps=True`, GUI only), `presentation/viewmodels/slice_steps.py`, `presentation/views/slice_steps_panel.py` |
+
+## 9. Intermediate steps in the app (Results > Per slice > Show: Intermediate steps)
+
+*Added 2026-10-08.* The switch "Show: Curves | Intermediate steps (advanced)" above the plots replaces the
+four curves of the shown slice by how they were measured; the tab always opens on the curves. The steps are kept during the QA run in the app (`evaluate_slice_quality(..., keep_steps=True)`;
+the numbers are identical with and without - tested) and cost no measurable time (postop study, 33 ROI
+pairs: 14.9 s with vs 15-16 s without; a few MB of memory; drawing a slice ≈ 60-80 ms). The batch tool does
+not keep them.
+
+| Tab | What it shows | What to look for |
+|---|---|---|
+| MTF steps | ROI1 upsampled 4x as the MTF sees it, with the active-contour outline, the detected edge pixels (grey = dropped later), a sample of the sampled line profiles and the contour's start box; the edge profiles (ESF, raw HU) and their derivative (LSF, after mean removal, low-pass and bump removal); the MTF of every edge with the mean | The outline should follow the structure (falx), not noise or a neighbouring structure; profiles should be steps (dark → bright). A thin structure gives a *bump* (both sides inside one 5 mm profile) and an LSF with a positive and a negative lobe - not a clean edge MTF (this is what the septum shows) |
+| MTF spread | Edge pixels coloured by their MTF area (dark = blurry, bright = sharp), the histogram of the per-edge areas with the slice's mean, and how many edges survive each step (found → full profile inside the ROI → bump removal → finite MTF) | A wide or two-peaked histogram, or few surviving edges, means the slice's MTF area rests on a mix of edges |
+| ROIs & 2D spectra | ROI1 and ROI2 (W80/L40), the 2D PS of ROI1 and the 2D NPS of ROI2 (log scale, DC in the centre) | Noise is a round blob; lines or a stretched shape mean directional structure (an edge in the ROI, or streaks) |
+| PS/MTF & features | The PS/MTF ratio on the feature band with its low half and high half shaded (LF/HF = area left / area right), the maximum, and the feature vector | Which part of the band drives the LF/HF ratio |
+
+The legacy (Octave) recipe shows the same tabs; its MTF axis is shown up to its middle (the second half
+mirrors the first), without the band shading.
 
 ## References
 

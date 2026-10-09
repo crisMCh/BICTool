@@ -63,6 +63,8 @@ class VolumeQa:
     # Study-level head-CT verdict (physical recipe; `head_ct_verdict`), from
     # the dural-folds (falx) results - None for the legacy recipe or too few slices.
     head_ct_verdict: object | None = None
+    # Possible-artefact hints (`domain.artefacts.artefact_flags.ArtefactFlags`).
+    artefact_flags: object | None = None
     error: str | None = None
 
 

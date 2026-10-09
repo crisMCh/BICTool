@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+from PySide6.QtCore import QObject, Signal
+
 from bictool.presentation.viewmodels.head_ct_verdict_text import TONE_BAD, TONE_GOOD
 from bictool.presentation.viewmodels.results_viewmodel import STUDY_TABLE_COLUMNS, ResultsViewModel
 
@@ -13,8 +15,14 @@ def _result(label=1, recipe="octave"):
     )
 
 
+class _FakeQa(QObject):
+    finished = Signal(bool)
+    reset_done = Signal()
+
+
 def _qa(results, errors=None):
-    qa = SimpleNamespace(results=results, errors=errors or {})
+    qa = _FakeQa()
+    qa.results, qa.errors = results, errors or {}
     qa.results_by_pair = lambda pair: {i: r for (i, p), r in qa.results.items() if p == pair}
     qa.is_physical = lambda: bool(qa.results) and all(r.recipe == "physical" for r in qa.results.values())
     return qa
@@ -57,3 +65,56 @@ def test_physical_results_get_the_head_ct_verdict_text_without_a_model():
     assert vm.is_physical() and vm.verdict is None
     assert "model file missing" in text.headline
     assert "Failed (not used): 3 (Falx)" in details and "Provisional model" in details
+
+
+def test_the_results_follow_the_qa_run():
+    qa = _qa({})
+    vm = ResultsViewModel(qa, lambda: None)
+    changed = []
+    vm.changed.connect(lambda: changed.append(True))
+
+    qa.results = {(4, "falx"): _result(1)}
+    qa.finished.emit(False)
+    assert vm.slices == [4]
+
+    qa.results = {}
+    qa.reset_done.emit()
+    assert vm.slices == [] and changed == [True, True]
+
+
+def test_artefact_flags_are_computed_from_the_shown_series():
+    import numpy as np
+
+    slices = [np.zeros((40, 40)), np.zeros((40, 40))]
+    slices[1][5:8, 5:8] = 3500.0  # metal
+    volume = SimpleNamespace(num_slices=2, pixel_spacing_mm=0.5, get_slice_hu=lambda i: slices[i])
+    qa = _qa({(0, "falx"): _result(1)})
+    vm = ResultsViewModel(qa, lambda: None, volume=lambda: volume, segmentation_cache=lambda: {})
+
+    vm.refresh()
+
+    assert vm.artefacts.metal_slices == (1,)
+    assert vm.artefact_lines() == ["Artefacts (metal): on slice 2 - expect streaks nearby."]
+    qa.results = {}
+    vm.refresh()
+    assert vm.artefacts is None and vm.artefact_lines() == []
+
+
+def test_without_a_series_there_are_no_artefact_flags():
+    vm = ResultsViewModel(_qa({(0, "falx"): _result(1)}), lambda: None)
+    vm.refresh()
+    assert vm.artefacts is None
+
+
+def test_the_table_note_and_the_slice_view_mention_artefacts_on_that_slice():
+    from bictool.domain.artefacts.artefact_flags import ArtefactFlags
+
+    qa = _qa({(4, "falx"): _result(1, "physical"), (5, "falx"): _result(1, "physical")})
+    vm = ResultsViewModel(qa, lambda: None)
+    vm.refresh()
+    vm.artefacts = ArtefactFlags(metal_slices=(4,), metal_max_hu=3071.0)
+
+    notes = {row.job[0]: row.cells[-1] for row in vm.table_rows()}
+    assert notes == {4: "metal", 5: ""}
+    assert vm.slice_view(4).note_text == "Possible artefact on this slice: metal"
+    assert vm.slice_view(5).note_text == ""

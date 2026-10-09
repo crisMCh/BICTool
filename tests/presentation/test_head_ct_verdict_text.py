@@ -84,8 +84,8 @@ def test_artefact_levels_are_worded_differently():
     assert "within the good range" in " ".join(steady.details)
     assert "above the good range, confirmed" in " ".join(jumpy.details)
     assert "provisional" in " ".join(jumpy.details)
-    assert "Possible artefacts: no sign." in steady.basics
-    assert "Possible artefacts: likely - the noise changes strongly from slice to slice." in jumpy.basics
+    assert "Artefacts (noise across slices): no sign." in steady.basics
+    assert "Artefacts (noise across slices): likely - the noise changes strongly from slice to slice." in jumpy.basics
 
 
 def test_outlier_slices_are_listed_as_one_based_numbers_and_slice_lookup_works():

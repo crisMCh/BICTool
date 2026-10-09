@@ -90,7 +90,11 @@ TOOLTIPS = {
     "_nps_chart_view": "Noise power spectrum in homogeneous tissue: how strong the noise is and how fine or coarse.",
     "_ps_chart_view": "Power spectrum at the structure: image detail plus noise.",
     "_ratio_chart_view": "Power spectrum divided by sharpness: high values at low frequencies mean structure, not noise.",
-    "_advanced_toggle_btn": "Show the raw feature values of this slice.",
+    "_curves_view_btn": "The four result curves of this slice (MTF, NPS, PS, PS/MTF).",
+    "_steps_view_btn": (
+        "How this slice was measured, instead of the four curves: the edge the MTF used, the edge "
+        "profiles, the MTF of every edge, both ROIs, the 2D spectra, the PS/MTF band and the feature values."
+    ),
     "_study_table": "Every measured slice and ROI pair. Click a row to open that slice.",
     "_verdict_details_btn": "Show the measurement details behind the verdict (intervals, reference ranges, checks).",
     "_study_provisional_label": "",  # set from the model note

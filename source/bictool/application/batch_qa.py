@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from bictool.domain.artefacts.artefact_flags import evaluate_artefact_flags
 from bictool.domain.results.head_ct_verdict import evaluate_study_results
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL, RECIPES
 from bictool.domain.results.volume_qa import VolumeQa, evaluate_volume_qa
@@ -92,6 +93,9 @@ def run_study(
             masks_by_slice = _segment_volume(volume, get_model)
             save_segmentation(cache, masks_by_slice)
         qa.segmented_slices = len(masks_by_slice)
+        qa.artefact_flags = evaluate_artefact_flags(
+            masks_by_slice, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm
+        )
 
         qa.structures = evaluate_volume_qa(
             masks_by_slice,

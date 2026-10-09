@@ -158,7 +158,7 @@ def test_single_series_discovered_auto_loads_and_combo_stays_disabled(monkeypatc
     assert window._series_combo.currentText() == "CT · 3 slice(s) · 8×8"
     # One candidate is nothing to choose between - shown, but not interactive.
     assert window._series_combo.isEnabled() is False
-    assert window._loaded_volume.num_slices == 3
+    assert window.view_model.study.volume.num_slices == 3
 
 
 def test_multiple_series_discovered_populates_combo_and_enables_it(monkeypatch):
@@ -174,7 +174,7 @@ def test_multiple_series_discovered_populates_combo_and_enables_it(monkeypatch):
     # Best-first ordering (already sorted by discover_series) - the first
     # candidate is auto-loaded.
     assert window._series_combo.currentIndex() == 0
-    assert window._loaded_volume.num_slices == 3
+    assert window.view_model.study.volume.num_slices == 3
 
 
 def test_switching_series_combo_selection_reloads_the_volume(monkeypatch):
@@ -183,11 +183,11 @@ def test_switching_series_combo_selection_reloads_the_volume(monkeypatch):
     ct_candidate = _fake_series_candidate("CT · 3 slice(s) · 8×8", num_slices=3)
     scout_candidate = _fake_series_candidate("OT · 1 slice(s) · 8×8", num_slices=1)
     window._on_series_discovered([ct_candidate, scout_candidate])
-    assert window._loaded_volume.num_slices == 3
+    assert window.view_model.study.volume.num_slices == 3
 
     window._series_combo.setCurrentIndex(1)
 
-    assert window._loaded_volume.num_slices == 1
+    assert window.view_model.study.volume.num_slices == 1
 
 
 def _overlay_text(window: MainWindowView, corner: str) -> str:
@@ -306,7 +306,8 @@ def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
     captured = {}
 
     def fake_evaluate(
-        img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, svm_model, mtf_seeds=None, recipe=None
+        img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, svm_model, mtf_seeds=None, recipe=None,
+        keep_steps=False,
     ):
         captured["seeds"] = mtf_seeds
         return _fake_result()
@@ -638,19 +639,22 @@ def test_chart_axes_use_fixed_short_label_format():
             assert axis.tickCount() <= 6
 
 
-def test_feature_vector_hidden_by_default_behind_advanced_toggle():
+def test_per_slice_starts_on_the_curves_and_the_switch_shows_which_view_is_active():
     # isVisible() always reports False for any un-shown window's children in
     # Qt, regardless of setVisible() calls - isHidden() reflects the actual
     # explicit visibility state we set, so that's what these tests check.
     window = MainWindowView()
-    assert window._feature_box.isHidden() is True
-    assert window._advanced_toggle_btn.isChecked() is False
+    assert window._curves_view_btn.isChecked() and not window._steps_view_btn.isChecked()
+    assert window._results_curves_stack.currentIndex() == 0 and window._feature_box.isHidden()
 
-    window._advanced_toggle_btn.click()
-    assert window._feature_box.isHidden() is False
+    window._steps_view_btn.click()
+    assert window._steps_view_btn.isChecked() and not window._curves_view_btn.isChecked()
+    assert window._results_curves_stack.currentWidget() is window._slice_steps_panel
+    assert not window._feature_box.isHidden()
+    assert MainWindowView()._curves_view_btn.isChecked()  # not remembered: a new window starts on the curves
 
-    window._advanced_toggle_btn.click()
-    assert window._feature_box.isHidden() is True
+    window._curves_view_btn.click()
+    assert window._results_curves_stack.currentIndex() == 0 and window._feature_box.isHidden()
 
 
 def test_editing_controls_and_run_all_hidden_on_results_page_metric_rows_stay_visible():
@@ -711,7 +715,7 @@ def test_slice_slider_navigates_and_keeps_each_slices_rois_and_the_global_confir
 
     window._slice_slider.setValue(3)
 
-    assert window._current_slice_index == 3
+    assert window.view_model.study.current_slice == 3
     assert window._slice_label.text() == "Slice 4 / 5"
     assert window._confirm_rois_cb.isChecked() is True
     assert window._roi_position_items["falx.roi1"].text() == "not set"
@@ -759,7 +763,7 @@ def test_close_study_resets_everything_to_the_no_study_state(monkeypatch):
 
     window._on_close_study_clicked()
 
-    assert window._loaded_volume is None
+    assert window.view_model.study.volume is None
     assert window._series_combo.count() == 0
     assert window._series_combo.isEnabled() is False
     assert window._roi_rects == {}
@@ -772,7 +776,7 @@ def test_close_study_resets_everything_to_the_no_study_state(monkeypatch):
     assert window._result_verdict_label.text() == "—"
     assert window._results_tab_btn.isEnabled() is False
     assert window._export_action.isEnabled() is False
-    assert window._last_result is None
+    assert window.view_model.export.last_result is None
     assert window._close_study_action.isEnabled() is False
     assert window._reload_series_action.isEnabled() is False
     assert window._view_tags_action.isEnabled() is False
@@ -797,13 +801,13 @@ def test_reload_series_reloads_the_current_series(monkeypatch):
     window = MainWindowView()
     candidate = _fake_series_candidate("CT · 3 slice(s) · 8×8", num_slices=3)
     window._on_series_discovered([candidate])
-    first_volume = window._loaded_volume
+    first_volume = window.view_model.study.volume
 
     window._on_reload_series_clicked()
 
     # A fresh DicomVolume, not the same object reused - a real reload.
-    assert window._loaded_volume is not first_volume
-    assert window._loaded_volume.num_slices == 3
+    assert window.view_model.study.volume is not first_volume
+    assert window.view_model.study.volume.num_slices == 3
 
 
 def test_export_action_enabled_after_a_successful_run(monkeypatch):
@@ -817,8 +821,8 @@ def test_export_action_enabled_after_a_successful_run(monkeypatch):
     # tooltip is empty (Qt behavior, not a bug) - the meaningful check is
     # that the disabled-state message is gone, not any particular string.
     assert window._export_action.toolTip() != "Run metrics first"
-    assert window._last_result is not None
-    assert window._last_export_context.slice_number == 1
+    assert window.view_model.export.last_result is not None
+    assert window.view_model.export.last_context.slice_number == 1
 
 
 def test_perform_export_writes_the_selected_files(monkeypatch, tmp_path):
@@ -895,7 +899,7 @@ def _run_batch_to_completion(window: MainWindowView) -> None:
     for _ in range(200):
         window._scheduler.pool.waitForDone(100)
         QApplication.processEvents()
-        if window._qa_jobs is None:
+        if window.view_model.qa.jobs is None:
             break
 
 
@@ -914,8 +918,8 @@ def test_run_all_computes_qa_for_every_slice_with_both_rois(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {(1, "falx"), (3, "falx"), (4, "falx")}
-    assert window._results_slices == [1, 3, 4]
+    assert set(window.view_model.qa.results) == {(1, "falx"), (3, "falx"), (4, "falx")}
+    assert window.view_model.results.slices == [1, 3, 4]
     assert window._view_stack.currentIndex() == 1
     assert window._qa_progress_label.text() == "QA done: 3 ROI pair(s)"
     assert window._study_table.rowCount() == 3
@@ -929,12 +933,12 @@ def test_results_page_scrolls_through_slices_and_follows_the_viewer(monkeypatch)
     _run_batch_to_completion(window)
 
     window._results_slider.setValue(0)
-    assert window._current_slice_index == 1
+    assert window.view_model.study.current_slice == 1
     assert window._results_slice_label.text().startswith("Slice 2 / 5")
 
     window._step_results_slice(1)
-    assert window._current_slice_index == 3
-    assert window._last_export_context.slice_number == 4  # export covers the shown slice
+    assert window.view_model.study.current_slice == 3
+    assert window.view_model.export.last_context.slice_number == 4  # export covers the shown slice
 
 
 def test_study_verdict_is_the_majority_of_slice_verdicts(monkeypatch):
@@ -967,11 +971,11 @@ def test_a_failing_slice_does_not_stop_the_batch(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {(0, "falx"), (2, "falx")}
-    assert window._qa_errors == {(1, "falx"): "no edge found"}
+    assert set(window.view_model.qa.results) == {(0, "falx"), (2, "falx")}
+    assert window.view_model.qa.errors == {(1, "falx"): "no edge found"}
     assert window._qa_progress_label.text() == "QA done: 3 ROI pair(s), 1 failed"
     # Failed slices are left out of the results, only counted.
-    assert window._results_slices == [0, 2]
+    assert window.view_model.results.slices == [0, 2]
     assert window._study_table.rowCount() == 2
     assert [window._study_table.item(row, 0).text() for row in range(2)] == ["1", "3"]
     assert window._study_verdict_label.text().endswith("(1 failed, not shown)")
@@ -981,7 +985,7 @@ def test_cancel_stops_the_batch_after_the_running_slice(monkeypatch):
     window = MainWindowView()
 
     def evaluate(*args, **kwargs):
-        window._qa_cancel_requested = True  # as if Cancel was clicked while this slice ran
+        window.view_model.qa.cancel_requested = True  # as if Cancel was clicked while this slice ran
         return _fake_result()
 
     monkeypatch.setattr(worker_module, "evaluate_slice_quality", evaluate)
@@ -990,7 +994,7 @@ def test_cancel_stops_the_batch_after_the_running_slice(monkeypatch):
 
     _run_batch_to_completion(window)
 
-    assert set(window._qa_results) == {(0, "falx")}
+    assert set(window.view_model.qa.results) == {(0, "falx")}
     assert window._qa_progress_label.text() == "QA cancelled: 1/3 ROI pair(s)"
     assert window._cancel_run_btn.isHidden()
 
@@ -1062,7 +1066,7 @@ def test_qa_recipe_defaults_to_physical_and_is_tucked_under_tools_advanced():
 
     recipe_menu = _menu_path(window, "Tools", "Advanced", "QA Recipe")
     assert [a.text() for a in recipe_menu.actions()] == ["Physical (default)", "Octave (legacy)"]
-    assert window._qa_recipe == "physical"
+    assert window.view_model.qa.recipe == "physical"
     assert window._qa_recipe_actions["physical"].isChecked() is True
     assert window._qa_recipe_label.isHidden() is True
 
@@ -1087,11 +1091,11 @@ def test_switching_recipe_clears_results_of_the_other_recipe(monkeypatch):
     _load_fake_volume(window, num_slices=2)
     _set_rois_on_slices(window, [0, 1])
     _run_batch_to_completion(window)
-    assert window._qa_results
+    assert window.view_model.qa.results
 
     window._qa_recipe_actions["octave"].trigger()
 
-    assert window._qa_results == {}
+    assert window.view_model.qa.results == {}
     assert window._confirm_rois_cb.isChecked() is True  # ROIs stay confirmed, Run All recomputes
 
 

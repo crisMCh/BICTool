@@ -89,12 +89,12 @@ def _headline(v: HeadCtVerdict) -> str:
 def _artefact_basic(v: HeadCtVerdict) -> str:
     a = v.artefact
     if a is None:
-        return "Possible artefacts: cannot be judged (too few slices)."
+        return "Artefacts (noise across slices): cannot be judged (too few slices)."
     if a.flagged:
-        return "Possible artefacts: likely - the noise changes strongly from slice to slice."
+        return "Artefacts (noise across slices): likely - the noise changes strongly from slice to slice."
     if a.above_good_range:
-        return "Possible artefacts: possible - the noise changes more between slices than in good studies."
-    return "Possible artefacts: no sign."
+        return "Artefacts (noise across slices): possible - the noise changes more between slices than in good studies."
+    return "Artefacts (noise across slices): no sign."
 
 
 def _details(v: HeadCtVerdict) -> list[str]:

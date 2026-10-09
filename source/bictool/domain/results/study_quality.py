@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from bictool.domain.metrics.contrast import calc_contrast
+from bictool.domain.metrics.mtf import MtfSteps, calc_mtf_with_steps
 from bictool.domain.metrics.mtf_seed import calc_mtf_first_viable_seed
 from bictool.domain.metrics.nps import NpsResult, nps_complete_roi
 from bictool.domain.metrics.physical_spectra import (
@@ -63,6 +64,17 @@ DEFAULT_RECIPE = RECIPE_PHYSICAL
 # MTF. If more than this fraction of edges is dropped, the contour itself is
 # poor and the slice fails instead.
 MAX_DROPPED_MTF_EDGE_FRACTION = 0.5
+
+
+@dataclass
+class SliceSteps:
+    """Intermediate steps of one slice's QA, for display (`keep_steps=True`):
+    the two ROIs as measured, and the MTF's steps - its ESF/LSF columns line up
+    with the result's `mtf` / `mtf_area_per_edge` columns."""
+
+    roi1: np.ndarray
+    roi2: np.ndarray
+    mtf: MtfSteps
 
 
 @dataclass
@@ -98,6 +110,8 @@ class SliceQualityResult:
     # only, NaN otherwise. Candidate classifier features.
     nps_f_av: float = float("nan")
     nps_f_peak: float = float("nan")
+    # Intermediate steps (`evaluate_slice_quality(..., keep_steps=True)`), else None.
+    steps: SliceSteps | None = None
 
 
 def evaluate_slice_quality(
@@ -110,6 +124,7 @@ def evaluate_slice_quality(
     svm_model,
     mtf_seeds=None,
     recipe=DEFAULT_RECIPE,
+    keep_steps=False,
 ):
     """Port of `funcImageQualityOctave.m`'s computational recipe (not the
     script itself - see the module docstring).
@@ -129,6 +144,8 @@ def evaluate_slice_quality(
         `bictool.domain.metrics.mtf_seed.mtf_seed_candidates`); replaces
         `act_cont_mask_x/y` when given.
     recipe : "physical" (default) or "octave" - see RECIPES.
+    keep_steps : also keep the intermediate steps (`SliceSteps`, for display);
+        the numbers are the same either way.
 
     Returns
     -------
@@ -147,11 +164,17 @@ def evaluate_slice_quality(
     seeds = list(mtf_seeds) if mtf_seeds else [(act_cont_mask_x, act_cont_mask_y)]
     if recipe not in RECIPES:
         raise ValueError(f"Unknown QA recipe {recipe!r} - expected one of {RECIPES}")
-    xaxis, mtf, mtf_area_per_edge, mtf_seed = calc_mtf_first_viable_seed(img_roi1, seeds, pix_spc)
+    mtf_steps = None
+    if keep_steps:
+        xaxis, mtf, mtf_area_per_edge, mtf_seed, mtf_steps = _calc_mtf_steps_first_viable_seed(img_roi1, seeds, pix_spc)
+    else:
+        xaxis, mtf, mtf_area_per_edge, mtf_seed = calc_mtf_first_viable_seed(img_roi1, seeds, pix_spc)
     if recipe == RECIPE_PHYSICAL:
         xaxis, mtf = physical_mtf(mtf, pix_spc)
         mtf_area_per_edge = mtf_area_in_band(xaxis, mtf)
-    mtf, mtf_area_per_edge = _drop_invalid_mtf_edges(mtf, mtf_area_per_edge)
+    mtf, mtf_area_per_edge, valid = _drop_invalid_mtf_edges(mtf, mtf_area_per_edge)
+    if mtf_steps is not None:
+        mtf_steps = mtf_steps.select(np.flatnonzero(valid))
     mtf_area = float(np.mean(mtf_area_per_edge))
     logger.debug(
         "Step 1/6 done: mtf_area=%s (n_edges=%d, seed=%s)", mtf_area, mtf.shape[1] if mtf.size else 0, mtf_seed
@@ -210,17 +233,41 @@ def evaluate_slice_quality(
         recipe=recipe,
         nps_f_av=nps_f_av,
         nps_f_peak=nps_f_peak,
+        steps=(
+            SliceSteps(
+                roi1=np.asarray(img_roi1, dtype=np.float64),
+                roi2=np.asarray(img_roi2, dtype=np.float64),
+                mtf=mtf_steps,
+            )
+            if mtf_steps is not None
+            else None
+        ),
     )
 
 
+def _calc_mtf_steps_first_viable_seed(img_roi, seeds, pix_spc):
+    """`calc_mtf_first_viable_seed` with the MTF's intermediate steps:
+    `(xaxis, MTF, MTFarea, seed, MtfSteps)`."""
+    last_error: ValueError | None = None
+    for x, y in seeds:
+        try:
+            xaxis, mtf, mtf_area, steps = calc_mtf_with_steps(img_roi, x, y, pix_spc)
+        except ValueError as exc:
+            last_error = exc
+            continue
+        return xaxis, mtf, mtf_area, (x, y), steps
+    raise last_error
+
+
 def _drop_invalid_mtf_edges(mtf, mtf_area_per_edge):
-    """`mtf` / `mtf_area_per_edge` without edge columns whose MTF isn't finite."""
+    """`mtf` / `mtf_area_per_edge` without edge columns whose MTF isn't finite,
+    and the mask of the kept columns."""
     valid = np.isfinite(mtf).all(axis=0) & np.isfinite(mtf_area_per_edge)
     n_edges = valid.size
     n_dropped = int(n_edges - valid.sum())
     if n_dropped == 0:
-        return mtf, mtf_area_per_edge
+        return mtf, mtf_area_per_edge, valid
     if n_dropped > MAX_DROPPED_MTF_EDGE_FRACTION * n_edges:
         raise ValueError(f"MTF invalid on {n_dropped} of {n_edges} edge points - ROI1 edge is unusable")
     logger.info("MTF: dropped %d of %d edge points with a non-finite MTF", n_dropped, n_edges)
-    return mtf[:, valid], mtf_area_per_edge[valid]
+    return mtf[:, valid], mtf_area_per_edge[valid], valid

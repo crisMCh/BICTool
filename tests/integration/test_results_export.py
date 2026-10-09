@@ -293,11 +293,11 @@ def test_physical_slice_table_marks_the_legacy_svm_and_adds_the_slice_score(tmp_
     header = rows[0]
 
     assert "Verdict (legacy chest SVM, untrusted)" in header
-    assert header[-2:] == ["Slice score (indicative)", "Noise outlier"]
+    assert header[-3:] == ["Slice score (indicative)", "Noise outlier", "Possible artefact"]
     by_slice = {(row[0], row[1]): row for row in rows[1:]}
     noisy = by_slice[("4", "Falx")]
-    assert noisy[-1] == "yes" and 0.0 <= float(noisy[-2]) <= 1.0
-    assert by_slice[("5", "Septum")][-2:] == ["", ""]  # no slice score for the septum
+    assert noisy[-2] == "yes" and 0.0 <= float(noisy[-3]) <= 1.0
+    assert by_slice[("5", "Septum")][-3:-1] == ["", ""]  # no slice score for the septum
 
 
 def test_physical_study_without_a_verdict_says_why(tmp_path):
@@ -318,7 +318,7 @@ def test_legacy_recipe_study_summary_is_unchanged(tmp_path):
     export_study_csv(results, context, tmp_path / "s.csv", tmp_path / "p.csv")
 
     assert ["Study verdict", "Acceptable"] in _read_csv(tmp_path / "s.csv")
-    assert _read_csv(tmp_path / "p.csv")[0][-1] == "loc_max"
+    assert _read_csv(tmp_path / "p.csv")[0][-2:] == ["loc_max", "Possible artefact"]
 
 
 def test_physical_study_excel_contains_the_verdict(tmp_path):
@@ -426,3 +426,38 @@ def test_dataset_volume_sheet_has_the_verdict_block(tmp_path):
 
     assert ["Study verdict (head-CT model, falx)", None] in rows
     assert ["Verdict", verdict.verdict] in rows
+
+
+def test_study_and_dataset_exports_list_the_possible_artefacts(tmp_path):
+    from bictool.domain.artefacts.artefact_flags import ArtefactFlags
+    from bictool.domain.results.volume_qa import StructureQa, VolumeQa
+    from bictool.integration.results_export import export_dataset_csv
+
+    flags = ArtefactFlags(metal_slices=(13, 14), metal_max_hu=3071.0, band_depths={4: 5.2, 5: 1.0})
+    context = StudyExportContext("CT", 40, 0.5, None, [], artefacts=flags)
+    export_study_csv(_study_results(), context, tmp_path / "s.csv", tmp_path / "p.csv")
+    summary = _read_csv(tmp_path / "s.csv")
+    assert ["Metal (> 2800 HU) on slices", "14, 15", "highest 3071 HU"] in summary
+    assert ["Brainstem dark band >= 3.5 HU (provisional) on slices", "5"] in summary
+    assert ["5", "5.20"] in summary and ["6", "1.00"] in summary
+
+    structures = {name: StructureQa(name) for name in ("Dural Folds", "Septum Pellucidum")}
+    volume = VolumeQa("Scanner", "study", slice_count=40, segmented_slices=40, structures=structures, artefact_flags=flags)
+    export_dataset_csv([volume], tmp_path / "ds.csv", tmp_path / "dp.csv")
+    rows = _read_csv(tmp_path / "ds.csv")
+    metal, band = rows[0].index("Metal slices"), rows[0].index("Brainstem dark band slices (provisional)")
+    assert (rows[1][metal], rows[1][band]) == ("14, 15", "5")
+    assert (rows[2][metal], rows[2][band]) == ("", "")  # once per study
+
+
+def test_the_exported_slice_table_names_artefacts_on_each_slice(tmp_path):
+    from bictool.domain.artefacts.artefact_flags import ArtefactFlags
+
+    flags = ArtefactFlags(metal_slices=(12,), metal_max_hu=3071.0, band_depths={12: 4.0})
+    context = StudyExportContext("CT", 40, 0.5, None, [], artefacts=flags)
+    export_study_csv(_study_results(), context, tmp_path / "s.csv", tmp_path / "p.csv")
+    rows = _read_csv(tmp_path / "p.csv")
+    column = rows[0].index("Possible artefact")
+    by_slice = {(row[0], row[1]): row[column] for row in rows[1:]}
+    assert by_slice[("13", "Falx")] == "metal; possible brainstem band"
+    assert by_slice[("12", "Falx")] == ""

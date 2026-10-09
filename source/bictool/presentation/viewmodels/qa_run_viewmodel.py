@@ -162,7 +162,10 @@ class QaRunViewModel(QObject):
             "Run All: slice=%d (%s), roi1 shape=%s, roi2 shape=%s, pix_spc=%.4f, mtf seeds=%s",
             index, PAIR_LABELS[pair], img_roi1.shape, img_roi2.shape, volume.pixel_spacing_mm, seeds,
         )
-        worker = Worker(img_roi1, img_roi2, volume.pixel_spacing_mm, mtf_seeds=seeds, recipe=self.recipe)
+        # Intermediate steps kept for Results > Advanced (a few MB per study, no extra time).
+        worker = Worker(
+            img_roi1, img_roi2, volume.pixel_spacing_mm, mtf_seeds=seeds, recipe=self.recipe, keep_steps=True
+        )
         # Bound methods (not lambdas) so Qt queues the call onto the GUI thread.
         worker.signals.finished.connect(self._on_worker_finished)
         worker.signals.error.connect(self._on_worker_error)
