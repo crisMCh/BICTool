@@ -50,10 +50,13 @@ def test_acceptable_study_headline_has_probability_and_interval():
     text = verdict_text(verdict, 25)
 
     assert text.tone == TONE_GOOD
-    assert text.headline.startswith("Study verdict: Acceptable - ")
-    assert "likely acceptable (range " in text.headline
+    assert text.headline.startswith("Study verdict: Acceptable (") and text.headline.endswith(" % likely acceptable)")
+    assert "interval" not in text.headline  # the interval is in the details
+    assert text.basics[0] == "The measurements clearly match the studies a radiologist rated acceptable."
     assert "No measurement is outside the range of good studies." in text.basics
-    assert "95 % interval" in text.details[0]
+    assert text.details[0] == "How the verdict is made:"
+    assert any("Score = the model's estimate" in line for line in text.details)
+    assert any("95 % of the scores lie between " in line for line in text.details)
 
 
 def test_not_acceptable_study_lists_each_reason_with_interval_and_good_range():
@@ -68,7 +71,9 @@ def test_not_acceptable_study_lists_each_reason_with_interval_and_good_range():
 def test_uncertain_study_is_neutral_toned():
     text = verdict_text(evaluate_study(_model(), _slices(_steady(20.0, spread=2.0))), 25)
 
-    assert text.tone == TONE_NEUTRAL and "Uncertain, leaning" in text.headline
+    assert text.tone == TONE_NEUTRAL
+    assert text.headline.startswith("Study verdict: Uncertain, leaning ") and text.headline.endswith(" % likely acceptable)")
+    assert text.basics[0].startswith("No clear answer") and "check the images yourself" in text.basics[0]
 
 
 def test_missing_verdict_and_missing_model_are_explained():

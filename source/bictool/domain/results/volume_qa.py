@@ -29,7 +29,9 @@ from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_
 logger = logging.getLogger(__name__)
 
 # (slice_hu, brain_mask) -> object with `.masks` ("White Matter"/"Gray Matter"/...)
-TissueClassifier = Callable[[np.ndarray, np.ndarray], object]
+# (slice_hu, brain_mask, slice_index) -> object with `.masks` (the index matters to
+# methods with a per-series model, e.g. `brain_tissue_anchored`)
+TissueClassifier = Callable[[np.ndarray, np.ndarray, int], object]
 
 
 @dataclass
@@ -65,6 +67,8 @@ class VolumeQa:
     head_ct_verdict: object | None = None
     # Possible-artefact hints (`domain.artefacts.artefact_flags.ArtefactFlags`).
     artefact_flags: object | None = None
+    # Basal-ganglia visibility per slice (`domain.metrics.basal_ganglia`, provisional).
+    basal_ganglia: dict | None = None
     error: str | None = None
 
 
@@ -95,7 +99,7 @@ def evaluate_volume_qa(
             brain = brain_masks.get(index)
             if brain is None:
                 brain = np.zeros(images[index].shape, dtype=bool)
-            tissue_cache[index] = tissue_classify(images[index], brain).masks
+            tissue_cache[index] = tissue_classify(images[index], brain, index).masks
         return tissue_cache[index]
 
     eligible = eligible_slices(masks_by_slice)

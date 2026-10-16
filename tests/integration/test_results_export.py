@@ -293,11 +293,11 @@ def test_physical_slice_table_marks_the_legacy_svm_and_adds_the_slice_score(tmp_
     header = rows[0]
 
     assert "Verdict (legacy chest SVM, untrusted)" in header
-    assert header[-3:] == ["Slice score (indicative)", "Noise outlier", "Possible artefact"]
+    assert header[-4:] == ["Slice score (indicative)", "Noise outlier", "Possible artefact", "Basal ganglia (provisional)"]
     by_slice = {(row[0], row[1]): row for row in rows[1:]}
     noisy = by_slice[("4", "Falx")]
-    assert noisy[-2] == "yes" and 0.0 <= float(noisy[-3]) <= 1.0
-    assert by_slice[("5", "Septum")][-3:-1] == ["", ""]  # no slice score for the septum
+    assert noisy[-3] == "yes" and 0.0 <= float(noisy[-4]) <= 1.0
+    assert by_slice[("5", "Septum")][-4:-2] == ["", ""]  # no slice score for the septum
 
 
 def test_physical_study_without_a_verdict_says_why(tmp_path):
@@ -318,7 +318,7 @@ def test_legacy_recipe_study_summary_is_unchanged(tmp_path):
     export_study_csv(results, context, tmp_path / "s.csv", tmp_path / "p.csv")
 
     assert ["Study verdict", "Acceptable"] in _read_csv(tmp_path / "s.csv")
-    assert _read_csv(tmp_path / "p.csv")[0][-2:] == ["loc_max", "Possible artefact"]
+    assert _read_csv(tmp_path / "p.csv")[0][-3:] == ["loc_max", "Possible artefact", "Basal ganglia (provisional)"]
 
 
 def test_physical_study_excel_contains_the_verdict(tmp_path):
@@ -461,3 +461,29 @@ def test_the_exported_slice_table_names_artefacts_on_each_slice(tmp_path):
     by_slice = {(row[0], row[1]): row[column] for row in rows[1:]}
     assert by_slice[("13", "Falx")] == "metal; possible brainstem band"
     assert by_slice[("12", "Falx")] == ""
+
+
+def test_exports_list_the_basal_ganglia_visibility(tmp_path):
+    from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice
+    from bictool.domain.results.volume_qa import StructureQa, VolumeQa
+    from bictool.integration.results_export import export_dataset_csv
+
+    slices = {
+        12: BasalGangliaSlice(0.9, {"Lentiform Nucleus": 6.5, "Caudate Nucleus": 7.0}, True),
+        20: BasalGangliaSlice(0.0, {"Lentiform Nucleus": 35.0}, False),
+    }
+    context = StudyExportContext("CT", 40, 0.5, None, [], basal_ganglia=slices)
+    export_study_csv(_study_results(), context, tmp_path / "s.csv", tmp_path / "p.csv")
+    summary = _read_csv(tmp_path / "s.csv")
+    assert ["13", "clearly visible", "0.900", "6.50", "7.00", "yes"] in summary
+    assert ["21", "label not plausible", "0.000", "35.00", "", "no"] in summary
+    per_slice = _read_csv(tmp_path / "p.csv")
+    column = per_slice[0].index("Basal ganglia (provisional)")
+    assert {row[0]: row[column] for row in per_slice[1:] if row[1] == "Falx"}["13"] == "clearly visible"
+
+    volume = VolumeQa("S", "study", slice_count=40, segmented_slices=40,
+                      structures={"Dural Folds": StructureQa("Dural Folds")}, basal_ganglia=slices)
+    export_dataset_csv([volume], tmp_path / "ds.csv", tmp_path / "dp.csv")
+    rows = _read_csv(tmp_path / "ds.csv")
+    assert rows[1][rows[0].index("Basal ganglia visible slices (provisional)")] == "13"
+    assert rows[1][rows[0].index("Basal ganglia label not plausible slices")] == "21"

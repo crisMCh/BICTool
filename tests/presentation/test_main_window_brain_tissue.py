@@ -295,11 +295,13 @@ def test_ensure_result_passes_configured_settings_through(monkeypatch):
     assert captured["white_matter_range"] == (15.0, 25.0)
 
 
-def test_method_dropdown_offers_all_three_methods_and_defaults_to_adaptive():
+def test_method_dropdown_offers_the_methods_and_the_prototype_and_defaults_to_adaptive():
     window = MainWindowView()
     combo = window._brain_tissue_method_combo
 
-    assert [combo.itemText(i) for i in range(combo.count())] == ["Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding"]
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding", "Anchored (prototype)"
+    ]
     assert window.view_model.brain_tissue.method == "Adaptive Thresholding"
     assert combo.currentText() == "Adaptive Thresholding"
 
@@ -369,3 +371,12 @@ def _empty_result():
     return BrainTissueResult(
         masks={"White Matter": np.zeros(shape, dtype=bool), "Gray Matter": np.zeros(shape, dtype=bool)}
     )
+
+
+def test_the_prototype_has_no_settings_button():
+    window = MainWindowView()
+    assert window._brain_tissue_settings_btn.isEnabled()
+    window._brain_tissue_method_combo.setCurrentText("Anchored (prototype)")
+    assert not window._brain_tissue_settings_btn.isEnabled()
+    window._brain_tissue_method_combo.setCurrentText("Adaptive Thresholding")
+    assert window._brain_tissue_settings_btn.isEnabled()

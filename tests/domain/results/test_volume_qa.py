@@ -34,7 +34,7 @@ def _image(masks) -> np.ndarray:
 
 
 def _tissue_classifier(calls):
-    def classify(slice_hu, brain_mask):
+    def classify(slice_hu, brain_mask, slice_index=None):
         calls.append(slice_hu.shape)
         return SimpleNamespace(masks={"White Matter": brain_mask.copy(), "Gray Matter": np.zeros(_SHAPE, dtype=bool)})
 

@@ -1,7 +1,9 @@
 """BrainTissueViewModel: WM/GM/CSF separation of the shown series.
 
 Owns the chosen method (Adaptive Thresholding by default, Fuzzy C-Means,
-HU Thresholding), each method's settings, and the per-slice results. The
+HU Thresholding, and the "Anchored (prototype)"), each method's settings, the
+study's tissue references (from the basal ganglia - used by Adaptive's study
+range and by the prototype), and the per-slice results. The
 brain mask a method works inside comes from the anatomy segmentation when
 the slice has one (more robust on irregular anatomy), else from the
 HU-threshold skull-strip. Results are computed on demand (milliseconds per
@@ -19,13 +21,25 @@ from PySide6.QtCore import QObject, Signal
 
 from bictool.domain.segmentation.brain_tissue import classify_brain_tissue, extract_brain_mask
 from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
+from bictool.domain.segmentation.brain_tissue_anchored import (
+    AnchoredModel,
+    classify_brain_tissue_anchored,
+    fit_anchored_model,
+)
 from bictool.domain.segmentation.brain_tissue_fcm import classify_brain_tissue_fcm
 from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.segmentation.tissue_references import (
+    SliceSamples,
+    TissueReferences,
+    combine,
+    slice_samples,
+)
 
 METHOD_FCM = "Fuzzy C-Means"
 METHOD_THRESHOLD = "HU Thresholding"
 METHOD_ADAPTIVE = "Adaptive Thresholding"
-METHODS = [METHOD_FCM, METHOD_THRESHOLD, METHOD_ADAPTIVE]
+METHOD_ANCHORED = "Anchored (prototype)"
+METHODS = [METHOD_FCM, METHOD_THRESHOLD, METHOD_ADAPTIVE, METHOD_ANCHORED]
 DEFAULT_METHOD = METHOD_ADAPTIVE  # no method wins on every scan; this one works on most
 
 
@@ -53,6 +67,9 @@ class BrainTissueViewModel(QObject):
         }
         self.settings = dict(self.default_settings)
         self.cache: dict[int, object] = {}  # slice index -> BrainTissueResult (+ "Brain Mask")
+        self._samples: dict[int, SliceSamples] = {}  # per segmented slice, for the tissue references
+        self._references_used: TissueReferences | None = None  # what the cached results were computed with
+        self._anchored: tuple[frozenset, AnchoredModel | None] | None = None  # (segmented slices, model)
 
     # ---- commands ----
 
@@ -67,10 +84,55 @@ class BrainTissueViewModel(QObject):
     def invalidate(self, index: int) -> None:
         """Slice `index` got (new) anatomy segmentation - recompute it on demand."""
         self.cache.pop(index, None)
+        self._samples.pop(index, None)
 
     def reset(self) -> None:
         """A new/closed series. The method and settings are app preferences and stay."""
         self.cache = {}
+        self._samples = {}
+        self._references_used = None
+        self._anchored = None
+
+    # ---- the study's tissue references ----
+
+    def references(self) -> TissueReferences | None:
+        """Gray/white/CSF reference HU of the shown series from its segmented
+        basal ganglia and ventricles (None until they are segmented). Each
+        slice's contribution is computed once."""
+        volume, cache = self._volume(), self._segmentation_cache()
+        if volume is None or not cache:
+            return None
+        for index, result in cache.items():
+            if index not in self._samples:
+                self._samples[index] = slice_samples(volume.get_slice_hu(index), result.masks)
+        return combine(self._samples[index] for index in cache)
+
+    def _uses_references(self) -> bool:
+        return self.method == METHOD_ANCHORED or (
+            self.method == METHOD_ADAPTIVE and self.settings[METHOD_ADAPTIVE].use_study_range
+        )
+
+    def _current_references(self) -> TissueReferences | None:
+        """The references - and, if they changed since the cached results were
+        computed (more of the basal ganglia segmented), those results are dropped."""
+        references = self.references() if self._uses_references() else None
+        if references != self._references_used:
+            self.cache = {}
+            self._references_used = references
+        return references
+
+    def _anchored_model(self, references: TissueReferences | None) -> AnchoredModel | None:
+        cache, volume = self._segmentation_cache(), self._volume()
+        if references is None or not cache or volume is None:
+            return None
+        key = frozenset(cache)
+        if self._anchored is None or self._anchored[0] != key:
+            masks = {i: result.masks for i, result in cache.items()}
+            brains = brain_mask_from_segmentation(masks, volume.num_slices)
+            model = fit_anchored_model(masks, volume.get_slice_hu, brains, volume.pixel_spacing_mm, references)
+            self._anchored = (key, model)
+            self.cache = {}
+        return self._anchored[1]
 
     # ---- results ----
 
@@ -93,29 +155,41 @@ class BrainTissueViewModel(QObject):
         volume = self._volume()
         if volume is None:
             return None
+        classify = self.classifier()  # may drop stale results (references changed)
         if index not in self.cache:
             slice_hu = volume.get_slice_hu(index)
-            self.cache[index] = self.classifier()(slice_hu, self.brain_mask(index, slice_hu))
+            self.cache[index] = classify(slice_hu, self.brain_mask(index, slice_hu), index)
         return self.cache[index]
 
-    def classifier(self) -> Callable[[np.ndarray, np.ndarray], object]:
-        """`(slice_hu, brain_mask) -> BrainTissueResult` for the current method
-        and settings, snapshotted - safe to run on a worker thread while the
-        user keeps changing things."""
+    def classifier(self) -> Callable[..., object]:
+        """`(slice_hu, brain_mask, slice_index=None) -> BrainTissueResult` for the
+        current method and settings, snapshotted (incl. the study references and
+        the prototype's drift model) - safe to run on a worker thread while the
+        user keeps changing things. The prototype needs the slice index; without
+        it, or before the basal ganglia are segmented, it falls back to Adaptive."""
         method = self.method
         threshold, fcm, adaptive = (self.settings[m] for m in (METHOD_THRESHOLD, METHOD_FCM, METHOD_ADAPTIVE))
+        references = self._current_references()
+        model = self._anchored_model(references) if method == METHOD_ANCHORED else None
+        volume = self._volume()
+        spacing = volume.pixel_spacing_mm if volume is not None and adaptive.smoothing_mm > 0 else None
+        sigma_px = adaptive.smoothing_mm / spacing if spacing else 0.0
+        study_range = references.plausible_range() if references is not None and adaptive.use_study_range else None
 
-        def classify(slice_hu: np.ndarray, brain_mask: np.ndarray):
-            if method == METHOD_FCM:
+        def classify(slice_hu: np.ndarray, brain_mask: np.ndarray, slice_index: int | None = None):
+            if method == METHOD_ANCHORED and model is not None and slice_index is not None:
+                result = classify_brain_tissue_anchored(slice_hu, brain_mask, model, slice_index)
+            elif method == METHOD_FCM:
                 result = classify_brain_tissue_fcm(
                     slice_hu, brain_mask, fuzziness=fcm.fuzziness, max_iter=fcm.max_iter,
                     spatial_weight=fcm.spatial_weight, min_component_size=fcm.min_component_size,
                 )
-            elif method == METHOD_ADAPTIVE:
+            elif method in (METHOD_ADAPTIVE, METHOD_ANCHORED):
                 result = classify_brain_tissue_adaptive(
                     slice_hu, brain_mask, block_size=adaptive.block_size,
-                    plausible_range=(adaptive.plausible_low, adaptive.plausible_high),
+                    plausible_range=study_range or (adaptive.plausible_low, adaptive.plausible_high),
                     min_component_size=adaptive.min_component_size,
+                    smoothing_sigma_px=sigma_px,
                 )
             else:
                 result = classify_brain_tissue(

@@ -106,6 +106,7 @@ class ExportViewModel(QObject):
             failed_slices=[f"{index + 1} ({PAIR_LABELS[pair]})" for index, pair in sorted(self._qa.errors)],
             head_ct_verdict=self._results.verdict,
             artefacts=self._results.artefacts,
+            basal_ganglia=self._results.basal_ganglia,
         )
         by_pair = {PAIR_LABELS[pair]: self._qa.results_by_pair(pair) for pair in PAIRS if self._qa.results_by_pair(pair)}
         stem = f"{safe_file_stem(context.series_label)}_study"

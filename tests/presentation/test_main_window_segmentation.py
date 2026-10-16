@@ -1325,7 +1325,7 @@ def _fake_all_white_matter_classifier(window: MainWindowView, monkeypatch) -> No
     """Every brain pixel is white matter - stands in for the real (slow) WM/GM methods."""
 
     def classifier():
-        def classify(slice_hu, brain_mask):
+        def classify(slice_hu, brain_mask, slice_index=None):
             masks = {"CSF": np.zeros_like(brain_mask), "White Matter": brain_mask.copy(), "Gray Matter": np.zeros_like(brain_mask)}
             masks["Brain Mask"] = brain_mask
             return SimpleNamespace(masks=masks)
@@ -1682,11 +1682,11 @@ def test_physical_recipe_shows_the_study_verdict_with_interval_and_slice_scores(
     window.view_model.results.refresh()
 
     headline = window._study_verdict_label.text()
-    assert headline.startswith("Study verdict: ") and "likely acceptable" in headline
+    assert headline.startswith("Study verdict: ") and headline.endswith(" % likely acceptable)")
     basics = window._study_verdict_basics_label.text()
     assert "Artefacts (noise across slices):" in basics and "Unusually noisy slices: 4." in basics
     details = window._study_verdict_details_label.text()
-    assert "from 8 falx slices" in details and "model head-ct-1" in details
+    assert "median over the 8 falx slices" in details and "model head-ct-1" in details
     assert "noise above 3x the study median: 4" in details  # slice numbers are 1-based
     assert "not used for the verdict" in details  # septum note
     rows = {

@@ -70,14 +70,15 @@ def test_recipe_option_reaches_the_volume_qa(monkeypatch, tmp_path):
     (dataset / "study a").mkdir(parents=True)  # two studies - a lone subfolder counts as a wrapper
     (dataset / "study b").mkdir()
     seen = []
-    monkeypatch.setattr(batch_qa, "run_study", lambda study_dir, group, get_model, cache, recipe: seen.append(recipe)
+    monkeypatch.setattr(batch_qa, "run_study", lambda study_dir, group, get_model, cache, recipe, tissue: seen.append((recipe, tissue))
                         or SimpleNamespace(error=None, name=study_dir.name, group=group, structures={}))
     monkeypatch.setattr(batch_qa, "export_dataset_excel", lambda *a: None)
     monkeypatch.setattr(batch_qa, "export_dataset_csv", lambda *a: None)
 
-    batch_qa.main([str(dataset), "--out", str(tmp_path / "out"), "--weights", "unused", "--recipe", "octave"])
+    batch_qa.main([str(dataset), "--out", str(tmp_path / "out"), "--weights", "unused", "--recipe", "octave",
+                   "--tissue", "anchored"])
 
-    assert seen == ["octave", "octave"]
+    assert seen == [("octave", "anchored"), ("octave", "anchored")]
 
 
 def test_physical_recipe_studies_get_the_head_ct_verdict(monkeypatch, tmp_path):

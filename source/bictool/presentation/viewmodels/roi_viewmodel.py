@@ -340,7 +340,7 @@ class RoiViewModel(QObject):
         classify = self._tissue_classifier()
         brain_masks = brain_mask_from_segmentation(self._masks_by_slice(), volume.num_slices)
         get_slice_hu = volume.get_slice_hu
-        worker = BrainTissueVolumeWorker(lambda i: classify(get_slice_hu(i), brain_masks[i]), pending)
+        worker = BrainTissueVolumeWorker(lambda i: classify(get_slice_hu(i), brain_masks[i], i), pending)
         worker.signals.slice_finished.connect(self._on_tissue_slice_finished)
         worker.signals.finished.connect(self._on_tissue_finished)
         worker.signals.error.connect(self._on_tissue_error)

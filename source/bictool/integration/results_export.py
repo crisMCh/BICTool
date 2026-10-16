@@ -26,6 +26,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, ArtefactFlags
+from bictool.domain.metrics.basal_ganglia import NOT_PLAUSIBLE, PLAUSIBLE_DIFFERENCE_HU, BasalGangliaSlice
 from bictool.domain.results.head_ct_verdict import (
     FEATURE_LABELS,
     MIN_SLICES,
@@ -148,6 +149,8 @@ class StudyExportContext:
     head_ct_verdict: HeadCtVerdict | None = None
     # Possible-artefact hints (metal, posterior-fossa bands); None if not computed.
     artefacts: ArtefactFlags | None = None
+    # Basal-ganglia visibility per slice (provisional); None if not computed.
+    basal_ganglia: dict[int, BasalGangliaSlice] | None = None
 
 
 def _is_physical(results) -> bool:
@@ -224,6 +227,26 @@ def _artefact_rows(flags: ArtefactFlags | None) -> list[list[str]]:
     return rows
 
 
+def _basal_ganglia_rows(slices: dict[int, BasalGangliaSlice] | None) -> list[list[str]]:
+    """Basal-ganglia visibility per slice - provisional, not part of the verdict."""
+    if not slices:
+        return []
+    low, high = PLAUSIBLE_DIFFERENCE_HU
+    rows = [
+        [],
+        ["Basal ganglia visibility (provisional, not part of the verdict)"],
+        ["Slice", "Visibility", "Border contrast", "Lentiform - internal capsule (HU)",
+         "Caudate - internal capsule (HU)", f"Plausible ({low:g}-{high:g} HU)"],
+    ]
+    for index, s in sorted(slices.items()):
+        rows.append([
+            str(index + 1), s.level, f"{s.border:.3f}",
+            *(f"{s.differences[name]:.2f}" if name in s.differences else "" for name in ("Lentiform Nucleus", "Caudate Nucleus")),
+            "yes" if s.plausible else "no",
+        ])
+    return rows
+
+
 def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> list[list[str]]:
     """Study context, then per structure (ROI pair) its verdict and metric
     averages - structures are never averaged together."""
@@ -242,6 +265,7 @@ def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> l
     if physical:
         rows += _head_ct_verdict_rows(context.head_ct_verdict, len(results.get("Falx", {})))
     rows += _artefact_rows(context.artefacts)
+    rows += _basal_ganglia_rows(context.basal_ganglia)
     for structure, by_slice in results.items():
         summary = summarize_metrics(by_slice.values())
         rows += [[], [structure]]
@@ -262,14 +286,18 @@ def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> l
 
 
 def _study_slice_rows(
-    results: StudyResults, head_ct_verdict: HeadCtVerdict | None = None, artefacts: ArtefactFlags | None = None
+    results: StudyResults,
+    head_ct_verdict: HeadCtVerdict | None = None,
+    artefacts: ArtefactFlags | None = None,
+    basal_ganglia: dict[int, BasalGangliaSlice] | None = None,
 ) -> list[list[str]]:
     """Header, then one row per slice and structure (1-based slice numbers,
     in slice order). Physical recipe: plus the head-CT model's indicative
     slice score and noise-outlier flag for falx slices. Last column: possible
     artefacts on that slice."""
     physical = _is_physical(r for by_slice in results.values() for r in by_slice.values())
-    rows = [[*(_SLICE_TABLE_HEADER_PHYSICAL if physical else _SLICE_TABLE_HEADER), "Possible artefact"]]
+    rows = [[*(_SLICE_TABLE_HEADER_PHYSICAL if physical else _SLICE_TABLE_HEADER), "Possible artefact",
+             "Basal ganglia (provisional)"]]
     v = head_ct_verdict
     jobs = sorted(
         ((index, position, structure) for position, (structure, by_slice) in enumerate(results.items()) for index in by_slice),
@@ -296,6 +324,7 @@ def _study_slice_rows(
                 *(f"{value:.6g}" for value in result.feature_vector),
                 *extra,
                 "; ".join(artefacts.on_slice(index)) if artefacts is not None else "",
+                basal_ganglia[index].level if basal_ganglia and index in basal_ganglia else "",
             ]
         )
     return rows
@@ -312,7 +341,7 @@ def export_study_csv(
     """
     for path, rows in (
         (summary_path, _study_summary_rows(results, context)),
-        (slices_path, _study_slice_rows(results, context.head_ct_verdict, context.artefacts)),
+        (slices_path, _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)),
     ):
         with open(path, "w", newline="", encoding="ascii", errors="replace") as f:
             csv.writer(f).writerows(rows)
@@ -332,7 +361,7 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
         summary_sheet.column_dimensions[column].width = 14
 
     slices_sheet = workbook.create_sheet("Per slice")
-    for row in _study_slice_rows(results, context.head_ct_verdict, context.artefacts):
+    for row in _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia):
         slices_sheet.append(row)
     for (header_cell,) in slices_sheet.iter_cols(min_row=1, max_row=1):
         slices_sheet.column_dimensions[header_cell.column_letter].width = max(len(str(header_cell.value)) + 2, 10)
@@ -362,6 +391,8 @@ _DATASET_VERDICT_HEADER = [
 _DATASET_ARTEFACT_HEADER = [
     "Metal slices",
     "Brainstem dark band slices (provisional)",
+    "Basal ganglia visible slices (provisional)",
+    "Basal ganglia label not plausible slices",
 ]
 _DATASET_SUMMARY_HEADER = [
     "Dataset",
@@ -467,11 +498,18 @@ def _dataset_verdict_cells(volume, structure: str) -> list:
 
 def _dataset_artefact_cells(volume, first_row: bool) -> list:
     flags = getattr(volume, "artefact_flags", None)
-    if not first_row or flags is None:
+    basal = getattr(volume, "basal_ganglia", None)
+    if not first_row or (flags is None and basal is None):
         return [""] * len(_DATASET_ARTEFACT_HEADER)
+
+    def listed(indices):
+        return ", ".join(str(index + 1) for index in indices) or "none"
+
     return [
-        ", ".join(str(index + 1) for index in flags.metal_slices) or "none",
-        ", ".join(str(index + 1) for index in flags.band_slices) or "none",
+        listed(flags.metal_slices) if flags is not None else "",
+        listed(flags.band_slices) if flags is not None else "",
+        listed(sorted(i for i, s in basal.items() if s.visible)) if basal is not None else "",
+        listed(sorted(i for i, s in basal.items() if s.level == NOT_PLAUSIBLE)) if basal is not None else "",
     ]
 
 
@@ -600,6 +638,8 @@ def export_dataset_excel(volumes, path: str | Path) -> None:
             for row in _head_ct_verdict_rows(getattr(volume, "head_ct_verdict", None), len(falx.results) if falx else 0):
                 sheet.append(row)
         for row in _artefact_rows(getattr(volume, "artefact_flags", None)):
+            sheet.append(row)
+        for row in _basal_ganglia_rows(getattr(volume, "basal_ganglia", None)):
             sheet.append(row)
         for structure, qa in volume.structures.items():
             summary = summarize_metrics(qa.results.values())

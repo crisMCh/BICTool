@@ -59,7 +59,10 @@ TOOLTIPS = {
     "_show_segments_cb": "Show or hide the selected anatomical structures on the image.",
     "_brain_tissue_method_combo": (
         "How white and grey matter are separated (needed to place the noise ROI). "
-        "Adaptive Thresholding works on most scans; try another method if the overlay looks wrong."
+        "Adaptive Thresholding works on most scans (lightly smoothed, HU range from this study's basal ganglia - "
+        "see its settings); try another method if the overlay looks wrong. "
+        "Anchored (prototype): uses the basal ganglia as gray/white references and corrects the HU drift near "
+        "the skull and between slices - not validated yet; it can mislabel large areas as gray matter."
     ),
     "_brain_tissue_settings_btn": "Fine-tune the selected separation method.",
     "_white_matter_cb": "Show the white matter found on this slice.",

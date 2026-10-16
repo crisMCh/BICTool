@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, Signal
 
-from bictool.presentation.viewmodels.head_ct_verdict_text import TONE_BAD, TONE_GOOD
+from bictool.presentation.viewmodels.head_ct_verdict_text import TONE_BAD, TONE_GOOD, TONE_NEUTRAL
 from bictool.presentation.viewmodels.results_viewmodel import STUDY_TABLE_COLUMNS, ResultsViewModel
 
 
@@ -114,7 +114,25 @@ def test_the_table_note_and_the_slice_view_mention_artefacts_on_that_slice():
     vm.refresh()
     vm.artefacts = ArtefactFlags(metal_slices=(4,), metal_max_hu=3071.0)
 
-    notes = {row.job[0]: row.cells[-1] for row in vm.table_rows()}
-    assert notes == {4: "metal", 5: ""}
+    rows = vm.table_rows()
+    assert {row.job[0]: row.cells[-1] for row in rows} == {4: "metal", 5: ""}
+    assert [row.last_tone for row in rows] == [TONE_BAD, TONE_NEUTRAL]  # red only with a warning
     assert vm.slice_view(4).note_text == "Possible artefact on this slice: metal"
     assert vm.slice_view(5).note_text == ""
+
+
+def test_basal_ganglia_visibility_shows_in_the_summary_table_and_slice_view():
+    from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice
+
+    qa = _qa({(4, "falx"): _result(1, "physical")})
+    vm = ResultsViewModel(qa, lambda: None)
+    vm.refresh()
+    vm.basal_ganglia = {4: BasalGangliaSlice(border=0.9, differences={"Lentiform Nucleus": 6.0}, plausible=True)}
+
+    assert vm.basal_ganglia_lines()[0].startswith("Basal ganglia (provisional): visible on slice 5")
+    row = vm.table_rows()[0]
+    assert row.cells[-1] == "basal ganglia clearly visible"
+    assert row.last_tone == TONE_NEUTRAL  # descriptive, not a warning
+    assert vm.slice_view(4).note_text == "Basal ganglia clearly visible"
+    text, details = vm.head_ct_text(model_available=False)
+    assert any(line.startswith("Basal ganglia") for line in text.basics) and "border contrast per slice" in details

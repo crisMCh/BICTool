@@ -28,10 +28,18 @@ from pathlib import Path
 import numpy as np
 
 from bictool.domain.artefacts.artefact_flags import evaluate_artefact_flags
+from bictool.domain.metrics.basal_ganglia import evaluate_basal_ganglia
 from bictool.domain.results.head_ct_verdict import evaluate_study_results
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL, RECIPES
 from bictool.domain.results.volume_qa import VolumeQa, evaluate_volume_qa
-from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_PLAUSIBLE_RANGE,
+    DEFAULT_SMOOTHING_MM,
+    classify_brain_tissue_adaptive,
+)
+from bictool.domain.segmentation.brain_tissue_anchored import classify_brain_tissue_anchored, fit_anchored_model
+from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.segmentation.tissue_references import estimate_tissue_references
 from bictool.infrastructure.config import load_config
 from bictool.integration.dicom_file_loader import load_dicom_volume
 from bictool.integration.dicom_to_nifti import build_dicom_nifti_volume
@@ -70,12 +78,37 @@ def _segment_volume(volume, get_model: Callable[[], object]) -> dict[int, dict[s
     return masks_by_slice
 
 
+TISSUE_ADAPTIVE, TISSUE_ANCHORED = "adaptive", "anchored"
+TISSUE_METHODS = (TISSUE_ADAPTIVE, TISSUE_ANCHORED)
+
+
+def _tissue_classifier(masks_by_slice, volume, method=TISSUE_ADAPTIVE):
+    """WM/GM method for ROI2 placement: the app's Adaptive default (1 mm
+    smoothing, the study's own tissue range - fixed range until the basal
+    ganglia exist), or the anchored prototype (Adaptive where it has no model)."""
+    references = estimate_tissue_references(masks_by_slice, volume.get_slice_hu)
+    plausible = references.plausible_range() if references is not None else DEFAULT_PLAUSIBLE_RANGE
+    sigma = DEFAULT_SMOOTHING_MM / volume.pixel_spacing_mm
+    model = None
+    if method == TISSUE_ANCHORED and references is not None:
+        brains = brain_mask_from_segmentation(masks_by_slice, volume.num_slices)
+        model = fit_anchored_model(masks_by_slice, volume.get_slice_hu, brains, volume.pixel_spacing_mm, references)
+
+    def classify(slice_hu, brain_mask, slice_index=None):
+        if model is not None and slice_index is not None:
+            return classify_brain_tissue_anchored(slice_hu, brain_mask, model, slice_index)
+        return classify_brain_tissue_adaptive(slice_hu, brain_mask, plausible_range=plausible, smoothing_sigma_px=sigma)
+
+    return classify
+
+
 def run_study(
     study_dir: Path,
     group: str,
     get_model: Callable[[], object],
     cache_dir: Path,
     recipe: str = DEFAULT_RECIPE,
+    tissue_method: str = TISSUE_ADAPTIVE,
 ) -> VolumeQa:
     """One study end to end; any failure is recorded on the returned `VolumeQa`."""
     qa = VolumeQa(group=group, name=study_dir.name)
@@ -96,13 +129,14 @@ def run_study(
         qa.artefact_flags = evaluate_artefact_flags(
             masks_by_slice, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm
         )
+        qa.basal_ganglia = evaluate_basal_ganglia(masks_by_slice, volume.get_slice_hu)
 
         qa.structures = evaluate_volume_qa(
             masks_by_slice,
             volume.get_slice_hu,
             volume.num_slices,
             volume.pixel_spacing_mm,
-            classify_brain_tissue_adaptive,
+            _tissue_classifier(masks_by_slice, volume, tissue_method),
             recipe=recipe,
             svm_model=default_chest_svm_model(),
         )
@@ -124,6 +158,7 @@ def run_batch(
     weights_path: str | None = None,
     exclude: list[str] | None = None,
     recipe: str = DEFAULT_RECIPE,
+    tissue_method: str = TISSUE_ADAPTIVE,
 ) -> list[VolumeQa]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +185,7 @@ def run_batch(
                 continue
             start = time.time()
             logger.info("=== %s / %s", group, study_dir.name)
-            qa = run_study(study_dir, group, get_model, out_dir / "cache", recipe)
+            qa = run_study(study_dir, group, get_model, out_dir / "cache", recipe, tissue_method)
             volumes.append(qa)
             logger.info("    done in %.0f s%s", time.time() - start, f" - ERROR {qa.error}" if qa.error else "")
 
@@ -173,9 +208,15 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_RECIPE,
         help="QA recipe: physical (default) or the legacy Octave one (docs/qa_method/physical_qa_recipe.md)",
     )
+    parser.add_argument(
+        "--tissue",
+        choices=TISSUE_METHODS,
+        default=TISSUE_ADAPTIVE,
+        help="WM/GM method for the white-matter ROI2: adaptive (app default) or anchored (prototype)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe)
+    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe, args.tissue)
 
 
 if __name__ == "__main__":

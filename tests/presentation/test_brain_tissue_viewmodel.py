@@ -17,7 +17,9 @@ THRESHOLD = SimpleNamespace(
     white_matter_high=30.0, gray_matter_low=30.0, gray_matter_high=45.0, smoothing_size=3, min_component_size=10,
 )
 FCM = SimpleNamespace(fuzziness=2.0, max_iter=50, spatial_weight=0.5, min_component_size=10)
-ADAPTIVE = SimpleNamespace(block_size=31, plausible_low=15.0, plausible_high=45.0, min_component_size=10)
+ADAPTIVE = SimpleNamespace(
+    block_size=31, plausible_low=15.0, plausible_high=45.0, min_component_size=10, smoothing_mm=0.0, use_study_range=False
+)
 
 
 def _vm(segmentation_cache=None):
@@ -84,3 +86,45 @@ def test_reset_keeps_the_chosen_method():
     vm.reset()
 
     assert vm.cache == {} and vm.method == METHOD_FCM
+
+
+def test_adaptive_uses_the_study_range_and_smoothing_when_switched_on(monkeypatch):
+    from bictool.domain.segmentation.tissue_references import TissueReferences
+
+    calls = []
+    _fake_classifier(monkeypatch, calls)
+    vm, _image = _vm()
+    vm._volume = lambda: SimpleNamespace(num_slices=2, get_slice_hu=lambda i: _image, pixel_spacing_mm=0.5)
+    references = TissueReferences(gray=38.0, white=30.0, csf=12.0)
+    monkeypatch.setattr(vm, "references", lambda: references)
+
+    vm.result(0)  # the fixture's settings: no smoothing, fixed range
+    assert calls[-1]["plausible_range"] == (15.0, 45.0) and calls[-1]["smoothing_sigma_px"] == 0.0
+
+    vm.set_settings(module.METHOD_ADAPTIVE, SimpleNamespace(**{**vars(ADAPTIVE), "smoothing_mm": 1.0, "use_study_range": True}))
+    vm.result(0)
+    assert calls[-1]["plausible_range"] == (21.0, 53.0) and calls[-1]["smoothing_sigma_px"] == 2.0
+
+
+def test_new_reference_values_drop_the_cached_results(monkeypatch):
+    from bictool.domain.segmentation.tissue_references import TissueReferences
+
+    calls = []
+    _fake_classifier(monkeypatch, calls)
+    vm, _image = _vm()
+    vm.set_settings(module.METHOD_ADAPTIVE, SimpleNamespace(**{**vars(ADAPTIVE), "use_study_range": True}))
+    refs = [TissueReferences(38.0, 30.0, 12.0)]
+    monkeypatch.setattr(vm, "references", lambda: refs[0])
+    first = vm.result(0)
+    assert vm.result(0) is first
+    refs[0] = TissueReferences(39.0, 30.5, 12.0)  # more of the basal ganglia segmented
+    assert vm.result(0) is not first
+
+
+def test_the_prototype_falls_back_to_adaptive_without_basal_ganglia(monkeypatch):
+    calls = []
+    _fake_classifier(monkeypatch, calls)
+    vm, _image = _vm()
+    vm.set_method(module.METHOD_ANCHORED)
+    vm.result(0)  # no segmentation -> no references -> no model
+    assert calls[-2] == "classify_brain_tissue_adaptive"

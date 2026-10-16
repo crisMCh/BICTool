@@ -192,6 +192,12 @@ from bictool.domain.segmentation.brain_tissue_adaptive import (
 from bictool.domain.segmentation.brain_tissue_adaptive import (
     DEFAULT_MIN_COMPONENT_SIZE as ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
 )
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_SMOOTHING_MM as ADAPTIVE_DEFAULT_SMOOTHING_MM,
+)
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_USE_STUDY_RANGE as ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
+)
 from bictool.domain.segmentation.brain_tissue_fcm import (
     DEFAULT_FUZZINESS,
     DEFAULT_MAX_ITER,
@@ -243,6 +249,7 @@ from bictool.presentation.viewmodels.brain_tissue_viewmodel import (
 from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.viewmodels.segmentation_overlay import decode_masks_for_checkboxes
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS
+from bictool.presentation.views.app_icon import app_icon, register_windows_app_id
 from bictool.presentation.views.adaptive_settings_dialog import AdaptiveSettings, AdaptiveSettingsDialog
 from bictool.presentation.views.collapsible_section import CollapsibleSection
 from bictool.presentation.views.slice_steps_panel import SliceStepsPanel
@@ -479,6 +486,8 @@ def _default_tissue_settings() -> tuple[BrainTissueSettings, FcmSettings, Adapti
         plausible_low=DEFAULT_PLAUSIBLE_RANGE[0],
         plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
         min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
+        smoothing_mm=ADAPTIVE_DEFAULT_SMOOTHING_MM,
+        use_study_range=ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
     )
     return threshold, fcm, adaptive
 
@@ -1666,11 +1675,13 @@ class MainWindowView(QMainWindow):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if column == len(cells) - 1:
                     item.setForeground(QColor(_TONE_COLORS[table_row.last_tone]))
+                    if text:
+                        item.setToolTip(text)  # full note when the column is too narrow
                 elif physical and column == len(cells) - 2:
                     item.setToolTip(table_row.hint_tooltip)
                 self._study_table.setItem(row, column, item)
 
-        artefact_lines = self._results.artefact_lines()
+        artefact_lines = self._results.artefact_lines() + self._results.basal_ganglia_lines()
         self._study_verdict_basics_label.setVisible(physical or bool(artefact_lines))
         self._verdict_details_btn.setVisible(physical)
         self._study_verdict_details_label.setVisible(physical and self._verdict_details_btn.isChecked())
@@ -2205,6 +2216,7 @@ class MainWindowView(QMainWindow):
         self._brain_tissue_settings_btn.setFixedWidth(32)
         self._brain_tissue_settings_btn.clicked.connect(self._on_brain_tissue_method_settings_clicked)
         method_row.addWidget(self._brain_tissue_settings_btn)
+        self._update_brain_tissue_settings_button()
         layout.addLayout(method_row)
 
         # Overlays in a 2x2 grid - half the height of a single column. The
@@ -2247,14 +2259,25 @@ class MainWindowView(QMainWindow):
 
     def _on_brain_tissue_method_selected(self, method: str) -> None:
         self._brain_tissue.set_method(method)
+        self._update_brain_tissue_settings_button()
 
-    def _on_brain_tissue_method_settings_clicked(self) -> None:
-        handlers = {
+    def _brain_tissue_settings_handlers(self) -> dict:
+        # The anchored prototype has no settings yet.
+        return {
             _BRAIN_TISSUE_METHOD_FCM: self._on_fcm_settings_clicked,
             _BRAIN_TISSUE_METHOD_ADAPTIVE: self._on_adaptive_settings_clicked,
             _BRAIN_TISSUE_METHOD_THRESHOLD: self._on_brain_tissue_settings_clicked,
         }
-        handlers[self._brain_tissue.method]()
+
+    def _on_brain_tissue_method_settings_clicked(self) -> None:
+        handler = self._brain_tissue_settings_handlers().get(self._brain_tissue.method)
+        if handler is not None:
+            handler()
+
+    def _update_brain_tissue_settings_button(self) -> None:
+        has_settings = self._brain_tissue.method in self._brain_tissue_settings_handlers()
+        self._brain_tissue_settings_btn.setEnabled(has_settings)
+        self._set_tip(self._brain_tissue_settings_btn, "" if has_settings else "The prototype has no settings yet")
 
     def _on_fcm_settings_clicked(self) -> None:
         dialog = FcmSettingsDialog(self._brain_tissue.settings[_BRAIN_TISSUE_METHOD_FCM], self._brain_tissue.default_settings[_BRAIN_TISSUE_METHOD_FCM], parent=self)
@@ -2879,7 +2902,10 @@ class MainWindowView(QMainWindow):
 
 
 def main() -> None:
+    register_windows_app_id()  # before any window, so the taskbar shows BICTool's icon, not Python's
     app = QApplication(sys.argv)
+    app.setApplicationName("BICTool")
+    app.setWindowIcon(app_icon())
     window = MainWindowView()
     window.show()
     sys.exit(app.exec())

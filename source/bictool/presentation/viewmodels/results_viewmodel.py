@@ -17,10 +17,16 @@ from dataclasses import dataclass, replace
 from PySide6.QtCore import QObject, Signal
 
 from bictool.domain.artefacts.artefact_flags import ArtefactFlags, evaluate_artefact_flags
+from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice, evaluate_basal_ganglia
 from bictool.domain.results.head_ct_verdict import evaluate_study_results
 from bictool.domain.results.study_quality import RECIPE_PHYSICAL
 from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict
 from bictool.presentation.viewmodels.artefact_text import artefact_basics, artefact_details, slice_artefact_notes
+from bictool.presentation.viewmodels.basal_ganglia_text import (
+    basal_ganglia_basics,
+    basal_ganglia_details,
+    basal_ganglia_note,
+)
 from bictool.presentation.viewmodels.head_ct_verdict_text import (
     OUTLIER_TEXT,
     PROVISIONAL_NOTE,
@@ -87,6 +93,7 @@ class ResultsViewModel(QObject):
         self._volume = volume
         self._segmentation_cache = segmentation_cache
         self.artefacts: ArtefactFlags | None = None
+        self.basal_ganglia: dict[int, BasalGangliaSlice] | None = None  # slice -> visibility (provisional)
         self.slices: list[int] = []
         self.pair = FALX
         self.verdict = None  # HeadCtVerdict of the physical recipe, else None
@@ -106,20 +113,26 @@ class ResultsViewModel(QObject):
             else None
         )
         self.table_jobs = sorted(results, key=lambda job: (job[0], PAIRS.index(job[1])))
-        self.artefacts = self._artefact_flags() if results else None
+        self.artefacts, self.basal_ganglia = self._image_hints() if results else (None, None)
         self.changed.emit()
 
-    def _artefact_flags(self) -> ArtefactFlags | None:
+    def _image_hints(self) -> tuple[ArtefactFlags | None, dict[int, BasalGangliaSlice] | None]:
+        """Possible artefacts and basal-ganglia visibility of the shown series."""
         volume = self._volume() if self._volume else None
         if volume is None:
-            return None
+            return None, None
         cache = self._segmentation_cache() if self._segmentation_cache else {}
         masks = {index: result.masks for index, result in cache.items()}
-        return evaluate_artefact_flags(masks, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm)
+        artefacts = evaluate_artefact_flags(masks, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm)
+        return artefacts, evaluate_basal_ganglia(masks, volume.get_slice_hu)
 
     def artefact_lines(self) -> list[str]:
         """Plain lines about possible artefacts (metal, posterior-fossa bands)."""
         return artefact_basics(self.artefacts)
+
+    def basal_ganglia_lines(self) -> list[str]:
+        """Plain lines about the basal-ganglia visibility (provisional)."""
+        return basal_ganglia_basics(self.basal_ganglia)
 
     def is_physical(self) -> bool:
         return self._qa.is_physical()
@@ -157,6 +170,10 @@ class ResultsViewModel(QObject):
         if artefacts:
             artefact_note = f"Possible artefact on this slice: {', '.join(artefacts)}"
             note = f"{note} · {artefact_note}" if note else artefact_note
+        basal = basal_ganglia_note(self.basal_ganglia, index)
+        if basal:
+            basal = basal[0].upper() + basal[1:]
+            note = f"{note} · {basal}" if note else basal
         return SliceView(
             pair=pair,
             position=self.slices.index(index),
@@ -198,9 +215,12 @@ class ResultsViewModel(QObject):
             if physical:
                 score = slice_score(self.verdict, index) if pair == FALX else None
                 outlier = pair == FALX and is_outlier(self.verdict, index)
-                notes = (["noise outlier"] if outlier else []) + slice_artefact_notes(self.artefacts, index)
+                warnings = (["noise outlier"] if outlier else []) + slice_artefact_notes(self.artefacts, index)
+                notes = warnings + [note for note in (basal_ganglia_note(self.basal_ganglia, index),) if note]
                 cells += [resembles(score) or "—", "; ".join(notes)]
-                rows.append(TableRow((index, pair), cells, TONE_BAD, slice_hint(score)[1]))
+                # Red only for warnings; the basal-ganglia visibility is descriptive.
+                tone = TONE_BAD if warnings else TONE_NEUTRAL
+                rows.append(TableRow((index, pair), cells, tone, slice_hint(score)[1]))
             else:
                 acceptable = result.predicted_label == 1
                 cells += [f"{result.decision_value:+.2f}", "Acceptable" if acceptable else "Unacceptable"]
@@ -213,9 +233,9 @@ class ResultsViewModel(QObject):
         text = verdict_text(self.verdict, len(self._qa.results_by_pair(FALX)), model_available=model_available)
         basics = list(text.basics)
         noise_line = next((i for i, line in enumerate(basics) if line.startswith("Artefacts (")), len(basics) - 1)
-        basics[noise_line + 1:noise_line + 1] = artefact_basics(self.artefacts)
+        basics[noise_line + 1:noise_line + 1] = artefact_basics(self.artefacts) + basal_ganglia_basics(self.basal_ganglia)
         text = replace(text, basics=tuple(basics))
-        details = list(text.details) + artefact_details(self.artefacts)
+        details = list(text.details) + artefact_details(self.artefacts) + basal_ganglia_details(self.basal_ganglia)
         if self._qa.results_by_pair(SEPTUM):
             details.append(SEPTUM_NOTE)
         failed = sorted(self._qa.errors)

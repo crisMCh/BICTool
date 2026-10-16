@@ -470,10 +470,14 @@ the model card, Section 7):
 Applies to results of the **physical** recipe. Under the legacy (octave)
 recipe the chest-CT SVM and its per-slice majority vote are unchanged.
 
-* **Study summary tab.** The headline is the verdict with probability and
-  95 % interval, coloured green (Acceptable), red (Not acceptable) or
-  amber (Uncertain). Below it: the number of falx slices and the model
-  version; the reasons, each with the study median, its interval and the
+* **Study summary tab.** The headline is the verdict in plain words with
+  the probability ("(62 % likely acceptable)"),
+  coloured green (Acceptable), red (Not acceptable) or amber (Uncertain,
+  with the side of the probability: "leaning acceptable / not
+  acceptable"), followed by one plain sentence on what it means (2026-10-14:
+  users need not know the model; the probability, its 95 % interval and
+  the decision rule moved to the top of "Details", explained in plain
+  words). Below it: the reasons, each with the study median, its interval and the
   good range; the artefact indicator in its two levels (above the good
   range / confirmed); slices with noise above 3x the median; the septum
   plausibility check; the septum note; failed slices; and the provisional
