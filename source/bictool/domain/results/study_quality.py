@@ -33,7 +33,7 @@ import numpy as np
 
 from bictool.domain.metrics.contrast import calc_contrast
 from bictool.domain.metrics.mtf import MtfSteps, calc_mtf_with_steps
-from bictool.domain.metrics.mtf_seed import calc_mtf_first_viable_seed
+from bictool.domain.metrics.mtf_seed import calc_mtf_steps_first_viable_seed
 from bictool.domain.metrics.nps import NpsResult, nps_complete_roi
 from bictool.domain.metrics.physical_spectra import (
     mtf_area_in_band,
@@ -123,6 +123,7 @@ def evaluate_slice_quality(
     *,
     svm_model,
     mtf_seeds=None,
+    mtf_structure=None,
     recipe=DEFAULT_RECIPE,
     keep_steps=False,
 ):
@@ -143,6 +144,9 @@ def evaluate_slice_quality(
         `calc_mtf` finds usable edges (see
         `bictool.domain.metrics.mtf_seed.mtf_seed_candidates`); replaces
         `act_cont_mask_x/y` when given.
+    mtf_structure : optional mask (shape of `img_roi1`) of the structure ROI1 measures (CNN falx/septum);
+        a seed whose active-contour region is not mostly on it is rejected (`mtf_seed.MIN_REGION_ON_STRUCTURE`),
+        so a fallback seed in the tissue beside a thin line cannot measure the wrong edge.
     recipe : "physical" (default) or "octave" - see RECIPES.
     keep_steps : also keep the intermediate steps (`SliceSteps`, for display);
         the numbers are the same either way.
@@ -165,10 +169,9 @@ def evaluate_slice_quality(
     if recipe not in RECIPES:
         raise ValueError(f"Unknown QA recipe {recipe!r} - expected one of {RECIPES}")
     mtf_steps = None
-    if keep_steps:
-        xaxis, mtf, mtf_area_per_edge, mtf_seed, mtf_steps = _calc_mtf_steps_first_viable_seed(img_roi1, seeds, pix_spc)
-    else:
-        xaxis, mtf, mtf_area_per_edge, mtf_seed = calc_mtf_first_viable_seed(img_roi1, seeds, pix_spc)
+    xaxis, mtf, mtf_area_per_edge, mtf_seed, mtf_steps = calc_mtf_steps_first_viable_seed(
+        img_roi1, seeds, pix_spc, mtf_structure, keep_steps=keep_steps, octave_step=recipe == RECIPE_OCTAVE
+    )
     if recipe == RECIPE_PHYSICAL:
         xaxis, mtf = physical_mtf(mtf, pix_spc)
         mtf_area_per_edge = mtf_area_in_band(xaxis, mtf)
@@ -243,20 +246,6 @@ def evaluate_slice_quality(
             else None
         ),
     )
-
-
-def _calc_mtf_steps_first_viable_seed(img_roi, seeds, pix_spc):
-    """`calc_mtf_first_viable_seed` with the MTF's intermediate steps:
-    `(xaxis, MTF, MTFarea, seed, MtfSteps)`."""
-    last_error: ValueError | None = None
-    for x, y in seeds:
-        try:
-            xaxis, mtf, mtf_area, steps = calc_mtf_with_steps(img_roi, x, y, pix_spc)
-        except ValueError as exc:
-            last_error = exc
-            continue
-        return xaxis, mtf, mtf_area, (x, y), steps
-    raise last_error
 
 
 def _drop_invalid_mtf_edges(mtf, mtf_area_per_edge):

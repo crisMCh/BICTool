@@ -60,6 +60,10 @@ import numpy as np
 
 from bictool.domain.segmentation._resize import restore_from_512, resize_to_512
 from bictool.domain.segmentation._unet_architecture import build_unet
+from bictool.domain.segmentation.segmentation_confidence import (  # noqa: F401 - re-exported
+    SegmentationConfidence,
+    confidence_from_probabilities,
+)
 
 NB_CLASSES = 17  # background (0) + 16 named structures
 
@@ -93,6 +97,7 @@ class SegmentationResult:
     """
 
     masks: dict[str, np.ndarray]
+    confidence: SegmentationConfidence | None = None   # None for results from before 2026-10-20 (e.g. old caches)
 
 
 def build_model():
@@ -109,9 +114,10 @@ def segment_slice(model, slice_hu: np.ndarray) -> SegmentationResult:
     batch = padded[np.newaxis, :, :, np.newaxis].astype(np.float32)
     probabilities = model.predict(batch, verbose=0)[0]
     labels_512 = np.argmax(probabilities, axis=-1).reshape(512, 512)
+    confidence = confidence_from_probabilities(probabilities)
 
     masks: dict[str, np.ndarray] = {}
     for class_index, name in _CLASS_NAMES.items():
         mask_512 = labels_512 == class_index
         masks[name] = restore_from_512(mask_512, context)
-    return SegmentationResult(masks=masks)
+    return SegmentationResult(masks=masks, confidence=confidence)

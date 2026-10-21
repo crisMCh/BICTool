@@ -78,7 +78,7 @@ class MtfSteps:
         )
 
 
-def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
+def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, octave_step=False):
     """Port of `funcCalcMTFNew(myimg, ActContMask, PixSpc, ...)`.
 
     Parameters
@@ -87,6 +87,8 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     act_cont_mask_x, act_cont_mask_y : active-contour seed location
         (before interpolation; matches `ActContMask.x` / `ActContMask.y`)
     pix_spc : pixel spacing [mm] of `img_roi`
+    octave_step : the active contour's original (sign-flipping) step size, for
+        the legacy recipe - see `active_contour.region_seg`
 
     Returns
     -------
@@ -95,16 +97,18 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     MTFarea : 1D float64 array, shape (n_edges,) - area under each MTF
         curve up to the Nyquist frequency
     """
-    xaxis, MTF, MTFarea, _steps = _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=False)
+    xaxis, MTF, MTFarea, _steps = _calc_mtf(
+        img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=False, octave_step=octave_step
+    )
     return xaxis, MTF, MTFarea
 
 
-def calc_mtf_with_steps(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
+def calc_mtf_with_steps(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, octave_step=False):
     """`calc_mtf` plus its intermediate steps: `(xaxis, MTF, MTFarea, MtfSteps)`."""
-    return _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=True)
+    return _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=True, octave_step=octave_step)
 
 
-def _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, keep_steps):
+def _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, keep_steps, octave_step=False):
     # (1) Preprocessing (interpolation + enhancement chain used only to
     # improve edge detection - the original, unfiltered image is restored
     # before line-profile sampling).
@@ -131,7 +135,7 @@ def _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, keep_steps)
     x0, x1 = mask_x - win_width, mask_x + win_width
     m[y0 - 1:y1, x0 - 1:x1] = 1.0
 
-    seg = region_seg(myimg, m, ACTIVE_CONTOUR_MAX_ITS, ACTIVE_CONTOUR_ALPHA)
+    seg = region_seg(myimg, m, ACTIVE_CONTOUR_MAX_ITS, ACTIVE_CONTOUR_ALPHA, octave_step=octave_step)
 
     myimgedge = edge_kirsch(seg.astype(np.float64))
 

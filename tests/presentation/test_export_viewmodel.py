@@ -17,7 +17,7 @@ def _vm():
     volume = SimpleNamespace(num_slices=40, pixel_spacing_mm=0.45, acquisition_date="20260101")
     qa = SimpleNamespace(results={(3, "falx"): _result()}, errors={(4, "falx"): "no edges"})
     qa.results_by_pair = lambda pair: {i: r for (i, p), r in qa.results.items() if p == pair}
-    vm = ExportViewModel(qa, SimpleNamespace(verdict=None, artefacts=None, basal_ganglia=None), lambda: volume)
+    vm = ExportViewModel(qa, SimpleNamespace(verdict=None, artefacts=None, basal_ganglia=None, plausibility=None), lambda: volume)
     messages = []
     vm.message.connect(lambda level, title, text: messages.append((level, title)))
     return vm, messages

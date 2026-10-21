@@ -16,9 +16,22 @@ with the lentiform contrast removed from the image, it still labelled the lentif
 studies (the same test on the ventricles made their label disappear). A label is therefore no evidence of
 visibility — visibility is measured in the image.
 
+It also draws nuclei **far from where they are**: near the vertex and at the skull base (e.g. 6 vertex slices in
+the motion-artefact study). The nuclei are one compact structure in the centre of the brain, so only the
+**anatomical block** is measured (added 2026-10-20):
+
+* per slice, the deep grey matter = CNN lentiform + caudate + thalamus + internal capsule (area);
+* start at the slice with the most deep grey matter and extend up and down while the next slice keeps at least
+  **8 %** of that (provisional); the first slice below it, or a slice without segmentation, ends the block;
+* the thalamus is included because it lies at the same height and keeps the block together where the CNN
+  under-labels the nuclei on one slice.
+
+On the 15 rated studies the block is 8–13 slices (about 3–6 cm) per study. Excluded were only isolated labels
+separated from the block (in 8 studies, 1–6 slices each, all near the vertex or skull base).
+
 ## Measure
 
-Per slice with labelled nuclei and internal capsule:
+Per slice of the anatomical block with labelled nuclei and internal capsule:
 
 * **Border contrast** of each nucleus: mean HU 2 px inside minus 2 px outside the label border (0–60 HU only),
   divided by the pooled SD of the nucleus and the internal capsule (both eroded 1 px). Slice value = mean over

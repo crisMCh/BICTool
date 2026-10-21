@@ -81,7 +81,10 @@ class MainViewModel(QObject):
         self.results = ResultsViewModel(
             self.qa, head_ct_model, self,
             volume=lambda: self.study.volume, segmentation_cache=lambda: self.segmentation.cache,
+            segmentation_plausibility=lambda: self.segmentation.plausibility,
         )
+        # A late segmentation check updates the summary of results already shown.
+        self.segmentation.plausibility_changed.connect(lambda: self.results.refresh() if self.qa.results else None)
         self.export = ExportViewModel(self.qa, self.results, lambda: self.study.volume, self)
 
         self.study.volume_loaded.connect(self._on_volume_loaded)

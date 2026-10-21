@@ -11,6 +11,9 @@ measured in the image:
   the nucleus border (soft tissue 0-60 HU only), divided by the pooled SD of
   the nucleus and the internal capsule (both eroded 1 px); the slice value is
   the mean over the lentiform and caudate nuclei that are labelled;
+* **anatomical block**: only the contiguous block of slices around the largest
+  lentiform label is measured (`basal_ganglia_block`) - the CNN also draws
+  nuclei on slices far from them (near the vertex, at the skull base);
 * **plausibility** (provisional): on slices a reader rated visible, a nucleus
   was 4.6-8.6 HU denser than the internal capsule (5-95 %, max 10.6). A
   difference outside `PLAUSIBLE_DIFFERENCE_HU` means the label sits on
@@ -36,6 +39,12 @@ LENTIFORM, CAUDATE, INTERNAL_CAPSULE = "Lentiform Nucleus", "Caudate Nucleus", "
 NUCLEI = (LENTIFORM, CAUDATE)
 MIN_PIXELS = 30                          # per region after erosion
 PLAUSIBLE_DIFFERENCE_HU = (2.0, 15.0)    # nucleus - internal capsule (provisional)
+THALAMUS = "Thalamus"
+DEEP_GREY = (LENTIFORM, CAUDATE, THALAMUS, INTERNAL_CAPSULE)
+# Anatomical block: neighbouring slices count while their deep grey matter is at least this fraction of the
+# study's largest (2026-10-20: separates the real block from stray labels near the vertex or skull base in
+# all 15 rated studies; docs/qa_method/basal_ganglia.md). Provisional.
+BLOCK_FRACTION = 0.08
 _SOFT_TISSUE_HU = (0.0, 60.0)
 _RING_PX = 2
 
@@ -103,12 +112,41 @@ def measure_slice(slice_hu: np.ndarray, masks: dict[str, np.ndarray]) -> BasalGa
     return BasalGangliaSlice(border=float(np.mean(borders)) if plausible else 0.0, differences=differences, plausible=plausible)
 
 
+def _area(masks: dict[str, np.ndarray] | None, name: str) -> int:
+    mask = masks.get(name) if masks else None
+    return int(mask.sum()) if mask is not None else 0
+
+
+def basal_ganglia_block(masks_by_slice: dict[int, dict[str, np.ndarray]]) -> set[int]:
+    """The slices that anatomically contain the basal ganglia: one contiguous block of slices around the slice
+    with the most deep grey matter (CNN lentiform + caudate + thalamus + internal capsule), extended up and down
+    while a neighbouring slice keeps at least `BLOCK_FRACTION` of that. The nuclei are one compact structure in
+    the centre of the brain, so nucleus labels beyond the block (e.g. near the vertex, where the CNN sometimes
+    draws them) are not counted. The thalamus is included because it lies at the same height and keeps the
+    block together where the CNN under-labels the nuclei on one slice. A non-segmented slice ends the block."""
+    deep = {i: sum(_area(m, name) for name in DEEP_GREY) for i, m in masks_by_slice.items()}
+    if not deep or max(deep.values()) == 0 or not any(_area(m, n) for m in masks_by_slice.values() for n in NUCLEI):
+        return set()
+    start = max(deep, key=lambda i: (deep[i], -i))
+    threshold = BLOCK_FRACTION * deep[start]
+    block = {start}
+    for step in (-1, 1):
+        i = start + step
+        while i in deep and deep[i] >= threshold:
+            block.add(i)
+            i += step
+    return block
+
+
 def evaluate_basal_ganglia(
     masks_by_slice: dict[int, dict[str, np.ndarray]], get_slice_hu: Callable[[int], np.ndarray]
 ) -> dict[int, BasalGangliaSlice]:
-    """Every segmented slice with labelled nuclei -> its visibility."""
+    """Every slice of the basal-ganglia block (`basal_ganglia_block`) with labelled nuclei -> its visibility."""
+    block = basal_ganglia_block(masks_by_slice)
     out = {}
     for index, masks in sorted(masks_by_slice.items()):
+        if index not in block:
+            continue
         if not any(masks.get(name) is not None and masks[name].any() for name in NUCLEI):
             continue
         measured = measure_slice(get_slice_hu(index), masks)

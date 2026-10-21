@@ -107,6 +107,7 @@ class ExportViewModel(QObject):
             head_ct_verdict=self._results.verdict,
             artefacts=self._results.artefacts,
             basal_ganglia=self._results.basal_ganglia,
+            segmentation_plausibility=self._results.plausibility,
         )
         by_pair = {PAIR_LABELS[pair]: self._qa.results_by_pair(pair) for pair in PAIRS if self._qa.results_by_pair(pair)}
         stem = f"{safe_file_stem(context.series_label)}_study"

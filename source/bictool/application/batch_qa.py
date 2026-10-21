@@ -39,6 +39,7 @@ from bictool.domain.segmentation.brain_tissue_adaptive import (
 )
 from bictool.domain.segmentation.brain_tissue_anchored import classify_brain_tissue_anchored, fit_anchored_model
 from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.segmentation.segmentation_plausibility import assess_plausibility
 from bictool.domain.segmentation.tissue_references import estimate_tissue_references
 from bictool.infrastructure.config import load_config
 from bictool.integration.dicom_file_loader import load_dicom_volume
@@ -46,7 +47,7 @@ from bictool.integration.dicom_to_nifti import build_dicom_nifti_volume
 from bictool.domain.roi_selection.structured_roi import DURAL_FOLDS, SEPTUM_PELLUCIDUM
 from bictool.integration.model_files import default_chest_svm_model, default_head_ct_model, load_anatomy_weights
 from bictool.integration.results_export import export_dataset_csv, export_dataset_excel
-from bictool.integration.segmentation_cache import cache_path, load_segmentation, save_segmentation
+from bictool.integration.segmentation_cache import cache_path, load_confidence, load_segmentation, save_segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +64,21 @@ def find_studies(dataset_dir: Path) -> list[Path]:
     return sorted(entry for entry in entries if entry.is_dir())
 
 
-def _segment_volume(volume, get_model: Callable[[], object]) -> dict[int, dict[str, np.ndarray]]:
+def _segment_volume(volume, get_model: Callable[[], object]):
     """The GUI's Segment Volume, synchronously: NIfTI detour, U-Net per slice,
-    masks mapped back to DICOM pixel space."""
+    masks mapped back to DICOM pixel space. Returns (masks by slice, CNN confidence by slice)."""
     from bictool.domain.segmentation.head_ct_unet import segment_slice
 
     nifti = build_dicom_nifti_volume(volume.slice_paths, volume.get_slice_hu)
-    masks_by_slice = {}
+    masks_by_slice, confidence_by_slice = {}, {}
     for index in range(volume.num_slices):
         if not nifti.is_segmentable(index):
             continue
         result = nifti.remap_result_to_dicom_space(segment_slice(get_model(), nifti.get_nifti_slice_hu(index)))
         masks_by_slice[index] = result.masks
-    return masks_by_slice
+        if result.confidence is not None:
+            confidence_by_slice[index] = result.confidence
+    return masks_by_slice, confidence_by_slice
 
 
 TISSUE_ADAPTIVE, TISSUE_ANCHORED = "adaptive", "anchored"
@@ -121,15 +124,17 @@ def run_study(
 
         cache = cache_path(cache_dir, group, study_dir.name, volume.slice_paths)
         if cache.is_file():
-            masks_by_slice = load_segmentation(cache)
+            masks_by_slice, confidence_by_slice = load_segmentation(cache), load_confidence(cache)
         else:
-            masks_by_slice = _segment_volume(volume, get_model)
-            save_segmentation(cache, masks_by_slice)
+            masks_by_slice, confidence_by_slice = _segment_volume(volume, get_model)
+            save_segmentation(cache, masks_by_slice, confidence_by_slice)
+        qa.segmentation_confidence = confidence_by_slice
         qa.segmented_slices = len(masks_by_slice)
         qa.artefact_flags = evaluate_artefact_flags(
             masks_by_slice, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm
         )
         qa.basal_ganglia = evaluate_basal_ganglia(masks_by_slice, volume.get_slice_hu)
+        qa.segmentation_plausibility = assess_plausibility(masks_by_slice, volume.pixel_spacing_mm)
 
         qa.structures = evaluate_volume_qa(
             masks_by_slice,

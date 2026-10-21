@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from bictool.presentation.views.text_scale import px
 
-# Same palette as `main_window.STYLESHEET` - duplicated rather than imported
+# Same palette as `main_window.stylesheet()` - duplicated rather than imported
 # to avoid a circular import, matching `export_dialog.py`'s own precedent.
 BG = "#11151a"
 SURFACE_RAISED = "#20262d"
@@ -30,10 +31,12 @@ TEXT = "#e7eaed"
 TEXT_MUTED = "#8d96a0"
 ACCENT = "#49c8de"
 
-_STYLESHEET = f"""
-QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def _stylesheet() -> str:
+    return f"""
+QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLabel {{ color: {TEXT}; }}
-QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: 11px; }}
+QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: {px(11)}px; }}
 QDoubleSpinBox, QSpinBox {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 3px 6px; color: {TEXT};
@@ -64,7 +67,7 @@ class FcmSettingsDialog(QDialog):
     def __init__(self, current: FcmSettings, defaults: FcmSettings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Fuzzy C-Means Settings")
-        self.setStyleSheet(_STYLESHEET)
+        self.setStyleSheet(_stylesheet())
         self.setMinimumWidth(360)
         self._defaults = defaults
 

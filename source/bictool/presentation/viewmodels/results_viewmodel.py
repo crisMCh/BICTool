@@ -42,6 +42,7 @@ from bictool.presentation.viewmodels.head_ct_verdict_text import (
     verdict_text,
 )
 from bictool.presentation.viewmodels.roi_pairs import FALX, PAIR_LABELS, PAIRS, SEPTUM
+from bictool.presentation.viewmodels.segmentation_plausibility_text import plausibility_basics, plausibility_details
 from bictool.presentation.viewmodels.slice_steps import SliceStepsView, slice_steps_view
 
 STUDY_TABLE_COLUMNS = [
@@ -83,6 +84,7 @@ class ResultsViewModel(QObject):
         *,
         volume: Callable[[], object] | None = None,
         segmentation_cache: Callable[[], dict] | None = None,
+        segmentation_plausibility: Callable[[], object] | None = None,
     ) -> None:
         """`qa` = the QaRunViewModel; `model()` = the head-CT study model (or None);
         `volume()` / `segmentation_cache()` = the shown series and its anatomy
@@ -92,6 +94,7 @@ class ResultsViewModel(QObject):
         self._model = model
         self._volume = volume
         self._segmentation_cache = segmentation_cache
+        self._segmentation_plausibility = segmentation_plausibility  # () -> SegmentationPlausibility | None
         self.artefacts: ArtefactFlags | None = None
         self.basal_ganglia: dict[int, BasalGangliaSlice] | None = None  # slice -> visibility (provisional)
         self.slices: list[int] = []
@@ -125,6 +128,14 @@ class ResultsViewModel(QObject):
         masks = {index: result.masks for index, result in cache.items()}
         artefacts = evaluate_artefact_flags(masks, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm)
         return artefacts, evaluate_basal_ganglia(masks, volume.get_slice_hu)
+
+    @property
+    def plausibility(self):
+        """The study-level segmentation check of the shown series (None until it ran)."""
+        return self._segmentation_plausibility() if self._segmentation_plausibility else None
+
+    def plausibility_lines(self) -> list[str]:
+        return plausibility_basics(self.plausibility)
 
     def artefact_lines(self) -> list[str]:
         """Plain lines about possible artefacts (metal, posterior-fossa bands)."""
@@ -233,9 +244,14 @@ class ResultsViewModel(QObject):
         text = verdict_text(self.verdict, len(self._qa.results_by_pair(FALX)), model_available=model_available)
         basics = list(text.basics)
         noise_line = next((i for i, line in enumerate(basics) if line.startswith("Artefacts (")), len(basics) - 1)
-        basics[noise_line + 1:noise_line + 1] = artefact_basics(self.artefacts) + basal_ganglia_basics(self.basal_ganglia)
+        basics[noise_line + 1:noise_line + 1] = (
+            artefact_basics(self.artefacts) + basal_ganglia_basics(self.basal_ganglia) + plausibility_basics(self.plausibility)
+        )
         text = replace(text, basics=tuple(basics))
-        details = list(text.details) + artefact_details(self.artefacts) + basal_ganglia_details(self.basal_ganglia)
+        details = (
+            list(text.details) + artefact_details(self.artefacts) + basal_ganglia_details(self.basal_ganglia)
+            + plausibility_details(self.plausibility)
+        )
         if self._qa.results_by_pair(SEPTUM):
             details.append(SEPTUM_NOTE)
         failed = sorted(self._qa.errors)

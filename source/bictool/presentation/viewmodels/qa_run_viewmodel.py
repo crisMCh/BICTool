@@ -138,7 +138,8 @@ class QaRunViewModel(QObject):
 
     def mtf_structure_mask(self, index: int, rect: RoiRect) -> np.ndarray | None:
         """The ROI1 structures (septum + dural folds) cropped to `rect`, or None
-        if the slice isn't segmented - only a hint for placing the MTF seed."""
+        if the slice isn't segmented - places the MTF seed and checks that the
+        measured edge lies on the structure."""
         result = self._segmentation_cache().get(index)
         if result is None:
             return None
@@ -157,14 +158,16 @@ class QaRunViewModel(QObject):
         img_roi1, img_roi2 = crop_roi(pixels, roi1), crop_roi(pixels, roi2)
         # calc_mtf's active contour must start inside the edge structure: seed
         # it on the structure's centerline, with fallbacks if a seed finds no edges.
-        seeds = mtf_seed_candidates(img_roi1, self.mtf_structure_mask(index, roi1))
+        structure = self.mtf_structure_mask(index, roi1)
+        seeds = mtf_seed_candidates(img_roi1, structure)
         logger.info(
             "Run All: slice=%d (%s), roi1 shape=%s, roi2 shape=%s, pix_spc=%.4f, mtf seeds=%s",
             index, PAIR_LABELS[pair], img_roi1.shape, img_roi2.shape, volume.pixel_spacing_mm, seeds,
         )
         # Intermediate steps kept for Results > Advanced (a few MB per study, no extra time).
         worker = Worker(
-            img_roi1, img_roi2, volume.pixel_spacing_mm, mtf_seeds=seeds, recipe=self.recipe, keep_steps=True
+            img_roi1, img_roi2, volume.pixel_spacing_mm, mtf_seeds=seeds, recipe=self.recipe, keep_steps=True,
+            mtf_structure=structure,
         )
         # Bound methods (not lambdas) so Qt queues the call onto the GUI thread.
         worker.signals.finished.connect(self._on_worker_finished)

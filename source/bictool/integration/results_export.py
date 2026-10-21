@@ -27,6 +27,7 @@ from openpyxl import Workbook
 
 from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, ArtefactFlags
 from bictool.domain.metrics.basal_ganglia import NOT_PLAUSIBLE, PLAUSIBLE_DIFFERENCE_HU, BasalGangliaSlice
+from bictool.domain.segmentation.segmentation_plausibility import FRAGMENTATION_LIMIT, SegmentationPlausibility
 from bictool.domain.results.head_ct_verdict import (
     FEATURE_LABELS,
     MIN_SLICES,
@@ -151,6 +152,8 @@ class StudyExportContext:
     artefacts: ArtefactFlags | None = None
     # Basal-ganglia visibility per slice (provisional); None if not computed.
     basal_ganglia: dict[int, BasalGangliaSlice] | None = None
+    # Study-level segmentation check (provisional); None if it did not run.
+    segmentation_plausibility: SegmentationPlausibility | None = None
 
 
 def _is_physical(results) -> bool:
@@ -247,6 +250,20 @@ def _basal_ganglia_rows(slices: dict[int, BasalGangliaSlice] | None) -> list[lis
     return rows
 
 
+def _plausibility_rows(plausibility: SegmentationPlausibility | None) -> list[list[str]]:
+    """Study-level segmentation check - provisional, not part of the verdict."""
+    if plausibility is None or plausibility.slices == 0:
+        return []
+    return [
+        [],
+        ["Segmentation check (provisional, not part of the verdict)"],
+        ["Segmentation", "may be unreliable - check the overlays" if plausibility.unreliable else "looks consistent"],
+        ["Fragmentation (pieces per slice, median)", f"{plausibility.fragmentation:.1f}", f"limit {FRAGMENTATION_LIMIT:g}"],
+        ["Most fragmented slices", ", ".join(str(index + 1) for index in plausibility.worst_slices)],
+        ["Lobe islands", str(plausibility.lobe_islands)],
+    ]
+
+
 def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> list[list[str]]:
     """Study context, then per structure (ROI pair) its verdict and metric
     averages - structures are never averaged together."""
@@ -266,6 +283,7 @@ def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> l
         rows += _head_ct_verdict_rows(context.head_ct_verdict, len(results.get("Falx", {})))
     rows += _artefact_rows(context.artefacts)
     rows += _basal_ganglia_rows(context.basal_ganglia)
+    rows += _plausibility_rows(context.segmentation_plausibility)
     for structure, by_slice in results.items():
         summary = summarize_metrics(by_slice.values())
         rows += [[], [structure]]
@@ -361,7 +379,8 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
         summary_sheet.column_dimensions[column].width = 14
 
     slices_sheet = workbook.create_sheet("Per slice")
-    for row in _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia):
+    slice_rows = _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)
+    for row in slice_rows:
         slices_sheet.append(row)
     for (header_cell,) in slices_sheet.iter_cols(min_row=1, max_row=1):
         slices_sheet.column_dimensions[header_cell.column_letter].width = max(len(str(header_cell.value)) + 2, 10)
@@ -393,6 +412,8 @@ _DATASET_ARTEFACT_HEADER = [
     "Brainstem dark band slices (provisional)",
     "Basal ganglia visible slices (provisional)",
     "Basal ganglia label not plausible slices",
+    "Segmentation fragmentation (provisional)",
+    "Segmentation may be unreliable (provisional)",
 ]
 _DATASET_SUMMARY_HEADER = [
     "Dataset",
@@ -499,7 +520,8 @@ def _dataset_verdict_cells(volume, structure: str) -> list:
 def _dataset_artefact_cells(volume, first_row: bool) -> list:
     flags = getattr(volume, "artefact_flags", None)
     basal = getattr(volume, "basal_ganglia", None)
-    if not first_row or (flags is None and basal is None):
+    plausibility = getattr(volume, "segmentation_plausibility", None)
+    if not first_row or (flags is None and basal is None and plausibility is None):
         return [""] * len(_DATASET_ARTEFACT_HEADER)
 
     def listed(indices):
@@ -510,6 +532,8 @@ def _dataset_artefact_cells(volume, first_row: bool) -> list:
         listed(flags.band_slices) if flags is not None else "",
         listed(sorted(i for i, s in basal.items() if s.visible)) if basal is not None else "",
         listed(sorted(i for i, s in basal.items() if s.level == NOT_PLAUSIBLE)) if basal is not None else "",
+        f"{plausibility.fragmentation:.1f}" if plausibility is not None and plausibility.slices else "",
+        ("yes" if plausibility.unreliable else "no") if plausibility is not None and plausibility.slices else "",
     ]
 
 

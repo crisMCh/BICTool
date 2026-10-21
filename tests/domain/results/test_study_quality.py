@@ -108,8 +108,9 @@ def test_evaluate_slice_quality_retries_mtf_seeds_until_one_finds_edges(monkeypa
 
     tried = []
 
-    def fake_calc_mtf(img_roi, x, y, pix_spc):
+    def fake_calc_mtf(img_roi, x, y, pix_spc, *, octave_step=False):
         tried.append((x, y))
+        assert not octave_step  # default (physical) recipe: the corrected active-contour step
         if (x, y) != (3, 4):
             raise ValueError("No edge columns survived bump removal")
         return np.array([0.0, 0.5, 1.0]), np.ones((3, 2)), np.array([0.3, 0.4])

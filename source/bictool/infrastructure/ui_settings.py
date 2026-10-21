@@ -48,6 +48,14 @@ class UiSettings:
         self._settings.setValue(key, bool(value))
         self._settings.sync()
 
+    def get_str(self, key: str, default: str = "") -> str:
+        value = self._settings.value(key, default)
+        return str(value) if value is not None else default
+
+    def set_str(self, key: str, value: str) -> None:
+        self._settings.setValue(key, str(value))
+        self._settings.sync()
+
     def get_bytes(self, key: str) -> QByteArray | None:
         value = self._settings.value(key)
         return value if isinstance(value, QByteArray) and not value.isEmpty() else None

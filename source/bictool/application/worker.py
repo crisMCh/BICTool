@@ -42,6 +42,7 @@ class Worker(QRunnable):
         act_cont_mask_y: int = 10,
         mtf_seeds: Sequence[tuple[int, int]] | None = None,
         recipe: str | None = None,
+        mtf_structure: np.ndarray | None = None,
         svm_model=None,
         keep_steps: bool = False,
     ) -> None:
@@ -52,6 +53,7 @@ class Worker(QRunnable):
         self._act_cont_mask_x = act_cont_mask_x
         self._act_cont_mask_y = act_cont_mask_y
         self._mtf_seeds = mtf_seeds
+        self._mtf_structure = mtf_structure  # ROI1's structure (CNN falx/septum) - checks the MTF edge
         self._recipe = recipe
         self._svm_model = svm_model  # None: the shipped chest-CT SVM (legacy per-slice verdict)
         self._keep_steps = keep_steps  # also keep the intermediate steps (Results > Advanced)
@@ -76,6 +78,7 @@ class Worker(QRunnable):
                 self._act_cont_mask_y,
                 svm_model=self._svm_model if self._svm_model is not None else default_chest_svm_model(),
                 mtf_seeds=self._mtf_seeds,
+                mtf_structure=self._mtf_structure,
                 keep_steps=self._keep_steps,
                 **({"recipe": self._recipe} if self._recipe else {}),
             )

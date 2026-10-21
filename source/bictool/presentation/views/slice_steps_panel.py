@@ -24,6 +24,7 @@ from bictool.presentation.viewmodels.slice_steps import (
     ImagePanel,
     SliceStepsView,
 )
+from bictool.presentation.views.text_scale import pt, px
 
 SURFACE_SUNKEN = "#0c0f13"
 TEXT = "#e7eaed"
@@ -125,7 +126,7 @@ class ImagePanelWidget(QWidget):
             x0, x1, y0, y1 = panel.extent
             painter.setPen(QColor(TEXT_MUTED))
             font = painter.font()
-            font.setPointSizeF(7.5)
+            font.setPointSizeF(pt(7.5))
             painter.setFont(font)
             painter.drawText(QPointF(rect.left(), rect.bottom() + 12), f"{x0:.2f}")
             painter.drawText(QPointF(rect.right() - 28, rect.bottom() + 12), f"{x1:.2f}")
@@ -142,7 +143,7 @@ def _titled(widget: QWidget, title: str) -> tuple[QWidget, QLabel, QLabel]:
     title_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: 600;")
     caption = QLabel("")
     caption.setWordWrap(True)
-    caption.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+    caption.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(10)}px;")
     layout.addWidget(title_label)
     layout.addWidget(widget, 1)
     layout.addWidget(caption)

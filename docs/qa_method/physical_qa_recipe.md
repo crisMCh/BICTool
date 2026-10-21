@@ -236,6 +236,45 @@ three things:
 Edges whose MTF is not finite are dropped as before (at most 50 %, otherwise
 the slice fails).
 
+**Active-contour step size fixed (2026-10-20).** The Chan-Vese contour that
+finds the edge used the step `dt = 0.45 / max(dphidt)` (Octave port, after
+Lankton). When the seed lies fully inside a bright structure - the intended
+case, a seed on the falx/septum - every point of the narrow band wants to join
+the region, all `dphidt` are negative, `dt` becomes negative and the update
+runs backwards: the region shrinks to nothing within ~10 iterations and the
+seed "finds no edges". Only seeds beside the line survived, which then measured
+the wrong edge. The physical recipe now uses the usual step
+`0.45 / max(|dphidt|)` (`active_contour.region_seg`, test
+`tests/domain/segmentation/test_active_contour.py`); the legacy octave recipe
+keeps the original. Batch rerun of the 15 rated studies (2026-10-20,
+`debugs/classifier/qa_2026-10-20b`): the fallback seed is no longer used
+(24 before), 21 failed slices (18 before), 270 of 392 falx MTF areas unchanged
+and the rest within ±0.04 (90th percentile), median 0.506 → 0.501; septum alike.
+Study verdicts: no category changed, but the probabilities moved where newly
+measured slices entered: in the acute-SDH study 5 upper slices with fresh blood
+along the falx (they failed before) raise the falx variance and the PS/MTF
+ratio, and P(acceptable) fell from 0.77 to 0.05 - the falx measures pathology
+there, not image quality (a limitation, section 7). head-ct-1 was trained on
+features from the old contour and is not refit.
+
+**The measured edge must belong to the structure (added 2026-10-20).** The
+active contour starts from a seed; seeds are tried in order (brightest points
+on the CNN falx/septum label first, the Octave-era quarter-of-the-ROI point
+last) until one gives usable edges. On a thin falx all seeds on the line can
+fail (profiles across a thin line are bumps, which the bump removal discards),
+and the last seed, lying in the tissue beside the line, then grew a region
+there and measured *that* edge. In the 15 rated studies this happened in 20 of
+the 24 ROI1s measured with the last seed.
+When the structure is known (auto ROIs and any ROI on a segmented slice), a
+seed's result now counts only if at least **30 %** of its active-contour region
+lies on the structure (within 1 px, compared on the 4× grid). Over all 488
+ROI1s of the rated studies: wrong last-seed results 0.00-0.29, correct ones
+0.69-1.00, regular seeds median 0.98 (13 of 464 below 0.30, which then fall
+through to the next seed). If no seed qualifies, the slice fails with
+"MTF edge not on the structure" and is left out of the study verdict, like any
+failed slice. Without a known structure (manual ROI on an unsegmented slice)
+nothing changes.
+
 **MTF area** = ∫₀^0.8 MTF(f) df per edge, in mm^-1, then averaged over edges.
 The MTF is 1 at f = 0 and normally falls with frequency. A system that
 transferred all contrast up to 0.8 mm^-1 (MTF = 1 across the band) would
@@ -524,6 +563,12 @@ Findings:
 6. **ROI1 size.** The automatic ROI1 target size was derived from ±5 mm
    profiles. The profiles are really ±2.5 mm (F1), so ROI1 could be smaller.
    That is unchanged for now, since it also changes the PS frequency bins.
+7. **Pathology on the measured structure.** ROI1 sits on the falx; when the
+   falx itself is abnormal - e.g. an acute subdural haematoma along it - the
+   falx variance, PS and PS/MTF ratio reflect the pathology, not the image
+   quality, and the study verdict leans towards "not acceptable" (acute-SDH
+   study: P(acceptable) 0.05 after the 2026-10-20 contour fix). Not handled
+   yet; candidate for head-ct-2: flag ROI1s with blood-density HU on the falx.
 
 ## 8. Implementation map
 

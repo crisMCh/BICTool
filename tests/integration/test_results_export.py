@@ -487,3 +487,15 @@ def test_exports_list_the_basal_ganglia_visibility(tmp_path):
     rows = _read_csv(tmp_path / "ds.csv")
     assert rows[1][rows[0].index("Basal ganglia visible slices (provisional)")] == "13"
     assert rows[1][rows[0].index("Basal ganglia label not plausible slices")] == "21"
+
+
+def test_segmentation_check_rows():
+    from bictool.domain.segmentation.segmentation_plausibility import SegmentationPlausibility
+    from bictool.integration.results_export import _plausibility_rows
+
+    rows = _plausibility_rows(SegmentationPlausibility(fragmentation=38.0, slices=28, worst_slices=(13, 18, 11), lobe_islands=14))
+    assert ["Segmentation", "may be unreliable - check the overlays"] in rows
+    assert ["Fragmentation (pieces per slice, median)", "38.0", "limit 30"] in rows
+    assert ["Most fragmented slices", "14, 19, 12"] in rows
+    assert _plausibility_rows(SegmentationPlausibility(12.0, 28, (1,), 0))[2] == ["Segmentation", "looks consistent"]
+    assert _plausibility_rows(None) == [] and _plausibility_rows(SegmentationPlausibility(0.0, 0, (), 0)) == []

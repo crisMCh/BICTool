@@ -261,6 +261,8 @@ from bictool.presentation.views.fcm_settings_dialog import FcmSettings, FcmSetti
 from bictool.presentation.views.export_dialog import SCOPE_STUDY, ExportDialog
 from bictool.presentation.views.roi_viewport import RoiViewport
 from bictool.presentation.views.segmentation_selection_dialog import SegmentationSelectionDialog
+from bictool.presentation.views.text_scale import load_text_scale, px, save_text_scale, saved_text_scale, text_scale
+from bictool.presentation.views.text_size_dialog import TextSizeDialog
 
 if TYPE_CHECKING:
     # Type-hint-only - the real imports are deferred to first use inside
@@ -290,8 +292,10 @@ GOOD = "#5fbf83"
 CRITICAL = "#e0685c"
 WARNING = "#d9a441"
 
-STYLESHEET = f"""
-QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def stylesheet() -> str:
+    return f"""
+QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QMenuBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
 QMenuBar::item:selected {{ background: {SURFACE_RAISED}; }}
 QMenu {{ background: {SURFACE_RAISED}; border: 1px solid {BORDER}; }}
@@ -305,14 +309,14 @@ QGroupBox#subBox {{ margin-top: 12px; padding: 4px 6px 6px 6px; border-radius: 6
 QFrame#collapsibleSection {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; }}
 QToolButton#sectionHeader {{
     background: transparent; border: none; padding: 6px 6px; color: {TEXT};
-    font-weight: 700; font-size: 12px; text-align: left;
+    font-weight: 700; font-size: {px(12)}px; text-align: left;
 }}
 QToolButton#sectionHeader:hover {{ color: {ACCENT}; }}
 QStatusBar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
 QStatusBar::item {{ border: none; }}
 QStatusBar QProgressBar {{ background: {SURFACE_SUNKEN}; border: 1px solid {BORDER}; border-radius: 4px; }}
 QStatusBar QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
-QPushButton#statusCancelBtn {{ padding: 1px 8px; font-size: 11px; }}
+QPushButton#statusCancelBtn {{ padding: 1px 8px; font-size: {px(11)}px; }}
 QSplitter::handle {{ background: {BORDER}; }}
 QSplitter::handle:hover {{ background: {ACCENT}; }}
 QPushButton {{
@@ -499,7 +503,7 @@ class MainWindowView(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("BICTool")
         self.resize(1180, 880)  # taller than before to fit the always-visible trace bar
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(stylesheet())
 
         self._scheduler = Scheduler()
         # The application state and workflow (MVVM): one ViewModel per area,
@@ -612,6 +616,7 @@ class MainWindowView(QMainWindow):
         seg.busy_changed.connect(self._on_segmentation_busy_changed)
         seg.cancel_available_changed.connect(self._cancel_segment_volume_btn.setVisible)
         seg.message.connect(self._show_message)
+        seg.plausibility_changed.connect(self._refresh_plausibility_line)
 
     def _show_message(self, level: str, title: str, text: str) -> None:
         """A ViewModel's message as a dialog (ViewModels show no dialogs themselves)."""
@@ -745,7 +750,7 @@ class MainWindowView(QMainWindow):
         """A one-line instruction under a step's title."""
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(11)}px;")
         return label
 
     def _set_trace_visible(self, visible: bool) -> None:
@@ -773,7 +778,7 @@ class MainWindowView(QMainWindow):
         self._trace_log.setMaximumBlockCount(5000)  # cap memory growth on a long session
         self._trace_log.setMinimumHeight(60)
         self._trace_log.setStyleSheet(
-            f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: 10px; "
+            f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: {px(10)}px; "
             f"background: {SURFACE_SUNKEN}; color: {TEXT}; border: 1px solid {BORDER};"
         )
         layout.addWidget(self._trace_log)
@@ -873,6 +878,8 @@ class MainWindowView(QMainWindow):
         self._show_trace_action = settings_menu.addAction("Show Trace Log")
         self._show_trace_action.setCheckable(True)
         self._show_trace_action.toggled.connect(self._set_trace_visible)
+        text_size_action = settings_menu.addAction("Text Size…", self._on_text_size_clicked)
+        text_size_action.setToolTip("Size of all text in BICTool (applies after a restart)")
 
         export_menu = menu_bar.addMenu("&Export")
         self._export_action = export_menu.addAction("Export Results…", self._open_export_dialog)
@@ -1042,6 +1049,14 @@ class MainWindowView(QMainWindow):
         self._show_slice(0)  # also refreshes the corner overlay (see `_update_viewer_overlay`)
         self._show_view_page(0)
 
+    def _refresh_plausibility_line(self) -> None:
+        """The segmentation check's line in the Anatomical box (hidden before it ran)."""
+        text = self._segmentation.plausibility_line()
+        unreliable = self._segmentation.plausibility is not None and self._segmentation.plausibility.unreliable
+        self._plausibility_label.setText(("⚠ " if unreliable else "") + text)
+        self._plausibility_label.setStyleSheet(f"color: {WARNING if unreliable else TEXT_MUTED}; font-size: {px(11)}px;")
+        self._plausibility_label.setVisible(bool(text))
+
     def _show_slice(self, index: int) -> None:
         self._study.set_slice(index)
 
@@ -1187,6 +1202,7 @@ class MainWindowView(QMainWindow):
         slice_row.addWidget(self._slice_label)
         slice_row.addWidget(self._slice_slider, 1)
         layout.addLayout(slice_row)
+
 
         self._study_status_label.setText("No study loaded — File → Open DICOM Folder/File…")
 
@@ -1484,7 +1500,7 @@ class MainWindowView(QMainWindow):
 
         score_row = QHBoxLayout()
         self._result_verdict_label = QLabel("—")
-        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._result_decision_label = QLabel("")
         self._result_decision_label.setProperty("role", "mono")
         score_row.addWidget(self._result_verdict_label)
@@ -1559,7 +1575,7 @@ class MainWindowView(QMainWindow):
         summary_layout = QVBoxLayout(summary)
         summary_layout.setContentsMargins(0, 8, 0, 0)
         self._study_verdict_label = QLabel("—")
-        self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._study_verdict_label.setWordWrap(True)
         summary_layout.addWidget(self._study_verdict_label)
         # What a user needs (reasons in plain words, artefacts, unusual
@@ -1579,12 +1595,12 @@ class MainWindowView(QMainWindow):
         self._study_verdict_details_label = QLabel("")
         self._study_verdict_details_label.setWordWrap(True)
         self._study_verdict_details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._study_verdict_details_label.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self._study_verdict_details_label.setStyleSheet(f"color: {TEXT}; font-size: {px(11)}px;")
         self._study_verdict_details_label.setVisible(False)
         summary_layout.addWidget(self._study_verdict_details_label)
         self._verdict_details_btn.setChecked(self._ui_settings.get_bool(VERDICT_DETAILS_OPEN))
         self._study_provisional_label = QLabel(PROVISIONAL_SHORT)
-        self._study_provisional_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._study_provisional_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(11)}px;")
         self._study_provisional_label.setVisible(False)
         summary_layout.addWidget(self._study_provisional_label)
         self._study_table = QTableWidget(0, len(_STUDY_TABLE_COLUMNS))
@@ -1681,7 +1697,9 @@ class MainWindowView(QMainWindow):
                     item.setToolTip(table_row.hint_tooltip)
                 self._study_table.setItem(row, column, item)
 
-        artefact_lines = self._results.artefact_lines() + self._results.basal_ganglia_lines()
+        artefact_lines = (
+            self._results.artefact_lines() + self._results.basal_ganglia_lines() + self._results.plausibility_lines()
+        )
         self._study_verdict_basics_label.setVisible(physical or bool(artefact_lines))
         self._verdict_details_btn.setVisible(physical)
         self._study_verdict_details_label.setVisible(physical and self._verdict_details_btn.isChecked())
@@ -1696,11 +1714,11 @@ class MainWindowView(QMainWindow):
         lines, tones = self._results.legacy_verdict()
         if not lines:
             self._study_verdict_label.setText("—")
-            self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+            self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
             return
         color = _TONE_COLORS[tones[0]] if len(set(tones)) == 1 else TEXT
         self._study_verdict_label.setText("\n".join(lines))
-        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: {px(15)}px; font-weight: 700;")
 
     def _results_are_physical(self) -> bool:
         return self._results.is_physical()
@@ -1711,7 +1729,7 @@ class MainWindowView(QMainWindow):
         text, details = self._results.head_ct_text(model_available=default_head_ct_model() is not None)
         color = {TONE_GOOD: GOOD, TONE_BAD: CRITICAL}.get(text.tone, WARNING if self._results.verdict else TEXT_MUTED)
         self._study_verdict_label.setText(text.headline)
-        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: {px(15)}px; font-weight: 700;")
         self._study_verdict_basics_label.setText("\n".join(text.basics))
         self._study_verdict_details_label.setText(details)
         self._set_tip(self._study_provisional_label, PROVISIONAL_NOTE)
@@ -1745,7 +1763,7 @@ class MainWindowView(QMainWindow):
         self._result_verdict_label.setText(view.verdict_text)
         self._set_tip(self._result_verdict_label, view.verdict_tooltip)
         self._result_verdict_label.setStyleSheet(
-            f"color: {_TONE_COLORS[view.verdict_tone]}; font-size: 15px; font-weight: 700;"
+            f"color: {_TONE_COLORS[view.verdict_tone]}; font-size: {px(15)}px; font-weight: 700;"
         )
         self._result_decision_label.setText(view.note_text)
 
@@ -2078,6 +2096,18 @@ class MainWindowView(QMainWindow):
         segments_row.addStretch(1)
         layout.addLayout(segments_row)
 
+        # Study-level segmentation check (provisional, `segmentation_plausibility`) - shown after the volume
+        # segmentation; a warning colour only when the segmentation may be unreliable.
+        self._plausibility_label = QLabel("")
+        self._plausibility_label.setWordWrap(True)
+        self._plausibility_label.setVisible(False)
+        self._set_tip(
+            self._plausibility_label,
+            "Checks whether the CNN labels break into many scattered pieces (fragmentation) - a sign that the "
+            "segmentation, and the automatic ROIs placed on it, may be wrong. Provisional; not part of the verdict.",
+        )
+        layout.addWidget(self._plausibility_label)
+
         return box
 
     def _on_select_segments_clicked(self) -> None:
@@ -2278,6 +2308,16 @@ class MainWindowView(QMainWindow):
         has_settings = self._brain_tissue.method in self._brain_tissue_settings_handlers()
         self._brain_tissue_settings_btn.setEnabled(has_settings)
         self._set_tip(self._brain_tissue_settings_btn, "" if has_settings else "The prototype has no settings yet")
+
+    def _on_text_size_clicked(self) -> None:
+        dialog = TextSizeDialog(saved_text_scale(self._ui_settings), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        save_text_scale(dialog.value(), self._ui_settings)
+        if abs(dialog.value() - text_scale()) > 1e-9:
+            QMessageBox.information(
+                self, "Text Size", f"Text size set to {dialog.value():.0%}. It applies when BICTool is restarted."
+            )
 
     def _on_fcm_settings_clicked(self) -> None:
         dialog = FcmSettingsDialog(self._brain_tissue.settings[_BRAIN_TISSUE_METHOD_FCM], self._brain_tissue.default_settings[_BRAIN_TISSUE_METHOD_FCM], parent=self)
@@ -2549,7 +2589,7 @@ class MainWindowView(QMainWindow):
         self._roi_table.setStyleSheet(
             f"QTableWidget {{ background: {SURFACE}; border: none; }}"
             f"QHeaderView::section {{ background: {SURFACE}; color: {TEXT_MUTED}; border: none;"
-            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px; }}"
+            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: {px(10)}px; }}"
             f"QTableWidget::item {{ padding: 4px; border-bottom: 1px solid {BORDER}; }}"
             f"QTableWidget::item:selected {{ background: {SURFACE_RAISED}; }}"
         )
@@ -2665,7 +2705,7 @@ class MainWindowView(QMainWindow):
         self._run_all_btn.setObjectName("runAllBtn")
         self._run_all_btn.setMinimumHeight(36)
         self._run_all_btn.setStyleSheet(
-            f"QPushButton#runAllBtn {{ font-size: 14px; font-weight: 700; padding: 6px 18px; }}"
+            f"QPushButton#runAllBtn {{ font-size: {px(14)}px; font-weight: 700; padding: 6px 18px; }}"
             f"QPushButton#runAllBtn:enabled {{ background: {ACCENT}; color: {BG}; border: none; border-radius: 4px; }}"
         )
         self._run_all_btn.setEnabled(False)
@@ -2701,7 +2741,7 @@ class MainWindowView(QMainWindow):
         self._metrics_table.setStyleSheet(
             f"QTableWidget {{ background: {SURFACE}; border: none; }}"
             f"QHeaderView::section {{ background: {SURFACE}; color: {TEXT_MUTED}; border: none;"
-            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px; }}"
+            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: {px(10)}px; }}"
             f"QTableWidget::item {{ padding: 4px; border-bottom: 1px solid {BORDER}; }}"
         )
 
@@ -2893,7 +2933,7 @@ class MainWindowView(QMainWindow):
             self._set_metric_status(key, "statusQueued", "—")
             self._metric_value_items[key].setText("")
         self._result_verdict_label.setText("—")
-        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._result_decision_label.setText("")
         for name in _FEATURE_NAMES:
             self._feature_labels[name].setText("—")
@@ -2905,6 +2945,10 @@ def main() -> None:
     register_windows_app_id()  # before any window, so the taskbar shows BICTool's icon, not Python's
     app = QApplication(sys.argv)
     app.setApplicationName("BICTool")
+    load_text_scale()  # before any widget: stylesheets and fonts are built from it
+    font = app.font()
+    font.setPixelSize(px(12))  # widgets without a stylesheet size (menus, chart axes) follow the app font
+    app.setFont(font)
     app.setWindowIcon(app_icon())
     window = MainWindowView()
     window.show()

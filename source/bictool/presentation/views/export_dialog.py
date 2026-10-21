@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QVBoxLayout,
 )
+from bictool.presentation.views.text_scale import px
 
 SCOPE_SLICE = "slice"
 SCOPE_STUDY = "study"
 
-# Same palette as `main_window.STYLESHEET` - duplicated rather than imported
+# Same palette as `main_window.stylesheet()` - duplicated rather than imported
 # to avoid a circular import (main_window constructs this dialog), matching
 # the precedent already set by `roi_viewport.py`'s own independent color
 # constants.
@@ -35,10 +36,12 @@ TEXT = "#e7eaed"
 TEXT_MUTED = "#8d96a0"
 ACCENT = "#49c8de"
 
-_STYLESHEET = f"""
-QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def _stylesheet() -> str:
+    return f"""
+QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLabel {{ color: {TEXT}; }}
-QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: 11px; }}
+QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: {px(11)}px; }}
 QCheckBox, QRadioButton {{ color: {TEXT}; padding: 2px 0; }}
 QLineEdit {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
@@ -77,7 +80,7 @@ class ExportDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export Results")
-        self.setStyleSheet(_STYLESHEET)
+        self.setStyleSheet(_stylesheet())
         self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from bictool.presentation.viewmodels.roi_selection import RoiRect, make_square, normalize_rect
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS, apply_window
+from bictool.presentation.views.text_scale import px
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ class RoiViewport(QGraphicsView):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             label.setStyleSheet(
                 "QLabel { color: #e7eaed; background: rgba(5, 7, 10, 0.62); "
-                "font-family: 'IBM Plex Mono', Consolas, monospace; font-size: 10px; "
+                f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: {px(10)}px; "
                 "padding: 4px 7px; border-radius: 4px; }"
             )
             label.setVisible(False)

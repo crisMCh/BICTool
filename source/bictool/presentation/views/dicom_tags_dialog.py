@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
 )
+from bictool.presentation.views.text_scale import px
 
 BG = "#11151a"
 SURFACE = "#181d23"
@@ -24,19 +25,21 @@ BORDER = "#2b323a"
 TEXT = "#e7eaed"
 TEXT_MUTED = "#8d96a0"
 
-_STYLESHEET = f"""
-QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def _stylesheet() -> str:
+    return f"""
+QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLineEdit {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 5px 8px; color: {TEXT};
 }}
 QTableWidget {{
     background: {SURFACE}; border: 1px solid {BORDER}; color: {TEXT};
-    font-family: "IBM Plex Mono", Consolas, monospace; font-size: 11px;
+    font-family: "IBM Plex Mono", Consolas, monospace; font-size: {px(11)}px;
 }}
 QHeaderView::section {{
     background: {SURFACE}; color: {TEXT_MUTED}; border: none;
-    border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px;
+    border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: {px(10)}px;
 }}
 """
 
@@ -51,7 +54,7 @@ class DicomTagsDialog(QDialog):
     def __init__(self, dataset: pydicom.Dataset, *, title: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setStyleSheet(_STYLESHEET)
+        self.setStyleSheet(_stylesheet())
         self.resize(640, 560)
 
         layout = QVBoxLayout(self)

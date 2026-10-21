@@ -136,3 +136,17 @@ def test_basal_ganglia_visibility_shows_in_the_summary_table_and_slice_view():
     assert vm.slice_view(4).note_text == "Basal ganglia clearly visible"
     text, details = vm.head_ct_text(model_available=False)
     assert any(line.startswith("Basal ganglia") for line in text.basics) and "border contrast per slice" in details
+
+
+def test_the_segmentation_check_shows_in_the_summary_but_not_per_slice():
+    from bictool.domain.segmentation.segmentation_plausibility import SegmentationPlausibility
+
+    check = SegmentationPlausibility(fragmentation=38.0, slices=28, worst_slices=(13,), lobe_islands=4)
+    qa = _qa({(4, "falx"): _result(1, "physical")})
+    vm = ResultsViewModel(qa, lambda: None, segmentation_plausibility=lambda: check)
+    vm.refresh()
+
+    text, details = vm.head_ct_text(model_available=False)
+    assert "Segmentation (provisional): segmentation may be unreliable in this study - check the overlays." in text.basics
+    assert "Segmentation fragmentation 38.0 pieces per slice" in details
+    assert vm.table_rows()[0].cells[-1] == "" and vm.slice_view(4).note_text == ""

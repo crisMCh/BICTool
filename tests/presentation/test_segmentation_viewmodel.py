@@ -79,3 +79,45 @@ def test_volume_job_reports_progress_and_ends_cleanly():
 
     assert vm.cache[2] == "mask" and events["segmented"] == [2]
     assert events["status"][-1] == "Cancelled (1/3 segmented)" and vm.active_volume_worker is None
+
+
+def test_the_segmentation_check_runs_in_the_background_is_kept_with_the_primary_series_and_dropped_on_reset():
+    import numpy as np
+
+    from bictool.domain.segmentation.segmentation_plausibility import SegmentationPlausibility
+
+    submitted = []
+    volume = SimpleNamespace(num_slices=1, slice_paths=[], pixel_spacing_mm=0.5, get_slice_hu=lambda i: np.zeros((8, 8)))
+    vm = SegmentationViewModel(submitted.append, {}, lambda: volume, MAPPING)
+    changed = []
+    vm.plausibility_changed.connect(lambda: changed.append(True))
+    vm.cache[0] = SimpleNamespace(masks={"Brain Parenchyma": np.ones((8, 8), bool)}, confidence=None)
+
+    vm.assess_plausibility()
+
+    assert len(submitted) == 1 and vm.plausibility is None and vm.plausibility_line() == ""  # background job
+    fragmented = SegmentationPlausibility(fragmentation=38.0, slices=20, worst_slices=(3,), lobe_islands=0)
+    vm._on_plausibility_finished(fragmented)
+    assert vm.plausibility is fragmented and changed == [True]
+    assert vm.plausibility_line() == "Segmentation may be unreliable in this study - check the overlays."
+
+    vm.backup_primary()
+    vm.reset()
+    assert vm.plausibility is None and vm.plausibility_line() == ""
+    assert vm.restore_primary() and vm.plausibility is fragmented
+
+
+def test_a_late_check_result_of_a_dropped_series_never_lands():
+    import numpy as np
+
+    submitted = []
+    volume = SimpleNamespace(num_slices=1, slice_paths=[], pixel_spacing_mm=0.5, get_slice_hu=lambda i: np.zeros((8, 8)))
+    vm = SegmentationViewModel(submitted.append, {}, lambda: volume, MAPPING)
+    vm.cache[0] = SimpleNamespace(masks={"Brain Parenchyma": np.ones((8, 8), bool)}, confidence=None)
+    vm.assess_plausibility()
+    worker = submitted[0]
+
+    vm.reset()
+    worker.run()  # finishes after the reset
+
+    assert vm.plausibility is None

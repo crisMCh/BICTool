@@ -46,7 +46,7 @@ def test_every_segmented_slice_gets_rois_and_qa_per_structure(monkeypatch):
     monkeypatch.setattr(
         volume_qa,
         "evaluate_slice_quality",
-        lambda img1, img2, pix, svm_model=None, mtf_seeds=None, recipe=None: evaluated.append((img1.shape, img2.shape, mtf_seeds, recipe)) or "result",
+        lambda img1, img2, pix, svm_model=None, mtf_seeds=None, recipe=None, mtf_structure=None: evaluated.append((img1.shape, img2.shape, mtf_seeds, recipe, mtf_structure)) or "result",
     )
     masks_by_slice = {0: _septum_slice(), 2: _septum_slice()}
     calls = []
@@ -62,12 +62,13 @@ def test_every_segmented_slice_gets_rois_and_qa_per_structure(monkeypatch):
     assert evaluated[0][0] == (roi1.size, roi1.size)
     assert evaluated[0][2]  # MTF seeds passed through
     assert evaluated[0][3] == "physical"  # default QA recipe forwarded
+    assert evaluated[0][4].shape == (roi1.size, roi1.size) and evaluated[0][4].any()  # ROI1's structure for the MTF check
     assert out[DURAL_FOLDS].results == {}  # no dural folds in these slices
     assert len(calls) == 2  # tissue classified at most once per slice
 
 
 def test_a_failing_slice_is_recorded_and_the_rest_continue(monkeypatch):
-    def evaluate(img1, img2, pix, svm_model=None, mtf_seeds=None, recipe=None):
+    def evaluate(img1, img2, pix, svm_model=None, mtf_seeds=None, recipe=None, mtf_structure=None):
         if not evaluate.failed:
             evaluate.failed = True
             raise ValueError("No edge columns survived bump removal")

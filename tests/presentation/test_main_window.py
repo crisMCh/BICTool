@@ -307,9 +307,10 @@ def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
 
     def fake_evaluate(
         img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, svm_model, mtf_seeds=None, recipe=None,
-        keep_steps=False,
+        keep_steps=False, mtf_structure=None,
     ):
         captured["seeds"] = mtf_seeds
+        captured["structure"] = mtf_structure
         return _fake_result()
 
     monkeypatch.setattr(worker_module, "evaluate_slice_quality", fake_evaluate)
@@ -325,6 +326,7 @@ def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
 
     first_x, _first_y = captured["seeds"][0]
     assert first_x == 12
+    assert captured["structure"] is None  # manual ROI on an unsegmented slice: no structure check
 
 
 def test_roi_selection_and_run_all_are_logged_to_the_trace_panel(monkeypatch):

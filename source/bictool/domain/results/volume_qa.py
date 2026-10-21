@@ -69,6 +69,10 @@ class VolumeQa:
     artefact_flags: object | None = None
     # Basal-ganglia visibility per slice (`domain.metrics.basal_ganglia`, provisional).
     basal_ganglia: dict | None = None
+    # CNN confidence per slice (`segmentation_confidence.SegmentationConfidence`); {} for old caches.
+    segmentation_confidence: dict = field(default_factory=dict)
+    # Study-level segmentation check (`segmentation_plausibility`, provisional).
+    segmentation_plausibility: object | None = None
     error: str | None = None
 
 
@@ -123,10 +127,12 @@ def evaluate_volume_qa(
             img_roi1 = image[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
             img_roi2 = image[roi2.row0 : roi2.row1, roi2.col0 : roi2.col1]
             hint = np.logical_or.reduce([masks[name] for name in STRUCTURES if name in masks])
-            seeds = mtf_seed_candidates(img_roi1, hint[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1])
+            structure_crop = hint[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
+            seeds = mtf_seed_candidates(img_roi1, structure_crop)
             try:
                 qa.results[index] = evaluate_slice_quality(
-                    img_roi1, img_roi2, pixel_spacing_mm, svm_model=svm_model, mtf_seeds=seeds, recipe=recipe
+                    img_roi1, img_roi2, pixel_spacing_mm, svm_model=svm_model, mtf_seeds=seeds, recipe=recipe,
+                    mtf_structure=structure_crop,
                 )
             except Exception as exc:  # one bad slice must not stop the volume
                 logger.info("QA failed on slice %d (%s): %s", index + 1, structure, exc)

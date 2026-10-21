@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 import bictool.domain.metrics.mtf_seed as mtf_seed
-from bictool.domain.metrics.mtf_seed import calc_mtf_first_viable_seed, mtf_seed_candidates
+from types import SimpleNamespace
+
+from bictool.domain.metrics.mtf_seed import (
+    calc_mtf_first_viable_seed,
+    calc_mtf_steps_first_viable_seed,
+    mtf_seed_candidates,
+    region_on_structure,
+)
 
 
 def _vertical_line_roi(size=26, col=14, width=3, background=30.0, line=80.0):
@@ -57,7 +64,7 @@ def test_seeds_stay_inside_calc_mtfs_valid_range():
 
 
 def test_first_viable_seed_retries_and_reports_the_seed_used(monkeypatch):
-    def fake_calc_mtf(img_roi, x, y, pix_spc):
+    def fake_calc_mtf(img_roi, x, y, pix_spc, **_kwargs):
         if x < 5:
             raise ValueError("No edge columns survived bump removal")
         return "xaxis", "mtf", "area"
@@ -68,7 +75,7 @@ def test_first_viable_seed_retries_and_reports_the_seed_used(monkeypatch):
 
 
 def test_first_viable_seed_raises_the_last_error_when_every_seed_fails(monkeypatch):
-    def fake_calc_mtf(img_roi, x, y, pix_spc):
+    def fake_calc_mtf(img_roi, x, y, pix_spc, **_kwargs):
         raise ValueError(f"failed at {x}")
 
     monkeypatch.setattr(mtf_seed, "calc_mtf", fake_calc_mtf)
@@ -85,3 +92,48 @@ def test_real_calc_mtf_finds_edges_from_a_centerline_seed():
 
     assert mtf.shape[1] > 0
     assert seed[0] == 13
+
+
+def _upsampled(mask):
+    """A region on calc_mtf's 4x grid (4(n-1)+1 points) covering the original pixels of `mask`."""
+    n = mask.shape[0]
+    return np.kron(mask, np.ones((4, 4), bool))[2:2 + 4 * (n - 1) + 1, 2:2 + 4 * (n - 1) + 1]
+
+
+def test_region_on_structure_compares_on_the_upsampled_grid():
+    line = np.zeros((20, 20), bool)
+    line[:, 9:11] = True
+    beside = np.zeros((20, 20), bool)
+    beside[:, 2:6] = True
+
+    assert region_on_structure(_upsampled(line), line) == pytest.approx(1.0)
+    assert region_on_structure(_upsampled(beside), line) == 0.0
+    # a thin region along the line (one upsampled point wide) is still counted
+    thin = np.zeros((77, 77), bool)
+    thin[:, 39] = True
+    assert region_on_structure(thin, line) == pytest.approx(1.0)
+
+
+def test_a_seed_whose_region_is_beside_the_structure_is_rejected(monkeypatch):
+    line = np.zeros((20, 20), bool)
+    line[:, 9:11] = True
+    beside = np.zeros((20, 20), bool)
+    beside[:, 2:6] = True
+
+    def fake_steps(img_roi, x, y, pix_spc, **_kwargs):  # the seed beside the line grows a region beside it
+        region = beside if x < 8 else line
+        return "xaxis", "mtf", "area", SimpleNamespace(segmentation=_upsampled(region))
+
+    monkeypatch.setattr(mtf_seed, "calc_mtf_with_steps", fake_steps)
+
+    result = calc_mtf_first_viable_seed(None, [(4, 4), (10, 10)], 0.5, structure_mask=line)
+    assert result == ("xaxis", "mtf", "area", (10, 10))
+    with pytest.raises(ValueError, match="not on the structure"):
+        calc_mtf_first_viable_seed(None, [(4, 4)], 0.5, structure_mask=line)
+
+
+def test_without_a_known_structure_any_viable_seed_counts(monkeypatch):
+    monkeypatch.setattr(mtf_seed, "calc_mtf", lambda img, x, y, px, **_k: ("xaxis", "mtf", "area"))
+
+    assert calc_mtf_first_viable_seed(None, [(4, 4)], 0.5, structure_mask=np.zeros((20, 20), bool))[3] == (4, 4)
+    assert calc_mtf_steps_first_viable_seed(None, [(4, 4)], 0.5, None, keep_steps=False)[4] is None
