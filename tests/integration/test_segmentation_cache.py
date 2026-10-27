@@ -4,7 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from bictool.integration.segmentation_cache import cache_path, load_segmentation, save_segmentation
+from bictool.domain.segmentation.segmentation_confidence import SegmentationConfidence
+from bictool.integration.segmentation_cache import cache_path, load_confidence, load_segmentation, save_segmentation
 
 
 def test_segmentation_cache_round_trips_exclusive_masks(tmp_path):
@@ -29,3 +30,15 @@ def test_cache_path_differs_per_series():
 
     assert a != b
     assert a.parent == Path("c") and a.suffix == ".npz"
+
+
+def test_the_cnn_confidence_is_stored_and_old_caches_have_none(tmp_path):
+    masks = {0: {"A": np.ones((4, 5), dtype=bool)}, 1: {"A": np.zeros((4, 5), dtype=bool)}}
+    confidence = {0: SegmentationConfidence(0.12, 0.05, 20), 1: SegmentationConfidence(0.4, 0.3, 0)}
+
+    save_segmentation(tmp_path / "new.npz", masks, confidence)
+    save_segmentation(tmp_path / "old.npz", masks)
+
+    assert load_confidence(tmp_path / "new.npz") == confidence
+    assert load_confidence(tmp_path / "old.npz") == {}
+    assert sorted(load_segmentation(tmp_path / "new.npz")) == [0, 1]

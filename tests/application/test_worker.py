@@ -103,3 +103,13 @@ def test_run_passes_the_shipped_svm_unless_one_is_given(monkeypatch):
 
     assert received_kwargs[0]["svm_model"] is default_chest_svm_model()
     assert received_kwargs[1]["svm_model"] is own_model
+
+
+def test_run_keeps_the_intermediate_steps_only_when_asked(monkeypatch):
+    seen = []
+    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: seen.append(k["keep_steps"]))
+
+    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC).run()
+    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, keep_steps=True).run()
+
+    assert seen == [False, True]

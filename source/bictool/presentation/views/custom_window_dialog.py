@@ -6,8 +6,9 @@ value pair directly, rather than only picking from
 from __future__ import annotations
 
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QVBoxLayout
+from bictool.presentation.views.text_scale import px
 
-# Same palette as `main_window.STYLESHEET` - duplicated rather than imported
+# Same palette as `main_window.stylesheet()` - duplicated rather than imported
 # to avoid a circular import, matching `export_dialog.py`'s own precedent.
 BG = "#11151a"
 SURFACE_RAISED = "#20262d"
@@ -16,8 +17,10 @@ TEXT = "#e7eaed"
 TEXT_MUTED = "#8d96a0"
 ACCENT = "#49c8de"
 
-_STYLESHEET = f"""
-QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def _stylesheet() -> str:
+    return f"""
+QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLabel {{ color: {TEXT}; }}
 QDoubleSpinBox {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
@@ -42,7 +45,7 @@ class CustomWindowDialog(QDialog):
     def __init__(self, current_width: float, current_center: float, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Custom Window")
-        self.setStyleSheet(_STYLESHEET)
+        self.setStyleSheet(_stylesheet())
         self.setMinimumWidth(280)
 
         layout = QVBoxLayout(self)

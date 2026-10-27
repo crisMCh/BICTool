@@ -29,7 +29,7 @@ def _improfile_nearest(img, x0, y0, x1, y1, n_points):
     return img[row, col].astype(np.float64)
 
 
-def line_profile(myimg, x_edge, y_edge, gdir, vec_len, lp_points, imgxsize, imgysize):
+def line_profile(myimg, x_edge, y_edge, gdir, vec_len, lp_points, imgxsize, imgysize, lines=None):
     """Port of `funcLineProfileNew(myimg,x,y,Gdir,vecLen,LPpoints,imgxsize,imgysize,...)`.
 
     `x_edge`, `y_edge` are 1-based pixel coordinates (as produced by the
@@ -40,6 +40,10 @@ def line_profile(myimg, x_edge, y_edge, gdir, vec_len, lp_points, imgxsize, imgy
     -------
     ESF : 2D float64 array, shape (lp_points, n_used_edges) - one column
         per edge pixel that passed the boundary-margin check.
+
+    `lines`, if given, receives one `(k, x0, y0, x1, y1)` per column: the
+    edge's index into `x_edge` and the sampled line's 1-based end points
+    (for display only - the numbers are unaffected).
     """
     columns = []
 
@@ -64,6 +68,8 @@ def line_profile(myimg, x_edge, y_edge, gdir, vec_len, lp_points, imgxsize, imgy
         vec_end_y = oround(y + (-1 * vec_len * gradvecy))
 
         lp_tmp = _improfile_nearest(myimg, vec_start_x, vec_start_y, vec_end_x, vec_end_y, lp_points)
+        if lines is not None:
+            lines.append((k, float(vec_start_x), float(vec_start_y), float(vec_end_x), float(vec_end_y)))
 
         lp_len = len(lp_tmp)
         first_quarter = lp_tmp[: int(oround(0.25 * lp_len))]

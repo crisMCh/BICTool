@@ -65,6 +65,8 @@ guaranteed to have real content to discriminate against.
 
 from __future__ import annotations
 
+import dataclasses
+
 import logging
 from dataclasses import dataclass
 
@@ -171,7 +173,10 @@ class DicomNiftiVolume:
         object with a `.masks` dict", matching `viewmodels.segmentation_
         overlay.decode_masks_for_checkboxes`'s own type-agnostic contract.
         """
-        return type(result)(masks={name: self.map_mask_to_dicom_space(mask) for name, mask in result.masks.items()})
+        masks = {name: self.map_mask_to_dicom_space(mask) for name, mask in result.masks.items()}
+        if dataclasses.is_dataclass(result):  # keeps the other fields (e.g. the CNN confidence)
+            return dataclasses.replace(result, masks=masks)
+        return type(result)(masks=masks)
 
     def rekeyed(self, dicom_index_to_alignment_key: dict[int, int]) -> "DicomNiftiVolume":
         """Returns a new `DicomNiftiVolume` with every entry re-keyed

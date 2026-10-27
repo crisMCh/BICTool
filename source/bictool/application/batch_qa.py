@@ -27,17 +27,27 @@ from pathlib import Path
 
 import numpy as np
 
-from bictool.domain.results.head_ct_verdict import evaluate_study_results
+from bictool.domain.artefacts.artefact_flags import evaluate_artefact_flags
+from bictool.domain.metrics.basal_ganglia import evaluate_basal_ganglia
+from bictool.domain.results.head_ct_verdict import apply_metal_rule, evaluate_study_results
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL, RECIPES
 from bictool.domain.results.volume_qa import VolumeQa, evaluate_volume_qa
-from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_PLAUSIBLE_RANGE,
+    DEFAULT_SMOOTHING_MM,
+    classify_brain_tissue_adaptive,
+)
+from bictool.domain.segmentation.brain_tissue_anchored import classify_brain_tissue_anchored, fit_anchored_model
+from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.segmentation.segmentation_plausibility import assess_plausibility
+from bictool.domain.segmentation.tissue_references import estimate_tissue_references
 from bictool.infrastructure.config import load_config
 from bictool.integration.dicom_file_loader import load_dicom_volume
 from bictool.integration.dicom_to_nifti import build_dicom_nifti_volume
 from bictool.domain.roi_selection.structured_roi import DURAL_FOLDS, SEPTUM_PELLUCIDUM
 from bictool.integration.model_files import default_chest_svm_model, default_head_ct_model, load_anatomy_weights
 from bictool.integration.results_export import export_dataset_csv, export_dataset_excel
-from bictool.integration.segmentation_cache import cache_path, load_segmentation, save_segmentation
+from bictool.integration.segmentation_cache import cache_path, load_confidence, load_segmentation, save_segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +64,45 @@ def find_studies(dataset_dir: Path) -> list[Path]:
     return sorted(entry for entry in entries if entry.is_dir())
 
 
-def _segment_volume(volume, get_model: Callable[[], object]) -> dict[int, dict[str, np.ndarray]]:
+def _segment_volume(volume, get_model: Callable[[], object]):
     """The GUI's Segment Volume, synchronously: NIfTI detour, U-Net per slice,
-    masks mapped back to DICOM pixel space."""
+    masks mapped back to DICOM pixel space. Returns (masks by slice, CNN confidence by slice)."""
     from bictool.domain.segmentation.head_ct_unet import segment_slice
 
     nifti = build_dicom_nifti_volume(volume.slice_paths, volume.get_slice_hu)
-    masks_by_slice = {}
+    masks_by_slice, confidence_by_slice = {}, {}
     for index in range(volume.num_slices):
         if not nifti.is_segmentable(index):
             continue
         result = nifti.remap_result_to_dicom_space(segment_slice(get_model(), nifti.get_nifti_slice_hu(index)))
         masks_by_slice[index] = result.masks
-    return masks_by_slice
+        if result.confidence is not None:
+            confidence_by_slice[index] = result.confidence
+    return masks_by_slice, confidence_by_slice
+
+
+TISSUE_ADAPTIVE, TISSUE_ANCHORED = "adaptive", "anchored"
+TISSUE_METHODS = (TISSUE_ADAPTIVE, TISSUE_ANCHORED)
+
+
+def _tissue_classifier(masks_by_slice, volume, method=TISSUE_ADAPTIVE):
+    """WM/GM method for ROI2 placement: the app's Adaptive default (1 mm
+    smoothing, the study's own tissue range - fixed range until the basal
+    ganglia exist), or the anchored prototype (Adaptive where it has no model)."""
+    references = estimate_tissue_references(masks_by_slice, volume.get_slice_hu)
+    plausible = references.plausible_range() if references is not None else DEFAULT_PLAUSIBLE_RANGE
+    sigma = DEFAULT_SMOOTHING_MM / volume.pixel_spacing_mm
+    model = None
+    if method == TISSUE_ANCHORED and references is not None:
+        brains = brain_mask_from_segmentation(masks_by_slice, volume.num_slices)
+        model = fit_anchored_model(masks_by_slice, volume.get_slice_hu, brains, volume.pixel_spacing_mm, references)
+
+    def classify(slice_hu, brain_mask, slice_index=None):
+        if model is not None and slice_index is not None:
+            return classify_brain_tissue_anchored(slice_hu, brain_mask, model, slice_index)
+        return classify_brain_tissue_adaptive(slice_hu, brain_mask, plausible_range=plausible, smoothing_sigma_px=sigma)
+
+    return classify
 
 
 def run_study(
@@ -75,6 +111,7 @@ def run_study(
     get_model: Callable[[], object],
     cache_dir: Path,
     recipe: str = DEFAULT_RECIPE,
+    tissue_method: str = TISSUE_ADAPTIVE,
 ) -> VolumeQa:
     """One study end to end; any failure is recorded on the returned `VolumeQa`."""
     qa = VolumeQa(group=group, name=study_dir.name)
@@ -87,26 +124,35 @@ def run_study(
 
         cache = cache_path(cache_dir, group, study_dir.name, volume.slice_paths)
         if cache.is_file():
-            masks_by_slice = load_segmentation(cache)
+            masks_by_slice, confidence_by_slice = load_segmentation(cache), load_confidence(cache)
         else:
-            masks_by_slice = _segment_volume(volume, get_model)
-            save_segmentation(cache, masks_by_slice)
+            masks_by_slice, confidence_by_slice = _segment_volume(volume, get_model)
+            save_segmentation(cache, masks_by_slice, confidence_by_slice)
+        qa.segmentation_confidence = confidence_by_slice
         qa.segmented_slices = len(masks_by_slice)
+        qa.artefact_flags = evaluate_artefact_flags(
+            masks_by_slice, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm
+        )
+        qa.basal_ganglia = evaluate_basal_ganglia(masks_by_slice, volume.get_slice_hu)
+        qa.segmentation_plausibility = assess_plausibility(masks_by_slice, volume.pixel_spacing_mm)
 
         qa.structures = evaluate_volume_qa(
             masks_by_slice,
             volume.get_slice_hu,
             volume.num_slices,
             volume.pixel_spacing_mm,
-            classify_brain_tissue_adaptive,
+            _tissue_classifier(masks_by_slice, volume, tissue_method),
             recipe=recipe,
             svm_model=default_chest_svm_model(),
         )
         if recipe == RECIPE_PHYSICAL:
             # The study verdict comes from the falx; the septum only feeds the plausibility check.
             falx, septum = qa.structures.get(DURAL_FOLDS), qa.structures.get(SEPTUM_PELLUCIDUM)
-            qa.head_ct_verdict = evaluate_study_results(
-                default_head_ct_model(), falx.results if falx else {}, septum.results if septum else None
+            qa.head_ct_verdict = apply_metal_rule(
+                evaluate_study_results(
+                    default_head_ct_model(), falx.results if falx else {}, septum.results if septum else None
+                ),
+                qa.artefact_flags.metal_streak_slices,
             )
     except Exception as exc:  # one broken study must not stop the dataset
         logger.exception("Study %s / %s failed", group, study_dir.name)
@@ -120,6 +166,7 @@ def run_batch(
     weights_path: str | None = None,
     exclude: list[str] | None = None,
     recipe: str = DEFAULT_RECIPE,
+    tissue_method: str = TISSUE_ADAPTIVE,
 ) -> list[VolumeQa]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +193,7 @@ def run_batch(
                 continue
             start = time.time()
             logger.info("=== %s / %s", group, study_dir.name)
-            qa = run_study(study_dir, group, get_model, out_dir / "cache", recipe)
+            qa = run_study(study_dir, group, get_model, out_dir / "cache", recipe, tissue_method)
             volumes.append(qa)
             logger.info("    done in %.0f s%s", time.time() - start, f" - ERROR {qa.error}" if qa.error else "")
 
@@ -169,9 +216,15 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_RECIPE,
         help="QA recipe: physical (default) or the legacy Octave one (docs/qa_method/physical_qa_recipe.md)",
     )
+    parser.add_argument(
+        "--tissue",
+        choices=TISSUE_METHODS,
+        default=TISSUE_ADAPTIVE,
+        help="WM/GM method for the white-matter ROI2: adaptive (app default) or anchored (prototype)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe)
+    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe, args.tissue)
 
 
 if __name__ == "__main__":

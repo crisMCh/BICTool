@@ -84,6 +84,7 @@ Reading: 10 training studies per fold. Where an interval contains 0.5 the verdic
 * Only soft-tissue head kernels; scope of the physical recipe.
 * The artefact indicator rests on 2 artefact studies; the test set has none.
 * Dose was not used (decision D2).
+* The model does not see metal streaks well (ROI2 avoids them). In the app a rule outside the model sets the verdict to Not assessable when metal streaks reach the brain (`head_ct_classifier.md` 6.6); the model's own result is kept in the details.
 
 ## 7. One-time test (locked test studies)
 

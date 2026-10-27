@@ -108,8 +108,9 @@ def test_evaluate_slice_quality_retries_mtf_seeds_until_one_finds_edges(monkeypa
 
     tried = []
 
-    def fake_calc_mtf(img_roi, x, y, pix_spc):
+    def fake_calc_mtf(img_roi, x, y, pix_spc, *, octave_step=False):
         tried.append((x, y))
+        assert not octave_step  # default (physical) recipe: the corrected active-contour step
         if (x, y) != (3, 4):
             raise ValueError("No edge columns survived bump removal")
         return np.array([0.0, 0.5, 1.0]), np.ones((3, 2)), np.array([0.3, 0.4])
@@ -175,3 +176,33 @@ def test_unknown_recipe_is_rejected():
 
     with pytest.raises(ValueError, match="Unknown QA recipe"):
         evaluate_slice_quality(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=SVM, recipe="matlab")
+
+
+def test_kept_steps_change_no_number_and_line_up_with_the_mtf_columns():
+    from bictool.domain.metrics.mtf import LP_POINTS
+    from bictool.domain.metrics.mtf_seed import mtf_seed_candidates
+
+    rng = np.random.default_rng(1)
+    roi1 = np.full((26, 26), 30.0)
+    roi1[:, 12:15] = 80.0
+    roi1 += rng.normal(0, 2, roi1.shape)
+    roi2 = 30.0 + rng.normal(0, 3, (26, 26))
+    seeds = mtf_seed_candidates(roi1)
+
+    plain = evaluate_slice_quality(roi1, roi2, 0.44, svm_model=SVM, mtf_seeds=seeds)
+    full = evaluate_slice_quality(roi1, roi2, 0.44, svm_model=SVM, mtf_seeds=seeds, keep_steps=True)
+
+    assert plain.steps is None
+    np.testing.assert_array_equal(plain.feature_vector, full.feature_vector)
+    np.testing.assert_array_equal(plain.mtf, full.mtf)
+    steps = full.steps.mtf
+    n_edges = full.mtf.shape[1]
+    assert steps.esf.shape == (LP_POINTS, n_edges) and steps.lsf.shape == (LP_POINTS - 1, n_edges)
+    assert steps.kept.shape == (n_edges,) and steps.kept.max() < steps.esf_raw.shape[1]
+    assert len(steps.profile_edges) == steps.esf_raw.shape[1] == len(steps.profile_lines)
+    assert steps.image.shape == ((26 - 1) * steps.upsample + 1,) * 2  # 26 px, 4x upsampled
+    assert steps.segmentation.shape == steps.image.shape and steps.segmentation.any()
+    # every detected edge pixel lies on the boundary of the segmentation
+    rows, cols = steps.edge_points.T
+    assert (rows < steps.image.shape[0]).all() and (cols < steps.image.shape[1]).all()
+    np.testing.assert_array_equal(full.steps.roi1, roi1)

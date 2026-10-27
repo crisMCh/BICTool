@@ -13,7 +13,7 @@ from bictool.domain.preprocessing._pixel_ops import bwdist
 _EPS = np.finfo(np.float64).eps
 
 
-def region_seg(image, init_mask, max_its, alpha=0.2):
+def region_seg(image, init_mask, max_its, alpha=0.2, *, octave_step=False):
     """Port of `funcRegionSeg(I, init_mask, max_its, alpha)`.
 
     Parameters
@@ -23,6 +23,14 @@ def region_seg(image, init_mask, max_its, alpha=0.2):
     max_its : number of iterations (no automatic convergence test, matching
         the Octave original)
     alpha : weight of the curvature (smoothing) term
+
+    octave_step : reproduce the original step size `dt = 0.45 / max(dphidt)`
+        (Octave / Lankton). It turns negative when every point of the narrow
+        band wants to join the region - a seed fully inside a bright line -
+        and the update then runs backwards: the region shrinks to nothing.
+        Default (False): the usual CFL step `dt = 0.45 / max(|dphidt|)`
+        (bug fix 2026-10-20, docs/qa_method/physical_qa_recipe.md 5.1);
+        the legacy "octave" QA recipe passes True.
 
     Returns
     -------
@@ -49,7 +57,7 @@ def region_seg(image, init_mask, max_its, alpha=0.2):
         curvature = _get_curvature(phi, idx)
 
         dphidt = F / np.max(np.abs(F)) + alpha * curvature
-        dt = 0.45 / (np.max(dphidt) + _EPS)
+        dt = 0.45 / ((np.max(dphidt) if octave_step else np.max(np.abs(dphidt))) + _EPS)
 
         phi_flat = phi.ravel().copy()
         phi_flat[idx] = phi_flat[idx] + dt * dphidt

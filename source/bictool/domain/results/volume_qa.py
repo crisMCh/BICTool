@@ -29,7 +29,9 @@ from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_
 logger = logging.getLogger(__name__)
 
 # (slice_hu, brain_mask) -> object with `.masks` ("White Matter"/"Gray Matter"/...)
-TissueClassifier = Callable[[np.ndarray, np.ndarray], object]
+# (slice_hu, brain_mask, slice_index) -> object with `.masks` (the index matters to
+# methods with a per-series model, e.g. `brain_tissue_anchored`)
+TissueClassifier = Callable[[np.ndarray, np.ndarray, int], object]
 
 
 @dataclass
@@ -63,6 +65,14 @@ class VolumeQa:
     # Study-level head-CT verdict (physical recipe; `head_ct_verdict`), from
     # the dural-folds (falx) results - None for the legacy recipe or too few slices.
     head_ct_verdict: object | None = None
+    # Possible-artefact hints (`domain.artefacts.artefact_flags.ArtefactFlags`).
+    artefact_flags: object | None = None
+    # Basal-ganglia visibility per slice (`domain.metrics.basal_ganglia`, provisional).
+    basal_ganglia: dict | None = None
+    # CNN confidence per slice (`segmentation_confidence.SegmentationConfidence`); {} for old caches.
+    segmentation_confidence: dict = field(default_factory=dict)
+    # Study-level segmentation check (`segmentation_plausibility`, provisional).
+    segmentation_plausibility: object | None = None
     error: str | None = None
 
 
@@ -93,7 +103,7 @@ def evaluate_volume_qa(
             brain = brain_masks.get(index)
             if brain is None:
                 brain = np.zeros(images[index].shape, dtype=bool)
-            tissue_cache[index] = tissue_classify(images[index], brain).masks
+            tissue_cache[index] = tissue_classify(images[index], brain, index).masks
         return tissue_cache[index]
 
     eligible = eligible_slices(masks_by_slice)
@@ -117,10 +127,12 @@ def evaluate_volume_qa(
             img_roi1 = image[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
             img_roi2 = image[roi2.row0 : roi2.row1, roi2.col0 : roi2.col1]
             hint = np.logical_or.reduce([masks[name] for name in STRUCTURES if name in masks])
-            seeds = mtf_seed_candidates(img_roi1, hint[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1])
+            structure_crop = hint[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
+            seeds = mtf_seed_candidates(img_roi1, structure_crop)
             try:
                 qa.results[index] = evaluate_slice_quality(
-                    img_roi1, img_roi2, pixel_spacing_mm, svm_model=svm_model, mtf_seeds=seeds, recipe=recipe
+                    img_roi1, img_roi2, pixel_spacing_mm, svm_model=svm_model, mtf_seeds=seeds, recipe=recipe,
+                    mtf_structure=structure_crop,
                 )
             except Exception as exc:  # one bad slice must not stop the volume
                 logger.info("QA failed on slice %d (%s): %s", index + 1, structure, exc)

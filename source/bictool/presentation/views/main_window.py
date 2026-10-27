@@ -4,6 +4,11 @@ Structural port of `design/bictool_console_mockup.html`'s single fixed window:
 a menu bar, a large viewer/results pane on the left, and a sidebar (Series /
 Segmentation + ROI Selection / Run Metrics) on the right.
 
+MVVM: the window holds no application state. `self.view_model`
+(`viewmodels.main_viewmodel.MainViewModel`) owns one ViewModel per area and
+the workflow between them; the window builds the widgets, binds them to the
+ViewModels' signals, renders and forwards user input as commands.
+
 Wired to real functionality for a first end-to-end test:
 - **DICOM import**: File > Open DICOM Folder... recursively finds every
   series/stack under a local folder (see `integration.dicom_file_loader`'s
@@ -60,10 +65,10 @@ Wired to real functionality for a first end-to-end test:
   can't be interrupted) - a few minutes for a full multi-hundred-slice
   study at this per-slice cost, not blocking, so it still runs as a
   background job with progress/cancel rather than a modal wait.
-  `_maybe_auto_segment_volume` auto-starts this same "Segment Volume" batch,
+  The MainViewModel auto-starts this same "Segment Volume" batch,
   with no user action at all, the moment the study's primary series (the
   one `discover_series` auto-selects and loads by default - see
-  `_load_selected_series`) finishes loading, if anatomy weights are
+  `StudyViewModel.select_series`) finishes loading, if anatomy weights are
   configured - per explicit request, since that primary series is normally
   the one the user actually wants segmented. Any other series the user
   picks from the "Series" dropdown still only segments on an explicit
@@ -75,7 +80,7 @@ Wired to real functionality for a first end-to-end test:
   sidebar so a long checkbox list doesn't crowd it - showing exactly the
   16 raw structures the model produces (see `_SEGMENTATION_MAPPING`; no
   WP2-specific renaming/combining, no Brainstem placeholder, per explicit
-  request). The selection itself (`_selected_segmentation_names`) is a
+  request). The selection itself (`SegmentationViewModel.selected_names`) is a
   whole-volume-scoped choice, not a per-slice one - it survives slice
   navigation (re-applied from that slice's cached result, if segmented)
   and is only cleared on close study/
@@ -125,6 +130,7 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QActionGroup, QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
     QScrollArea,
+    QStackedWidget,
     QSplitter,
     QApplication,
     QCheckBox,
@@ -186,6 +192,12 @@ from bictool.domain.segmentation.brain_tissue_adaptive import (
 from bictool.domain.segmentation.brain_tissue_adaptive import (
     DEFAULT_MIN_COMPONENT_SIZE as ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
 )
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_SMOOTHING_MM as ADAPTIVE_DEFAULT_SMOOTHING_MM,
+)
+from bictool.domain.segmentation.brain_tissue_adaptive import (
+    DEFAULT_USE_STUDY_RANGE as ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
+)
 from bictool.domain.segmentation.brain_tissue_fcm import (
     DEFAULT_FUZZINESS,
     DEFAULT_MAX_ITER,
@@ -216,6 +228,7 @@ from bictool.presentation.viewmodels.head_ct_verdict_text import (
     TONE_GOOD,
     TONE_NEUTRAL,
 )
+from bictool.presentation.viewmodels.main_viewmodel import MainViewModel
 from bictool.presentation.viewmodels.help_text import STEP_HINTS, TAB_TOOLTIPS, TOOLTIPS
 from bictool.presentation.viewmodels.roi_pairs import (
     FALX,
@@ -232,20 +245,14 @@ from bictool.presentation.viewmodels.brain_tissue_viewmodel import (
     METHOD_FCM as _BRAIN_TISSUE_METHOD_FCM,
     METHOD_THRESHOLD as _BRAIN_TISSUE_METHOD_THRESHOLD,
     METHODS as _BRAIN_TISSUE_METHODS,
-    BrainTissueViewModel,
 )
-from bictool.presentation.viewmodels.export_viewmodel import ExportViewModel
-from bictool.presentation.viewmodels.qa_run_viewmodel import QaRunViewModel
-from bictool.presentation.viewmodels.results_viewmodel import ResultsViewModel
-from bictool.presentation.viewmodels.roi_viewmodel import RoiViewModel
-from bictool.presentation.viewmodels.segmentation_viewmodel import SegmentationViewModel
-from bictool.presentation.viewmodels.stroke_viewmodel import StrokeViewModel
-from bictool.presentation.viewmodels.study_viewmodel import StudyViewModel
 from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.viewmodels.segmentation_overlay import decode_masks_for_checkboxes
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS
+from bictool.presentation.views.app_icon import app_icon, register_windows_app_id
 from bictool.presentation.views.adaptive_settings_dialog import AdaptiveSettings, AdaptiveSettingsDialog
 from bictool.presentation.views.collapsible_section import CollapsibleSection
+from bictool.presentation.views.slice_steps_panel import SliceStepsPanel
 from bictool.presentation.views.status_bar import StatusPanel
 from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueSettings, BrainTissueSettingsDialog
 from bictool.presentation.views.custom_window_dialog import CustomWindowDialog
@@ -254,6 +261,8 @@ from bictool.presentation.views.fcm_settings_dialog import FcmSettings, FcmSetti
 from bictool.presentation.views.export_dialog import SCOPE_STUDY, ExportDialog
 from bictool.presentation.views.roi_viewport import RoiViewport
 from bictool.presentation.views.segmentation_selection_dialog import SegmentationSelectionDialog
+from bictool.presentation.views.text_scale import load_text_scale, px, save_text_scale, saved_text_scale, text_scale
+from bictool.presentation.views.text_size_dialog import TextSizeDialog
 
 if TYPE_CHECKING:
     # Type-hint-only - the real imports are deferred to first use inside
@@ -283,8 +292,10 @@ GOOD = "#5fbf83"
 CRITICAL = "#e0685c"
 WARNING = "#d9a441"
 
-STYLESHEET = f"""
-QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def stylesheet() -> str:
+    return f"""
+QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QMenuBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
 QMenuBar::item:selected {{ background: {SURFACE_RAISED}; }}
 QMenu {{ background: {SURFACE_RAISED}; border: 1px solid {BORDER}; }}
@@ -298,14 +309,14 @@ QGroupBox#subBox {{ margin-top: 12px; padding: 4px 6px 6px 6px; border-radius: 6
 QFrame#collapsibleSection {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; }}
 QToolButton#sectionHeader {{
     background: transparent; border: none; padding: 6px 6px; color: {TEXT};
-    font-weight: 700; font-size: 12px; text-align: left;
+    font-weight: 700; font-size: {px(12)}px; text-align: left;
 }}
 QToolButton#sectionHeader:hover {{ color: {ACCENT}; }}
 QStatusBar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
 QStatusBar::item {{ border: none; }}
 QStatusBar QProgressBar {{ background: {SURFACE_SUNKEN}; border: 1px solid {BORDER}; border-radius: 4px; }}
 QStatusBar QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
-QPushButton#statusCancelBtn {{ padding: 1px 8px; font-size: 11px; }}
+QPushButton#statusCancelBtn {{ padding: 1px 8px; font-size: {px(11)}px; }}
 QSplitter::handle {{ background: {BORDER}; }}
 QSplitter::handle:hover {{ background: {ACCENT}; }}
 QPushButton {{
@@ -454,6 +465,37 @@ _ROI_TABLE_COLORS = {
 }
 
 
+def _default_tissue_settings() -> tuple[BrainTissueSettings, FcmSettings, AdaptiveSettings]:
+    """The HU threshold, FCM and adaptive methods' default settings."""
+    threshold = BrainTissueSettings(
+        air_hu_cutoff=DEFAULT_AIR_HU_CUTOFF,
+        bone_hu_cutoff=DEFAULT_BONE_HU_CUTOFF,
+        csf_low=DEFAULT_CSF_RANGE[0],
+        csf_high=DEFAULT_CSF_RANGE[1],
+        white_matter_low=DEFAULT_WHITE_MATTER_RANGE[0],
+        white_matter_high=DEFAULT_WHITE_MATTER_RANGE[1],
+        gray_matter_low=DEFAULT_GRAY_MATTER_RANGE[0],
+        gray_matter_high=DEFAULT_GRAY_MATTER_RANGE[1],
+        smoothing_size=DEFAULT_SMOOTHING_SIZE,
+        min_component_size=DEFAULT_MIN_COMPONENT_SIZE,
+    )
+    fcm = FcmSettings(
+        fuzziness=DEFAULT_FUZZINESS,
+        max_iter=DEFAULT_MAX_ITER,
+        spatial_weight=DEFAULT_SPATIAL_WEIGHT,
+        min_component_size=FCM_DEFAULT_MIN_COMPONENT_SIZE,
+    )
+    adaptive = AdaptiveSettings(
+        block_size=DEFAULT_BLOCK_SIZE,
+        plausible_low=DEFAULT_PLAUSIBLE_RANGE[0],
+        plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
+        min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
+        smoothing_mm=ADAPTIVE_DEFAULT_SMOOTHING_MM,
+        use_study_range=ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
+    )
+    return threshold, fcm, adaptive
+
+
 class MainWindowView(QMainWindow):
     """Application shell: menu bar + viewer/results pane + sidebar."""
 
@@ -461,12 +503,27 @@ class MainWindowView(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("BICTool")
         self.resize(1180, 880)  # taller than before to fit the always-visible trace bar
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(stylesheet())
 
         self._scheduler = Scheduler()
-        # Which study/series is open and which slice is shown (MVVM: the
-        # window binds to it; `_loaded_volume` etc. below delegate to it).
-        self._study = StudyViewModel(self._scheduler.submit, self)
+        # The application state and workflow (MVVM): one ViewModel per area,
+        # owned by the MainViewModel; the window binds to them and renders.
+        self.view_model = MainViewModel(
+            self._scheduler.submit,
+            load_config(),
+            _SEGMENTATION_MAPPING,
+            default_head_ct_model,
+            _default_tissue_settings(),
+            self,
+        )
+        self._study = self.view_model.study
+        self._segmentation = self.view_model.segmentation
+        self._stroke = self.view_model.stroke
+        self._brain_tissue = self.view_model.brain_tissue
+        self._roi = self.view_model.roi
+        self._qa = self.view_model.qa
+        self._results = self.view_model.results
+        self._export = self.view_model.export
         # ROI pairs per slice (falx + septum, `viewmodels.roi_pairs`): automatic
         # ROIs, manual ones (saved drawings, moved ROIs - they win) and
         # deletions. `_roi_rects` is the displayed slice's effective ROIs.
@@ -476,130 +533,10 @@ class MainWindowView(QMainWindow):
         # rectangle's size while drawing (see `_on_cursor_moved`/
         # `_on_draft_changed`); empty when neither is happening.
         self._interaction_line: str = ""
-        # The most recently computed result (and the non-identifying context
-        # describing where it came from) - what Export Results (FR-07)
-        # actually writes out. `None` until Run All succeeds at least once.
-
-        # Segmentation (FR-02) and stroke detection - both wrap external
-        # pretrained models (see domain.segmentation's module docstring for
-        # what/why). Models are built+weight-loaded lazily on first use
-        # (not at startup) and reused across slices; results are cached per
-        # slice index for the lifetime of the loaded volume - a single
-        # inference call is now ~1-2s on CPU (see `_unet_architecture
-        # .build_unet`'s docstring for the ~157s-to-~1-2s XLA fix), so this
-        # is more about avoiding pointless recompute on repeated navigation
-        # than about tolerating an otherwise-unusable wait.
-        # The anatomy segmentation of the shown series (MVVM; `_segmentation_cache`
-        # etc. below delegate to it).
-        self._segmentation = SegmentationViewModel(
-            self._scheduler.submit, load_config(), lambda: self._loaded_volume, _SEGMENTATION_MAPPING, self
-        )
-        # Investigational stroke-lesion check (hidden feature; MVVM).
-        self._stroke = StrokeViewModel(
-            self._scheduler.submit, lambda: self._segmentation_config, lambda: self._loaded_volume, self
-        )
-        # Auto ROIs (ROI Selection box): the automatic ROIs live in
-        # `_roi_store`; derived from `_segmentation_cache` (and, for
-        # white-matter ROI2s, `_brain_tissue_cache`), so cleared along with
-        # it. Per pair and slice, which region each automatic ROI2 landed in
-        # (ventricle / white matter / fallback) - for the status line.
         self._has_hand_drawn_draft = False  # see `_on_draft_changed`
-        # HU-threshold-only white/gray matter classification (domain.
-        # segmentation.brain_tissue) - a separate, non-ML feature, so unlike
-        # anatomy/stroke there's no model to load and no config-gated
-        # enablement; the checkboxes just run this synchronously per slice
-        # (milliseconds, not the CNN's ~160s) and cache the result.
-        # Tunable via Tools → HU Thresholding Settings… (`_on_brain_tissue_settings_clicked`)
-        # - starts at brain_tissue.py's own defaults.
-        self._brain_tissue_default_settings = BrainTissueSettings(
-            air_hu_cutoff=DEFAULT_AIR_HU_CUTOFF,
-            bone_hu_cutoff=DEFAULT_BONE_HU_CUTOFF,
-            csf_low=DEFAULT_CSF_RANGE[0],
-            csf_high=DEFAULT_CSF_RANGE[1],
-            white_matter_low=DEFAULT_WHITE_MATTER_RANGE[0],
-            white_matter_high=DEFAULT_WHITE_MATTER_RANGE[1],
-            gray_matter_low=DEFAULT_GRAY_MATTER_RANGE[0],
-            gray_matter_high=DEFAULT_GRAY_MATTER_RANGE[1],
-            smoothing_size=DEFAULT_SMOOTHING_SIZE,
-            min_component_size=DEFAULT_MIN_COMPONENT_SIZE,
-        )
-        # Tunable via Tools → Fuzzy C-Means Settings…
-        self._fcm_default_settings = FcmSettings(
-            fuzziness=DEFAULT_FUZZINESS,
-            max_iter=DEFAULT_MAX_ITER,
-            spatial_weight=DEFAULT_SPATIAL_WEIGHT,
-            min_component_size=FCM_DEFAULT_MIN_COMPONENT_SIZE,
-        )
-        # Tunable via Tools → Adaptive Threshold Settings…
-        self._adaptive_default_settings = AdaptiveSettings(
-            block_size=DEFAULT_BLOCK_SIZE,
-            plausible_low=DEFAULT_PLAUSIBLE_RANGE[0],
-            plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
-            min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
-        )
-        # WM/GM separation: method, settings and per-slice results (MVVM;
-        # `_brain_tissue_cache` etc. below delegate to it).
-        self._brain_tissue = BrainTissueViewModel(
-            lambda: self._loaded_volume,
-            lambda: self._segmentation_cache,
-            self._brain_tissue_default_settings,
-            self._fcm_default_settings,
-            self._adaptive_default_settings,
-            self,
-        )
-        # The ROI pairs of every slice and their automatic placement (MVVM;
-        # `_roi_store` etc. below delegate to it).
-        self._roi = RoiViewModel(
-            self._scheduler.submit,
-            lambda: self._loaded_volume,
-            lambda: self._current_slice_index,
-            lambda: self._segmentation_cache,
-            lambda: self._brain_tissue_cache,
-            lambda: self._tissue_classifier(),
-            self,
-        )
-        # The QA run over the confirmed ROI pairs: recipe, job queue, results
-        # (MVVM; `_qa_results` etc. below delegate to it).
-        self._qa = QaRunViewModel(
-            self._scheduler.submit, lambda: self._loaded_volume, self._effective_rois, lambda: self._segmentation_cache, self
-        )
-        # What the Results page shows: slices with results, the shown pair,
-        # the study verdict and table (MVVM).
-        self._results = ResultsViewModel(self._qa, default_head_ct_model, self)
-        # Saving results - the shown slice or the whole study (MVVM).
-        self._export = ExportViewModel(self._qa, self._results, lambda: self._loaded_volume, self)
-        # Segmentation runs on a NIfTI conversion of the loaded DICOM series,
-        # not the raw DICOM pixel arrays directly - the model expects
-        # orientation-canonicalized input the way its own training/reference
-        # data was prepared (see domain.segmentation._nifti_alignment's
-        # module docstring for the empirical evidence). Built lazily, once per
-        # loaded study, on first segmentation request - not eagerly on every
-        # volume load, since many users may never segment at all, and QA/
-        # display never need it (they stay on DicomVolume throughout).
-        # Backup of the primary series' segmentation state (see
-        # `_on_volume_loaded`), so switching to another series and back
-        # restores rather than re-segmenting from scratch - explicitly
-        # scoped to the primary series only (2026-09-24 request), not every
-        # series visited, to avoid keeping every series' full NIfTI volume +
-        # per-slice masks resident in memory at once.
-        # Which structures the user wants overlaid - a whole-volume-scoped
-        # choice (per explicit request), not a per-slice one: surviving
-        # slice navigation is the point, and it's only cleared (back to
-        # "all selected", its default - see below) in `_reset_segmentation_
-        # display` (close study / new volume load). Lives here, not on the
-        # (optional, lazily-created) selection dialog, since it must
-        # persist even while that dialog is closed.
-        # Defaults to every structure selected (per explicit request) - the
-        # "Select Segments…" dialog is for narrowing down which ones show,
-        # not for opting in from nothing; `_show_segments_cb` ("Show
-        # Segments") is the separate, single switch for whether *any* of
-        # them are drawn at all.
+        # The "Select Segments…" dialog, created on first use (the structure
+        # choice and opacity live in the SegmentationViewModel).
         self._segment_selection_dialog: SegmentationSelectionDialog | None = None
-        # Overlay opacity (0.0-1.0), set from the "Select Segments…" dialog's
-        # vertical slider - applies to every currently-shown structure at
-        # once, not per-structure. Default matches `RoiViewport.set_overlay`'s
-        # own prior hardcoded default (0.6), so introducing the slider
-        # doesn't change anything until the user actually moves it.
 
         # Remembered view choices (trace log, ROI details, verdict details).
         self._ui_settings = UiSettings()
@@ -660,6 +597,7 @@ class MainWindowView(QMainWindow):
         self._log_handler.message_logged.connect(self._append_trace_line)
         configure_logging()
         self._set_trace_visible(self._ui_settings.get_bool(SHOW_TRACE_LOG))
+        self._bind_main_viewmodel()
         self._bind_study_viewmodel()
         self._bind_segmentation_viewmodel()
         self._brain_tissue.settings_changed.connect(self._on_brain_tissue_settings_changed)
@@ -669,40 +607,7 @@ class MainWindowView(QMainWindow):
         self._apply_help_tooltips()
         logger.info("BICTool window ready.")
 
-    # ---- StudyViewModel binding ----
-
-    # Delegating attributes: the study state lives in `self._study`.
-    _loaded_volume = property(lambda self: self._study.volume, lambda self, v: setattr(self._study, "volume", v))
-    _current_slice_index = property(
-        lambda self: self._study.current_slice, lambda self, v: setattr(self._study, "current_slice", v)
-    )
-    _series_candidates = property(
-        lambda self: self._study.series_candidates, lambda self, v: setattr(self._study, "series_candidates", v)
-    )
-    _current_series_is_primary = property(
-        lambda self: self._study.is_primary_series, lambda self, v: setattr(self._study, "is_primary_series", v)
-    )
-    _active_dicom_load_worker = property(lambda self: self._study.active_load_worker)
-
-    # Delegating attributes: the segmentation state lives in `self._segmentation`.
-    @staticmethod
-    def _seg_attr(name: str):
-        return property(
-            lambda self: getattr(self._segmentation, name), lambda self, v: setattr(self._segmentation, name, v)
-        )
-
-    _segmentation_config = _seg_attr("config")
-    _segmentation_cache = _seg_attr("cache")
-    _dicom_nifti_volume = _seg_attr("nifti_volume")
-    _anatomy_model = _seg_attr("anatomy_model")
-    _active_segmentation_worker = _seg_attr("active_slice_worker")
-    _active_volume_segmentation_worker = _seg_attr("active_volume_worker")
-    _active_nifti_conversion_worker = _seg_attr("active_nifti_worker")
-    _primary_series_segmentation_cache = _seg_attr("primary_cache")
-    _primary_series_dicom_nifti_volume = _seg_attr("primary_nifti_volume")
-    _segmentation_masks_for_current_slice = _seg_attr("current_masks")
-    _selected_segmentation_names = _seg_attr("selected_names")
-    _segmentation_opacity = _seg_attr("opacity")
+    # ---- ViewModel bindings ----
 
     def _bind_segmentation_viewmodel(self) -> None:
         seg = self._segmentation
@@ -710,8 +615,8 @@ class MainWindowView(QMainWindow):
         seg.status_detail_changed.connect(lambda detail: self._set_tip(self._segmentation_status_label, detail))
         seg.busy_changed.connect(self._on_segmentation_busy_changed)
         seg.cancel_available_changed.connect(self._cancel_segment_volume_btn.setVisible)
-        seg.slice_segmented.connect(self._on_slice_segmented)
         seg.message.connect(self._show_message)
+        seg.plausibility_changed.connect(self._refresh_plausibility_line)
 
     def _show_message(self, level: str, title: str, text: str) -> None:
         """A ViewModel's message as a dialog (ViewModels show no dialogs themselves)."""
@@ -723,75 +628,12 @@ class MainWindowView(QMainWindow):
         self._segment_volume_action.setEnabled(not busy)
 
     def _on_slice_segmented(self, index: int) -> None:
-        """A slice's segmentation landed (single slice, volume job or cache hit)."""
-        if index == self._current_slice_index:
-            self._apply_segmentation_masks(self._segmentation_cache[index])
-            # This slice now has real CNN data, which `_brain_mask_for_current_slice`
-            # prefers over the HU-threshold fallback - recompute its Brain Tissue
-            # result so "Brain Mask" is right immediately.
-            self._brain_tissue.invalidate(index)
+        """A slice's segmentation landed (single slice, volume job or cache hit);
+        the MainViewModel already dropped its stale WM/GM result."""
+        if index == self._study.current_slice:
+            self._apply_segmentation_masks(self._segmentation.cache[index])
             self._refresh_brain_tissue_for_current_slice()
-        self._on_auto_rois_segmentation_landed(index)
-
-    # Delegating attributes: the WM/GM state lives in `self._brain_tissue`.
-    _brain_tissue_cache = property(
-        lambda self: self._brain_tissue.cache, lambda self, v: setattr(self._brain_tissue, "cache", v)
-    )
-    _brain_tissue_method = property(
-        lambda self: self._brain_tissue.method, lambda self, v: setattr(self._brain_tissue, "method", v)
-    )
-
-    @staticmethod
-    def _tissue_settings_attr(method: str):
-        return property(
-            lambda self: self._brain_tissue.settings[method],
-            lambda self, v: self._brain_tissue.settings.__setitem__(method, v),
-        )
-
-    _brain_tissue_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_THRESHOLD)
-    _fcm_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_FCM)
-    _adaptive_settings = _tissue_settings_attr(_BRAIN_TISSUE_METHOD_ADAPTIVE)
-
-    # Delegating attributes: the ROI state lives in `self._roi`.
-    _roi_store = property(lambda self: self._roi.store)
-    _auto_midline = property(lambda self: self._roi.midline)
-    _auto_eligible = property(lambda self: self._roi.eligible)
-    _auto_roi2_regions = property(lambda self: self._roi.roi2_regions)
-    _active_auto_tissue_worker = property(lambda self: self._roi.active_tissue_worker)
-    _auto_rois_status_text = property(lambda self: self._roi.status_text)
-
-    # Delegating attributes: the QA run state lives in `self._qa`.
-    @staticmethod
-    def _qa_attr(name: str):
-        return property(lambda self: getattr(self._qa, name), lambda self, v: setattr(self._qa, name, v))
-
-    _qa_recipe = _qa_attr("recipe")
-    _qa_jobs = _qa_attr("jobs")
-    _qa_total = _qa_attr("total")
-    _qa_active_job = _qa_attr("active_job")
-    _qa_cancel_requested = _qa_attr("cancel_requested")
-    _active_worker = _qa_attr("active_worker")
-    _qa_results = _qa_attr("results")
-    _qa_errors = _qa_attr("errors")
-
-    # Delegating attributes: the Results page state lives in `self._results`.
-    _results_slices = property(
-        lambda self: self._results.slices, lambda self, v: setattr(self._results, "slices", v)
-    )
-    _results_pair = property(lambda self: self._results.pair, lambda self, v: self._results.select_pair(v))
-    _head_ct_verdict = property(lambda self: self._results.verdict)
-    _study_table_jobs = property(lambda self: self._results.table_jobs)
-
-    _last_result = property(lambda self: self._export.last_result)
-    _last_export_context = property(lambda self: self._export.last_context)
-
-    # Delegating attributes: the stroke-check state lives in `self._stroke`.
-    _stroke_cache = property(lambda self: self._stroke.cache, lambda self, v: setattr(self._stroke, "cache", v))
-    _stroke_model = property(lambda self: self._stroke.model)
-    _active_stroke_worker = property(
-        lambda self: self._stroke.active_worker, lambda self, v: setattr(self._stroke, "active_worker", v)
-    )
-    _stroke_mask_for_current_slice = property(lambda self: self._stroke.lesion_mask(self._current_slice_index))
+        self._update_auto_rois_availability()
 
     def _bind_stroke_viewmodel(self) -> None:
         stroke = self._stroke
@@ -807,6 +649,7 @@ class MainWindowView(QMainWindow):
         qa.progress_changed.connect(self._qa_progress_label.setText)
         qa.job_done.connect(lambda _job: self._refresh_metrics_box())
         qa.finished.connect(self._on_qa_finished)
+        self._results.changed.connect(self._refresh_results_page)
 
     def _bind_roi_viewmodel(self) -> None:
         roi = self._roi
@@ -815,29 +658,29 @@ class MainWindowView(QMainWindow):
         roi.tissue_progress_changed.connect(self._roi_status_label.setText)
 
     def _on_brain_tissue_settings_changed(self) -> None:
-        """Method or settings changed (results were dropped): redraw this
-        slice's overlays and re-place the white-matter ROI2s."""
+        """Method or settings changed (results were dropped, the MainViewModel
+        re-places the white-matter ROI2s): redraw this slice's overlays."""
         self._refresh_brain_tissue_for_current_slice()
-        self._restart_auto_roi2()
+
+    def _bind_main_viewmodel(self) -> None:
+        vm = self.view_model
+        vm.series_opened.connect(self._on_series_opened)
+        vm.study_closed.connect(self._on_study_closed)
+        vm.slice_segmented.connect(self._on_slice_segmented)
 
     def _bind_study_viewmodel(self) -> None:
         study = self._study
         study.status_changed.connect(self._study_status_label.setText)
         study.loading_changed.connect(self._on_study_loading_changed)
         study.series_list_changed.connect(self._on_series_list_changed)
-        study.volume_loaded.connect(self._apply_loaded_volume)
         study.load_failed.connect(lambda message: QMessageBox.critical(self, "Failed to open DICOM data", message))
         study.slice_changed.connect(self._render_slice)
-        study.closed.connect(self._apply_study_closed)
 
     def _on_study_loading_changed(self, loading: bool) -> None:
         self._open_folder_action.setEnabled(not loading)
         self._open_file_action.setEnabled(not loading)
 
     def _on_series_list_changed(self, labels: list) -> None:
-        # A fresh study: whatever is backed up as "the primary series'"
-        # segmentation belongs to a study that is going away.
-        self._segmentation.forget_primary()
         self._series_combo.blockSignals(True)
         self._series_combo.clear()
         self._series_combo.addItems(labels)
@@ -907,7 +750,7 @@ class MainWindowView(QMainWindow):
         """A one-line instruction under a step's title."""
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(11)}px;")
         return label
 
     def _set_trace_visible(self, visible: bool) -> None:
@@ -935,7 +778,7 @@ class MainWindowView(QMainWindow):
         self._trace_log.setMaximumBlockCount(5000)  # cap memory growth on a long session
         self._trace_log.setMinimumHeight(60)
         self._trace_log.setStyleSheet(
-            f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: 10px; "
+            f"font-family: 'IBM Plex Mono', Consolas, monospace; font-size: {px(10)}px; "
             f"background: {SURFACE_SUNKEN}; color: {TEXT}; border: 1px solid {BORDER};"
         )
         layout.addWidget(self._trace_log)
@@ -984,7 +827,7 @@ class MainWindowView(QMainWindow):
         tools_menu = menu_bar.addMenu("&Tools")
 
         # Segmentation runs automatically for a new volume (see
-        # `_maybe_auto_segment_volume`), so its manual triggers live here
+        # the MainViewModel), so its manual triggers live here
         # instead of taking sidebar space; tooltips explain a disabled entry.
         segmentation_menu = tools_menu.addMenu("Segmentation")
         segmentation_menu.setToolTipsVisible(True)
@@ -1022,7 +865,7 @@ class MainWindowView(QMainWindow):
         ):
             action = recipe_menu.addAction(text)
             action.setCheckable(True)
-            action.setChecked(recipe == self._qa_recipe)
+            action.setChecked(recipe == self._qa.recipe)
             action.setToolTip(tooltip)
             action.triggered.connect(lambda checked, r=recipe: self._on_qa_recipe_selected(r))
             recipe_group.addAction(action)
@@ -1035,6 +878,8 @@ class MainWindowView(QMainWindow):
         self._show_trace_action = settings_menu.addAction("Show Trace Log")
         self._show_trace_action.setCheckable(True)
         self._show_trace_action.toggled.connect(self._set_trace_visible)
+        text_size_action = settings_menu.addAction("Text Size…", self._on_text_size_clicked)
+        text_size_action.setToolTip("Size of all text in BICTool (applies after a restart)")
 
         export_menu = menu_bar.addMenu("&Export")
         self._export_action = export_menu.addAction("Export Results…", self._open_export_dialog)
@@ -1048,11 +893,8 @@ class MainWindowView(QMainWindow):
     def _on_close_study_clicked(self) -> None:
         self._study.close()
 
-    def _apply_study_closed(self) -> None:
-        """The StudyViewModel closed the study: back to the no-study state."""
-        # A future study's primary series is unrelated to this one's - don't
-        # let its saved segmentation state leak into the next study opened.
-        self._segmentation.forget_primary()
+    def _on_study_closed(self) -> None:
+        """The study was closed (every ViewModel reset): back to the no-study state."""
         self._series_combo.blockSignals(True)
         self._series_combo.clear()
         self._series_combo.setEnabled(False)
@@ -1060,7 +902,6 @@ class MainWindowView(QMainWindow):
 
         self._roi_viewport.clear()  # also clears every seg_*/stroke_lesion overlay - see RoiViewport.clear_all_overlays
         self._roi_rects = {}
-        self._roi.reset()
         self._reset_roi_table()
         self._confirm_rois_cb.setChecked(False)
         self._confirm_rois_cb.setEnabled(False)
@@ -1094,20 +935,20 @@ class MainWindowView(QMainWindow):
         self._study.reload_series()
 
     def _on_view_dicom_tags_clicked(self) -> None:
-        if self._loaded_volume is None:
+        if self._study.volume is None:
             return
-        path = self._loaded_volume.slice_paths[self._current_slice_index]
+        path = self._study.volume.slice_paths[self._study.current_slice]
         try:
             dataset = pydicom.dcmread(str(path), stop_before_pixels=True)
         except Exception as exc:
             logger.exception("Failed to read DICOM tags from %s", path)
             QMessageBox.critical(self, "Failed to read DICOM tags", str(exc))
             return
-        title = f"DICOM Tags — Slice {self._current_slice_index + 1} / {self._loaded_volume.num_slices}"
+        title = f"DICOM Tags — Slice {self._study.current_slice + 1} / {self._study.volume.num_slices}"
         DicomTagsDialog(dataset, title=title, parent=self).exec()
 
     def _on_brain_tissue_settings_clicked(self) -> None:
-        dialog = BrainTissueSettingsDialog(self._brain_tissue_settings, self._brain_tissue_default_settings, parent=self)
+        dialog = BrainTissueSettingsDialog(self._brain_tissue.settings[_BRAIN_TISSUE_METHOD_THRESHOLD], self._brain_tissue.default_settings[_BRAIN_TISSUE_METHOD_THRESHOLD], parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_THRESHOLD, dialog.settings())
 
@@ -1116,7 +957,7 @@ class MainWindowView(QMainWindow):
             return
         # Opened from the Study summary tab -> whole study preselected.
         dialog = ExportDialog(
-            study_available=bool(self._qa_results),
+            study_available=bool(self._qa.results),
             default_scope=SCOPE_STUDY if self._showing_study_summary() else "slice",
             parent=self,
         )
@@ -1126,7 +967,6 @@ class MainWindowView(QMainWindow):
             self._perform_study_export(dialog.selected_items(), dialog.destination())
         else:
             self._perform_export(dialog.selected_items(), dialog.destination())
-
 
     def _perform_study_export(self, items: set[str], destination: Path) -> None:
         self._export.export_study(items, destination, self._series_combo.currentText())
@@ -1175,11 +1015,10 @@ class MainWindowView(QMainWindow):
         """A volume loaded by other means (e.g. tests) becomes the shown series."""
         self._study.adopt_volume(volume, is_primary_series=is_primary_series, force_reload=force_reload)
 
-    def _apply_loaded_volume(
-        self, volume: DicomVolume, is_primary_series: bool, force_reload: bool, previous_was_primary: bool
-    ) -> None:
-        """The StudyViewModel loaded a series: reset everything that belonged to
-        the previous one and show the first slice."""
+    def _on_series_opened(self, volume: DicomVolume, _is_primary: bool) -> None:
+        """A series was opened (every ViewModel reset for it): reset the widgets
+        and show its first slice. Automatic segmentation of the primary series
+        starts right after (MainViewModel)."""
         self._open_folder_action.setEnabled(True)
         self._open_file_action.setEnabled(True)
         self._close_study_action.setEnabled(True)
@@ -1191,39 +1030,12 @@ class MainWindowView(QMainWindow):
         self._custom_window_action.setEnabled(True)
         self._set_tip(self._custom_window_action, "")
 
-        # A different volume (new series, reload, or a fresh open) means any
-        # cached segmentation/stroke results (keyed by slice index) belong
-        # to slices that no longer exist under these indices - clear before
-        # `_show_slice` below, or a stale result could silently reappear
-        # under the new volume's same slice index. Before clearing, if the
-        # series we're LEAVING was the primary one, preserve its
-        # segmentation state (not stroke - not asked for) so switching back
-        # to it later restores rather than re-segmenting from scratch (per
-        # explicit request - primary series only, not every series visited,
-        # to avoid keeping every series' full NIfTI volume + masks resident
-        # at once).
-        if previous_was_primary:
-            self._segmentation.backup_primary()
         self._reset_segmentation_display()
         self._reset_stroke_display()
         self._reset_brain_tissue_display()
-        self._roi.store.clear()
         self._confirm_rois_cb.setChecked(False)
         self._reset_qa_results()
         self._update_segmentation_availability()
-
-        if is_primary_series and force_reload:
-            # The underlying file(s) may have changed - the previous cache
-            # (if any) is no longer trustworthy.
-            self._segmentation.forget_primary()
-        elif is_primary_series and self._segmentation.restore_primary():
-            # Returning to the primary series after visiting another one -
-            # restore instead of starting empty. `_maybe_auto_segment_volume`
-            # below still runs, but `_on_segment_volume_clicked` already
-            # no-ops ("Done") once every slice is present, or resumes just
-            # the slices that weren't finished yet if the batch was
-            # cancelled mid-way by switching away earlier.
-            pass
 
         self._slice_slider.setMinimum(0)
         self._slice_slider.setMaximum(volume.num_slices - 1)
@@ -1237,50 +1049,28 @@ class MainWindowView(QMainWindow):
         self._show_slice(0)  # also refreshes the corner overlay (see `_update_viewer_overlay`)
         self._show_view_page(0)
 
-        if is_primary_series:
-            self._maybe_auto_segment_volume()
-
-    def _maybe_auto_segment_volume(self) -> None:
-        """Automatically starts a background whole-volume segmentation for
-        the study's primary series (per explicit request) - the user
-        shouldn't have to click Segment Volume for the main scan. Only ever
-        called for the primary series (see `_load_selected_series`); any
-        other series (picked from the "Series" combo, or reloaded) still
-        requires an explicit Segment Slice/Volume click.
-
-        Silently does nothing if anatomy weights aren't configured or
-        TensorFlow isn't installed - this is a convenience auto-start, not
-        a user-initiated action, so it must never pop up an error dialog on
-        its own the way the button's own click handler does. A genuinely
-        broken *configured* weights path still surfaces the usual dialog
-        via `_on_segment_volume_clicked` below - that's an actionable
-        misconfiguration, not an expected "nothing set up yet" state.
-        """
-        weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
-        if not weights_path:
-            return
-        try:
-            # Deferred to first actual use - see the TYPE_CHECKING import
-            # block's comment for why (TensorFlow's import cost).
-            from bictool.domain.segmentation import head_ct_unet  # noqa: F401
-        except ImportError:
-            return
-        self._on_segment_volume_clicked()
+    def _refresh_plausibility_line(self) -> None:
+        """The segmentation check's line in the Anatomical box (hidden before it ran)."""
+        text = self._segmentation.plausibility_line()
+        unreliable = self._segmentation.plausibility is not None and self._segmentation.plausibility.unreliable
+        self._plausibility_label.setText(("⚠ " if unreliable else "") + text)
+        self._plausibility_label.setStyleSheet(f"color: {WARNING if unreliable else TEXT_MUTED}; font-size: {px(11)}px;")
+        self._plausibility_label.setVisible(bool(text))
 
     def _show_slice(self, index: int) -> None:
         self._study.set_slice(index)
 
     def _render_slice(self, index: int) -> None:
         """The StudyViewModel moved to slice `index`: show it and everything on it."""
-        self._slice_label.setText(f"Slice {index + 1} / {self._loaded_volume.num_slices}")
-        self._roi_viewport.set_image(self._loaded_volume.get_slice_hu(index))  # also clears every overlay
+        self._slice_label.setText(f"Slice {index + 1} / {self._study.volume.num_slices}")
+        self._roi_viewport.set_image(self._study.volume.get_slice_hu(index))  # also clears every overlay
         self._refresh_rois_for_current_slice()
         self._refresh_segmentation_for_current_slice()
         self._refresh_stroke_for_current_slice()
         self._refresh_brain_tissue_for_current_slice()
         self._show_auto_rois_for_current_slice()
         self._refresh_metrics_box()
-        if index in self._results_slices:
+        if index in self._results.slices:
             self._show_result_for_slice(index)
         self._update_viewer_overlay()  # top-left corner shows the current slice number
 
@@ -1295,7 +1085,7 @@ class MainWindowView(QMainWindow):
         self._update_viewer_overlay()  # bottom-right corner shows the current WL/WW
 
     def _on_custom_window_clicked(self) -> None:
-        if self._loaded_volume is None:
+        if self._study.volume is None:
             return
         current_width, current_center = self._roi_viewport.current_window()
         dialog = CustomWindowDialog(current_width, current_center, parent=self)
@@ -1378,7 +1168,7 @@ class MainWindowView(QMainWindow):
         if self._view_stack.currentIndex() == 0:
             title = "3. Run QA metrics"
         elif self._results_tabs.currentIndex() == 1:
-            title = f"Study averages ({PAIR_LABELS[self._results_pair]})"
+            title = f"Study averages ({PAIR_LABELS[self._results.pair]})"
         else:
             title = "Slice results"
         self._metrics_box.setTitle(title)
@@ -1412,6 +1202,7 @@ class MainWindowView(QMainWindow):
         slice_row.addWidget(self._slice_label)
         slice_row.addWidget(self._slice_slider, 1)
         layout.addLayout(slice_row)
+
 
         self._study_status_label.setText("No study loaded — File → Open DICOM Folder/File…")
 
@@ -1454,7 +1245,7 @@ class MainWindowView(QMainWindow):
         if rect is None:
             return  # the menu only offers this on a drawn rectangle - defensive only
         self._roi_viewport.clear_draft()
-        index = self._current_slice_index
+        index = self._study.current_slice
         logger.info(
             "%s set on slice %d: x=%d-%d, y=%d-%d (%dx%d)",
             key_label(key), index + 1, rect.x0, rect.x1, rect.y0, rect.y1, rect.width, rect.height,
@@ -1467,7 +1258,7 @@ class MainWindowView(QMainWindow):
     def _reassign_roi(self, source: str, target: str) -> None:
         """An existing ROI saved as another role on this slice (right-click > Save as)."""
         self._roi_viewport.select_roi(None)
-        self._roi.reassign(self._current_slice_index, source, target)
+        self._roi.reassign(self._study.current_slice, source, target)
         self._update_confirm_availability()
 
     def _roi_context_menu(self, key: str) -> QMenu:
@@ -1509,7 +1300,7 @@ class MainWindowView(QMainWindow):
     def _update_confirm_availability(self) -> None:
         # One confirmation covers every slice: available as soon as any slice
         # has a complete ROI pair (and no QA batch is running).
-        ready = self._loaded_volume is not None and bool(self._qa_ready_jobs()) and self._qa_jobs is None
+        ready = self._study.volume is not None and bool(self._qa_ready_jobs()) and self._qa.jobs is None
         self._confirm_rois_cb.setEnabled(ready or self._confirm_rois_cb.isChecked())
 
     def _effective_rois(self, slice_index: int) -> dict[str, RoiRect]:
@@ -1520,7 +1311,7 @@ class MainWindowView(QMainWindow):
 
     def _refresh_rois_for_current_slice(self) -> None:
         """Shows the displayed slice's ROIs (both pairs) on the image and in the table."""
-        rois = self._effective_rois(self._current_slice_index) if self._loaded_volume is not None else {}
+        rois = self._effective_rois(self._study.current_slice) if self._study.volume is not None else {}
         self._roi_rects = rois
         selected = self._roi_viewport.selected_roi()
         self._roi_viewport.clear_rois()
@@ -1543,7 +1334,7 @@ class MainWindowView(QMainWindow):
 
     def _update_auto_rois_availability(self) -> None:
         confirmed = self._confirm_rois_cb.isChecked()
-        available = self._loaded_volume is not None and bool(self._segmentation_cache) and not confirmed
+        available = self._study.volume is not None and bool(self._segmentation.cache) and not confirmed
         self._auto_rois_btn.setEnabled(available)
         self._refresh_auto_rois_tip()
 
@@ -1561,11 +1352,8 @@ class MainWindowView(QMainWindow):
     def _auto_roi1_slices(self, pair: str) -> list[int]:
         return self._roi.auto_roi1_slices(pair)
 
-    def _restart_auto_roi2(self) -> None:
-        self._roi.restart_roi2()
-
     def _show_auto_rois_for_current_slice(self) -> None:
-        if self._loaded_volume is None:
+        if self._study.volume is None:
             return
         self._refresh_rois_for_current_slice()
         self._roi.update_status()
@@ -1578,18 +1366,12 @@ class MainWindowView(QMainWindow):
         self._roi.set_auto(checked)
         self._refresh_auto_rois_tip()
 
-    def _on_auto_rois_segmentation_landed(self, slice_index: int) -> None:
-        """A slice just got segmented: Auto ROIs may become available, and
-        while they're on, that slice gets its ROIs right away."""
-        self._update_auto_rois_availability()
-        self._roi.on_slice_segmented(slice_index)
-
     def _on_draft_moved(self, key: str, rect: RoiRect) -> None:
         """The user dragged an ROI (only possible while not confirmed): it
         becomes that slot's manual ROI on this slice - the automatic one is
         kept for "Restore automatic". A hand-drawn draft ("") isn't an ROI yet."""
         if key:
-            self._roi.save_manual(self._current_slice_index, key, rect)
+            self._roi.save_manual(self._study.current_slice, key, rect)
 
     def _on_roi_selected(self, key: str | None) -> None:
         """An ROI was clicked on the image (or the selection cleared): mirror it in the table."""
@@ -1620,7 +1402,7 @@ class MainWindowView(QMainWindow):
             self._update_roi_edit_buttons()
             return
         self._roi_viewport.select_roi(None)
-        self._roi.delete(self._current_slice_index, key)
+        self._roi.delete(self._study.current_slice, key)
 
     def _on_delete_roi_clicked(self) -> None:
         key = self._roi_viewport.selected_roi()
@@ -1631,11 +1413,9 @@ class MainWindowView(QMainWindow):
 
     def _on_restore_auto_clicked(self) -> None:
         """Back to the automatic ROIs on this slice: manual ROIs and deletions dropped."""
-        self._roi.restore_slice(self._current_slice_index)
+        self._roi.restore_slice(self._study.current_slice)
 
-    def _reset_auto_rois(self) -> None:
-        self._roi.clear_auto()
-        self._roi.auto_on = False
+    def _reset_auto_rois_button(self) -> None:
         self._auto_rois_btn.blockSignals(True)
         self._auto_rois_btn.setChecked(False)
         self._auto_rois_btn.setText("Start auto ROIs")
@@ -1660,7 +1440,7 @@ class MainWindowView(QMainWindow):
             self._set_tip(self._delete_roi_btn, "Delete the drawn rectangle (or press Del)")
         else:
             self._set_tip(self._delete_roi_btn, "Select an ROI on the image or in the table first")
-        has_edits = self._loaded_volume is not None and self._roi.has_edits(self._current_slice_index)
+        has_edits = self._study.volume is not None and self._roi.has_edits(self._study.current_slice)
         self._restore_auto_btn.setEnabled(has_edits and not confirmed)
         if confirmed:
             self._set_tip(self._restore_auto_btn, locked_tip)
@@ -1720,7 +1500,7 @@ class MainWindowView(QMainWindow):
 
         score_row = QHBoxLayout()
         self._result_verdict_label = QLabel("—")
-        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._result_decision_label = QLabel("")
         self._result_decision_label.setProperty("role", "mono")
         score_row.addWidget(self._result_verdict_label)
@@ -1745,17 +1525,38 @@ class MainWindowView(QMainWindow):
         charts_grid.addWidget(self._ratio_chart_view, 1, 1)
         for chart_view in (self._mtf_chart_view, self._nps_chart_view, self._ps_chart_view, self._ratio_chart_view):
             chart_view.installEventFilter(self)  # wheel over a chart scrolls slices too
+        curves_page = QWidget()
+        curves_page.setLayout(charts_grid)
+        # "Intermediate steps" swaps the four curves for how they were measured
+        # (same space - the page can't scroll: the wheel steps through slices).
+        self._slice_steps_panel = SliceStepsPanel()
+        for widget in self._slice_steps_panel.findChildren(QWidget):
+            widget.installEventFilter(self)
+        self._results_curves_stack = QStackedWidget()
+        self._results_curves_stack.addWidget(curves_page)
+        self._results_curves_stack.addWidget(self._slice_steps_panel)
+        # Which of the two is shown: an explicit two-way switch (the active
+        # one highlighted); always starts on the curves.
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("Show:"))
+        view_group = QButtonGroup(page)
+        view_group.setExclusive(True)
+        self._curves_view_btn = QPushButton("Curves")
+        self._steps_view_btn = QPushButton("Intermediate steps (advanced)")
+        for button, steps in ((self._curves_view_btn, False), (self._steps_view_btn, True)):
+            button.setObjectName("navTabBtn")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, s=steps: self._show_intermediate_steps(s))
+            view_group.addButton(button)
+            view_row.addWidget(button)
+        self._curves_view_btn.setChecked(True)
+        view_row.addStretch(1)
+        layout.addLayout(view_row)
         # Stretch factor 1 so the charts actually grow to fill available
         # vertical space - previously a trailing addStretch(1) after the
         # feature box soaked up all of it instead, leaving the charts
         # pinned to their minimum size no matter how tall the window was.
-        layout.addLayout(charts_grid, 1)
-
-        self._advanced_toggle_btn = QPushButton("▸ Advanced: feature vector")
-        self._advanced_toggle_btn.setCheckable(True)
-        self._advanced_toggle_btn.setChecked(False)
-        self._advanced_toggle_btn.clicked.connect(self._on_advanced_toggle_clicked)
-        layout.addWidget(self._advanced_toggle_btn)
+        layout.addWidget(self._results_curves_stack, 1)
 
         feature_box = QGroupBox("Feature vector (per slice)")
         feature_form = QFormLayout(feature_box)
@@ -1765,16 +1566,16 @@ class MainWindowView(QMainWindow):
             value_label.setProperty("role", "mono")
             feature_form.addRow(name, value_label)
             self._feature_labels[name] = value_label
-        feature_box.setVisible(False)  # hidden by default, behind the Advanced toggle
+        feature_box.setVisible(False)  # shown with the intermediate steps
         self._feature_box = feature_box
-        layout.addWidget(feature_box)  # natural size - no stretch, so charts_grid gets the extra room
+        self._slice_steps_panel.set_feature_widget(feature_box)  # Intermediate steps > PS/MTF & features
         self._results_tabs.addTab(per_slice, "Per slice")
 
         summary = QWidget()
         summary_layout = QVBoxLayout(summary)
         summary_layout.setContentsMargins(0, 8, 0, 0)
         self._study_verdict_label = QLabel("—")
-        self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._study_verdict_label.setWordWrap(True)
         summary_layout.addWidget(self._study_verdict_label)
         # What a user needs (reasons in plain words, artefacts, unusual
@@ -1794,12 +1595,12 @@ class MainWindowView(QMainWindow):
         self._study_verdict_details_label = QLabel("")
         self._study_verdict_details_label.setWordWrap(True)
         self._study_verdict_details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._study_verdict_details_label.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self._study_verdict_details_label.setStyleSheet(f"color: {TEXT}; font-size: {px(11)}px;")
         self._study_verdict_details_label.setVisible(False)
         summary_layout.addWidget(self._study_verdict_details_label)
         self._verdict_details_btn.setChecked(self._ui_settings.get_bool(VERDICT_DETAILS_OPEN))
         self._study_provisional_label = QLabel(PROVISIONAL_SHORT)
-        self._study_provisional_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._study_provisional_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(11)}px;")
         self._study_provisional_label.setVisible(False)
         summary_layout.addWidget(self._study_provisional_label)
         self._study_table = QTableWidget(0, len(_STUDY_TABLE_COLUMNS))
@@ -1821,8 +1622,12 @@ class MainWindowView(QMainWindow):
         # Scroll through per-slice results with the mouse wheel, like the image viewer.
         if (
             event.type() == QEvent.Type.Wheel
-            and self._results_slices
-            and (watched is self._results_per_slice_page or watched in self._results_chart_views())
+            and self._results.slices
+            and (
+                watched is self._results_per_slice_page
+                or watched in self._results_chart_views()
+                or self._slice_steps_panel.isAncestorOf(watched)
+            )
         ):
             self._step_results_slice(-1 if event.angleDelta().y() > 0 else 1)
             return True
@@ -1832,25 +1637,25 @@ class MainWindowView(QMainWindow):
         return (self._mtf_chart_view, self._nps_chart_view, self._ps_chart_view, self._ratio_chart_view)
 
     def _step_results_slice(self, step: int) -> None:
-        if self._results_slices:
+        if self._results.slices:
             self._results_slider.setValue(self._results_slider.value() + step)
 
     def _on_results_slider_changed(self, position: int) -> None:
-        if not 0 <= position < len(self._results_slices):
+        if not 0 <= position < len(self._results.slices):
             return
-        index = self._results_slices[position]
+        index = self._results.slices[position]
         self._show_result_for_slice(index)
         # Keep the image viewer on the same slice, so switching back shows its ROIs.
-        if self._loaded_volume is not None and self._slice_slider.value() != index:
+        if self._study.volume is not None and self._slice_slider.value() != index:
             self._slice_slider.setValue(index)
 
     def _on_study_table_clicked(self, row: int, _column: int) -> None:
-        if not 0 <= row < len(self._study_table_jobs):
+        if not 0 <= row < len(self._results.table_jobs):
             return
-        index, pair = self._study_table_jobs[row]
-        self._results_pair = pair
+        index, pair = self._results.table_jobs[row]
+        self._results.select_pair(pair)
         self._results_tabs.setCurrentIndex(0)
-        position = self._results_slices.index(index)
+        position = self._results.slices.index(index)
         if self._results_slider.value() != position:
             self._results_slider.setValue(position)
         else:
@@ -1858,9 +1663,9 @@ class MainWindowView(QMainWindow):
 
     def _on_results_pair_clicked(self, pair: str) -> None:
         """The Falx/Septum switch above the per-slice curves (also drives the Run Metrics box)."""
-        self._results_pair = pair
-        if self._results_slices:
-            self._show_result_for_slice(self._results_slices[self._results_slider.value()])
+        self._results.select_pair(pair)
+        if self._results.slices:
+            self._show_result_for_slice(self._results.slices[self._results_slider.value()])
         self._refresh_metrics_box()
 
     def _results_by_pair(self, pair: str) -> dict[int, SliceQualityResult]:
@@ -1869,7 +1674,6 @@ class MainWindowView(QMainWindow):
     def _refresh_results_page(self) -> None:
         """Rebuilds the slice slider and the study summary from the
         ResultsViewModel (failed jobs are only counted in the verdict)."""
-        self._results.refresh()
         slices = self._results.slices
         self._results_slider.blockSignals(True)
         self._results_slider.setRange(0, max(len(slices) - 1, 0))
@@ -1887,11 +1691,16 @@ class MainWindowView(QMainWindow):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if column == len(cells) - 1:
                     item.setForeground(QColor(_TONE_COLORS[table_row.last_tone]))
+                    if text:
+                        item.setToolTip(text)  # full note when the column is too narrow
                 elif physical and column == len(cells) - 2:
                     item.setToolTip(table_row.hint_tooltip)
                 self._study_table.setItem(row, column, item)
 
-        self._study_verdict_basics_label.setVisible(physical)
+        artefact_lines = (
+            self._results.artefact_lines() + self._results.basal_ganglia_lines() + self._results.plausibility_lines()
+        )
+        self._study_verdict_basics_label.setVisible(physical or bool(artefact_lines))
         self._verdict_details_btn.setVisible(physical)
         self._study_verdict_details_label.setVisible(physical and self._verdict_details_btn.isChecked())
         self._study_provisional_label.setVisible(physical)
@@ -1899,15 +1708,17 @@ class MainWindowView(QMainWindow):
             self._show_head_ct_verdict()
             return
 
-        # Legacy recipe: one majority-vote line per pair (chest-CT SVM).
+        # Legacy recipe: one majority-vote line per pair (chest-CT SVM), and
+        # the possible-artefact hints.
+        self._study_verdict_basics_label.setText("\n".join(artefact_lines))
         lines, tones = self._results.legacy_verdict()
         if not lines:
             self._study_verdict_label.setText("—")
-            self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+            self._study_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
             return
         color = _TONE_COLORS[tones[0]] if len(set(tones)) == 1 else TEXT
         self._study_verdict_label.setText("\n".join(lines))
-        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: {px(15)}px; font-weight: 700;")
 
     def _results_are_physical(self) -> bool:
         return self._results.is_physical()
@@ -1916,9 +1727,9 @@ class MainWindowView(QMainWindow):
         """Study summary of the physical recipe: the study-level head-CT verdict
         (basics, and the details behind "Details")."""
         text, details = self._results.head_ct_text(model_available=default_head_ct_model() is not None)
-        color = {TONE_GOOD: GOOD, TONE_BAD: CRITICAL}.get(text.tone, WARNING if self._head_ct_verdict else TEXT_MUTED)
+        color = {TONE_GOOD: GOOD, TONE_BAD: CRITICAL}.get(text.tone, WARNING if self._results.verdict else TEXT_MUTED)
         self._study_verdict_label.setText(text.headline)
-        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+        self._study_verdict_label.setStyleSheet(f"color: {color}; font-size: {px(15)}px; font-weight: 700;")
         self._study_verdict_basics_label.setText("\n".join(text.basics))
         self._study_verdict_details_label.setText(details)
         self._set_tip(self._study_provisional_label, PROVISIONAL_NOTE)
@@ -1946,17 +1757,17 @@ class MainWindowView(QMainWindow):
             button.setEnabled(p in view.available_pairs)
             button.setChecked(p == pair)
         self._results_slice_label.setText(
-            f"Slice {index + 1} / {self._loaded_volume.num_slices} — {PAIR_LABELS[pair]}  "
+            f"Slice {index + 1} / {self._study.volume.num_slices} — {PAIR_LABELS[pair]}  "
             f"({position + 1} of {view.count})"
         )
         self._result_verdict_label.setText(view.verdict_text)
         self._set_tip(self._result_verdict_label, view.verdict_tooltip)
         self._result_verdict_label.setStyleSheet(
-            f"color: {_TONE_COLORS[view.verdict_tone]}; font-size: 15px; font-weight: 700;"
+            f"color: {_TONE_COLORS[view.verdict_tone]}; font-size: {px(15)}px; font-weight: 700;"
         )
         self._result_decision_label.setText(view.note_text)
 
-        result = self._qa_results[(index, pair)]
+        result = self._qa.results[(index, pair)]
 
         for name, value in zip(_FEATURE_NAMES, result.feature_vector):
             self._feature_labels[name].setText(f"{value:.4g}")
@@ -1972,13 +1783,22 @@ class MainWindowView(QMainWindow):
         self._update_line_chart(self._nps_chart_view, result.nps_roi2.f_avg, [result.nps_roi2.nps_measured_radagv])
         self._update_line_chart(self._ps_chart_view, result.nps_roi1.f_avg, [result.nps_roi1.nps_measured_radagv])
         self._update_line_chart(self._ratio_chart_view, result.ratio.f_int, [result.ratio.ratio_nps_mtf])
+        if self._steps_view_btn.isChecked():
+            self._update_slice_steps(index)
 
         # Export covers the slice and pair shown here.
         self._export.show_slice(index, pair, result, self._series_combo.currentText())
 
-    def _on_advanced_toggle_clicked(self, checked: bool) -> None:
-        self._feature_box.setVisible(checked)
-        self._advanced_toggle_btn.setText(("▾" if checked else "▸") + " Advanced: feature vector")
+    def _show_intermediate_steps(self, steps: bool) -> None:
+        """Per slice: the slice's intermediate steps, or the four curves."""
+        (self._steps_view_btn if steps else self._curves_view_btn).setChecked(True)
+        self._feature_box.setVisible(steps)
+        self._results_curves_stack.setCurrentIndex(1 if steps else 0)
+        if steps and self._results.slices:
+            self._update_slice_steps(self._results.slices[self._results_slider.value()])
+
+    def _update_slice_steps(self, index: int) -> None:
+        self._slice_steps_panel.show_steps(self._results.slice_steps(index), "No intermediate steps for this slice.")
 
     def _make_chart_view(self, title: str, x_label: str, y_label: str) -> QChartView:
         chart = QChart()
@@ -2150,14 +1970,14 @@ class MainWindowView(QMainWindow):
         cached, so switching series/slice/preset/zoom can never leave a
         stale reading on screen.
         """
-        volume = self._loaded_volume
+        volume = self._study.volume
         if volume is None:
             for corner in ("top_left", "top_right", "bottom_left", "bottom_right"):
                 self._roi_viewport.set_overlay_text(corner, [])
             return
 
         series_label = self._series_combo.currentText() or "Series"
-        slice_index = self._current_slice_index
+        slice_index = self._study.current_slice
 
         self._roi_viewport.set_overlay_text(
             "top_left",
@@ -2219,8 +2039,6 @@ class MainWindowView(QMainWindow):
             bottom_right_lines.append(self._interaction_line)
         self._roi_viewport.set_overlay_text("bottom_right", bottom_right_lines)
 
-
-
     def _build_segmentation_box(self) -> QWidget:
         # FR-02: wires in `domain.segmentation.head_ct_unet`, a pretrained
         # 16-structure model - see that module's docstring for the model
@@ -2239,9 +2057,9 @@ class MainWindowView(QMainWindow):
         # separate, non-modal window (per explicit user request, to avoid
         # cluttering this sidebar with a long checkbox list) for narrowing
         # down which structures to overlay (all 16 are selected by default -
-        # see `_selected_segmentation_names`'s own comment), and a vertical
+        # see `SegmentationViewModel.selected_names`'s own comment), and a vertical
         # slider for their shared opacity; the choice itself lives here
-        # (`_selected_segmentation_names`), not in that dialog, and persists
+        # (`SegmentationViewModel.selected_names`), not in that dialog, and persists
         # across slice navigation for the whole loaded volume (also per
         # explicit request - see `_refresh_segmentation_for_current_slice`).
         # The sidebar's own "Show Segments" checkbox (per a later request)
@@ -2266,7 +2084,7 @@ class MainWindowView(QMainWindow):
         # overlays (per explicit request) - separate from the selection
         # itself (chosen in the "Select Segments…" dialog, all 16 selected
         # by default): toggling this never changes
-        # `_selected_segmentation_names`, just whether those
+        # `SegmentationViewModel.selected_names`, just whether those
         # already-chosen structures are actually drawn right now, so
         # flipping it back on shows exactly what was showing before.
         self._show_segments_cb = QCheckBox("Show Segments")
@@ -2277,6 +2095,18 @@ class MainWindowView(QMainWindow):
         segments_row.addWidget(self._show_segments_cb)
         segments_row.addStretch(1)
         layout.addLayout(segments_row)
+
+        # Study-level segmentation check (provisional, `segmentation_plausibility`) - shown after the volume
+        # segmentation; a warning colour only when the segmentation may be unreliable.
+        self._plausibility_label = QLabel("")
+        self._plausibility_label.setWordWrap(True)
+        self._plausibility_label.setVisible(False)
+        self._set_tip(
+            self._plausibility_label,
+            "Checks whether the CNN labels break into many scattered pieces (fragmentation) - a sign that the "
+            "segmentation, and the automatic ROIs placed on it, may be wrong. Provisional; not part of the verdict.",
+        )
+        layout.addWidget(self._plausibility_label)
 
         return box
 
@@ -2290,17 +2120,17 @@ class MainWindowView(QMainWindow):
         # nothing yet, if opened before the first Segment Slice/Volume) -
         # cheap and idempotent to set on every open rather than tracking a
         # separate "has data" flag just for this.
-        self._segment_selection_dialog.set_enabled_all(bool(self._segmentation_cache))
+        self._segment_selection_dialog.set_enabled_all(bool(self._segmentation.cache))
         self._segment_selection_dialog.show()
         self._segment_selection_dialog.raise_()
         self._segment_selection_dialog.activateWindow()
 
     def _on_segmentation_selection_changed(self, display_name: str, checked: bool) -> None:
         if checked:
-            self._selected_segmentation_names.add(display_name)
+            self._segmentation.selected_names.add(display_name)
             self._apply_segment_overlay(display_name)
         else:
-            self._selected_segmentation_names.discard(display_name)
+            self._segmentation.selected_names.discard(display_name)
             self._roi_viewport.clear_overlay(f"seg_{display_name}")
 
     def _apply_segment_overlay(self, display_name: str) -> None:
@@ -2316,32 +2146,32 @@ class MainWindowView(QMainWindow):
         """
         if not self._show_segments_cb.isChecked():
             return
-        masks = self._segmentation_masks_for_current_slice
+        masks = self._segmentation.current_masks
         if masks is None or display_name not in masks:
             return
         self._roi_viewport.set_overlay(
             f"seg_{display_name}",
             masks[display_name],
             color=_SEGMENTATION_COLORS[display_name],
-            opacity=self._segmentation_opacity,
+            opacity=self._segmentation.opacity,
             label=display_name,
         )
 
     def _on_show_segments_toggled(self, checked: bool) -> None:
         """The main sidebar's quick on/off switch - shows or hides every
         currently *selected* structure's overlay without touching the
-        selection itself (`_selected_segmentation_names`), so turning it
+        selection itself (`SegmentationViewModel.selected_names`), so turning it
         back on reproduces exactly what was showing before.
         """
-        for display_name in self._selected_segmentation_names:
+        for display_name in self._segmentation.selected_names:
             if checked:
                 self._apply_segment_overlay(display_name)
             else:
                 self._roi_viewport.clear_overlay(f"seg_{display_name}")
 
     def _on_segmentation_opacity_changed(self, opacity: float) -> None:
-        self._segmentation_opacity = opacity
-        for display_name in self._selected_segmentation_names:
+        self._segmentation.opacity = opacity
+        for display_name in self._segmentation.selected_names:
             self._apply_segment_overlay(display_name)
 
     # ---- segmentation commands (SegmentationViewModel) ----
@@ -2350,7 +2180,7 @@ class MainWindowView(QMainWindow):
         self._segmentation.ensure_nifti_then(on_ready)
 
     def _on_segment_slice_clicked(self) -> None:
-        self._segmentation.segment_slice(self._current_slice_index)
+        self._segmentation.segment_slice(self._study.current_slice)
 
     def _on_segment_volume_clicked(self) -> None:
         self._segmentation.segment_volume()
@@ -2365,7 +2195,7 @@ class MainWindowView(QMainWindow):
     def _apply_segmentation_masks(self, result) -> None:
         """Decodes `result`'s raw model-class masks into checkbox display
         names and (re-)applies overlays for whichever ones are currently
-        selected (`_selected_segmentation_names` - a persisted, whole-volume
+        selected (`SegmentationViewModel.selected_names` - a persisted, whole-volume
         choice, not tied to this particular slice) - shared by the
         single-slice path (`_apply_segmentation_result`, which also updates
         the status label/buttons) and the mid-volume-batch live-update path
@@ -2375,10 +2205,10 @@ class MainWindowView(QMainWindow):
         disabled until at least one slice has real data to show.
         """
         decoded = decode_masks_for_checkboxes(result, _SEGMENTATION_MAPPING)
-        self._segmentation_masks_for_current_slice = decoded
+        self._segmentation.current_masks = decoded
         if self._segment_selection_dialog is not None:
             self._segment_selection_dialog.set_enabled_all(True)
-        for display_name in self._selected_segmentation_names:
+        for display_name in self._segmentation.selected_names:
             self._apply_segment_overlay(display_name)
 
     # ---- anatomy segmentation: whole-volume batch (background, cancellable) ----
@@ -2408,7 +2238,7 @@ class MainWindowView(QMainWindow):
         method_row.addWidget(QLabel("Method"))
         self._brain_tissue_method_combo = QComboBox()
         self._brain_tissue_method_combo.addItems(_BRAIN_TISSUE_METHODS)
-        self._brain_tissue_method_combo.setCurrentText(self._brain_tissue_method)
+        self._brain_tissue_method_combo.setCurrentText(self._brain_tissue.method)
         self._brain_tissue_method_combo.currentTextChanged.connect(self._on_brain_tissue_method_selected)
         method_row.addWidget(self._brain_tissue_method_combo, 1)
         self._brain_tissue_settings_btn = QPushButton("⚙")
@@ -2416,6 +2246,7 @@ class MainWindowView(QMainWindow):
         self._brain_tissue_settings_btn.setFixedWidth(32)
         self._brain_tissue_settings_btn.clicked.connect(self._on_brain_tissue_method_settings_clicked)
         method_row.addWidget(self._brain_tissue_settings_btn)
+        self._update_brain_tissue_settings_button()
         layout.addLayout(method_row)
 
         # Overlays in a 2x2 grid - half the height of a single column. The
@@ -2451,34 +2282,50 @@ class MainWindowView(QMainWindow):
         return box
 
     def _brain_mask_for_current_slice(self, slice_hu: np.ndarray) -> np.ndarray:
-        return self._brain_tissue.brain_mask(self._current_slice_index, slice_hu)
+        return self._brain_tissue.brain_mask(self._study.current_slice, slice_hu)
 
     def _ensure_brain_tissue_result_for_current_slice(self):
-        return self._brain_tissue.result(self._current_slice_index)
-
-    def _tissue_classifier(self):
-        """`(slice_hu, brain_mask) -> BrainTissueResult` for the current method
-        and settings (snapshotted - safe on a worker thread)."""
-        return self._brain_tissue.classifier()
+        return self._brain_tissue.result(self._study.current_slice)
 
     def _on_brain_tissue_method_selected(self, method: str) -> None:
         self._brain_tissue.set_method(method)
+        self._update_brain_tissue_settings_button()
 
-    def _on_brain_tissue_method_settings_clicked(self) -> None:
-        handlers = {
+    def _brain_tissue_settings_handlers(self) -> dict:
+        # The anchored prototype has no settings yet.
+        return {
             _BRAIN_TISSUE_METHOD_FCM: self._on_fcm_settings_clicked,
             _BRAIN_TISSUE_METHOD_ADAPTIVE: self._on_adaptive_settings_clicked,
             _BRAIN_TISSUE_METHOD_THRESHOLD: self._on_brain_tissue_settings_clicked,
         }
-        handlers[self._brain_tissue_method]()
+
+    def _on_brain_tissue_method_settings_clicked(self) -> None:
+        handler = self._brain_tissue_settings_handlers().get(self._brain_tissue.method)
+        if handler is not None:
+            handler()
+
+    def _update_brain_tissue_settings_button(self) -> None:
+        has_settings = self._brain_tissue.method in self._brain_tissue_settings_handlers()
+        self._brain_tissue_settings_btn.setEnabled(has_settings)
+        self._set_tip(self._brain_tissue_settings_btn, "" if has_settings else "The prototype has no settings yet")
+
+    def _on_text_size_clicked(self) -> None:
+        dialog = TextSizeDialog(saved_text_scale(self._ui_settings), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        save_text_scale(dialog.value(), self._ui_settings)
+        if abs(dialog.value() - text_scale()) > 1e-9:
+            QMessageBox.information(
+                self, "Text Size", f"Text size set to {dialog.value():.0%}. It applies when BICTool is restarted."
+            )
 
     def _on_fcm_settings_clicked(self) -> None:
-        dialog = FcmSettingsDialog(self._fcm_settings, self._fcm_default_settings, parent=self)
+        dialog = FcmSettingsDialog(self._brain_tissue.settings[_BRAIN_TISSUE_METHOD_FCM], self._brain_tissue.default_settings[_BRAIN_TISSUE_METHOD_FCM], parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_FCM, dialog.settings())
 
     def _on_adaptive_settings_clicked(self) -> None:
-        dialog = AdaptiveSettingsDialog(self._adaptive_settings, self._adaptive_default_settings, parent=self)
+        dialog = AdaptiveSettingsDialog(self._brain_tissue.settings[_BRAIN_TISSUE_METHOD_ADAPTIVE], self._brain_tissue.default_settings[_BRAIN_TISSUE_METHOD_ADAPTIVE], parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._brain_tissue.set_settings(_BRAIN_TISSUE_METHOD_ADAPTIVE, dialog.settings())
 
@@ -2495,7 +2342,6 @@ class MainWindowView(QMainWindow):
         self._apply_brain_tissue_overlay(name)
 
     def _reset_brain_tissue_display(self) -> None:
-        self._brain_tissue.reset()
         for checkbox in (self._csf_cb, self._white_matter_cb, self._gray_matter_cb, self._brain_mask_cb):
             checkbox.blockSignals(True)
             checkbox.setChecked(False)
@@ -2513,16 +2359,16 @@ class MainWindowView(QMainWindow):
         actually produced a result for the current slice - never silently
         shows the inferior HU-threshold skull-strip under this checkbox.
         """
-        if self._loaded_volume is None:
+        if self._study.volume is None:
             self._brain_mask_cb.setEnabled(False)
             self._set_tip(self._brain_mask_cb, "Open a study first")
             return
-        weights_path = self._segmentation_config.get("segmentation", {}).get("anatomy_weights_path")
+        weights_path = self._segmentation.config.get("segmentation", {}).get("anatomy_weights_path")
         if not weights_path:
             self._brain_mask_cb.setEnabled(False)
             self._set_tip(self._brain_mask_cb, "Segmentation model weights not configured")
             return
-        if self._current_slice_index not in self._segmentation_cache:
+        if self._study.current_slice not in self._segmentation.cache:
             self._brain_mask_cb.setEnabled(False)
             self._set_tip(self._brain_mask_cb, "Waiting for anatomy segmentation on this slice…")
             return
@@ -2580,23 +2426,23 @@ class MainWindowView(QMainWindow):
         return box
 
     def _on_check_stroke_clicked(self) -> None:
-        self._stroke.check_slice(self._current_slice_index)
+        self._stroke.check_slice(self._study.current_slice)
 
     def _on_stroke_checked(self, index: int, _from_cache: bool) -> None:
         """A slice's stroke result is available: the lesion overlay may be shown."""
         self._check_stroke_btn.setEnabled(True)
-        if index != self._current_slice_index:
+        if index != self._study.current_slice:
             return
         self._stroke_lesion_cb.setEnabled(True)
         if self._stroke_lesion_cb.isChecked():
-            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL, label="Suspected Lesion")
+            self._roi_viewport.set_overlay("stroke_lesion", self._stroke.lesion_mask(self._study.current_slice), color=CRITICAL, label="Suspected Lesion")
 
     def _on_stroke_checkbox_toggled(self, checked: bool) -> None:
         if not checked:
             self._roi_viewport.clear_overlay("stroke_lesion")
             return
-        if self._stroke_mask_for_current_slice is not None:
-            self._roi_viewport.set_overlay("stroke_lesion", self._stroke_mask_for_current_slice, color=CRITICAL, label="Suspected Lesion")
+        if self._stroke.lesion_mask(self._study.current_slice) is not None:
+            self._roi_viewport.set_overlay("stroke_lesion", self._stroke.lesion_mask(self._study.current_slice), color=CRITICAL, label="Suspected Lesion")
 
     # ---- segmentation/stroke lifecycle (volume load, slice change, close study) ----
 
@@ -2606,7 +2452,7 @@ class MainWindowView(QMainWindow):
         `infrastructure.config`) - checked once per volume load rather than
         on every slice change, since configuration doesn't change mid-session.
         """
-        segmentation_config = self._segmentation_config.get("segmentation", {})
+        segmentation_config = self._segmentation.config.get("segmentation", {})
         has_anatomy_weights = bool(segmentation_config.get("anatomy_weights_path"))
         self._segment_slice_action.setEnabled(has_anatomy_weights)
         self._set_tip(self._segment_slice_action, "" if has_anatomy_weights else "Segmentation model weights not configured")
@@ -2634,28 +2480,8 @@ class MainWindowView(QMainWindow):
         self._update_brain_mask_checkbox_availability()
 
     def _reset_segmentation_display(self) -> None:
-        """Full reset for a new/closed study - clears the per-volume cache
-        too (unlike `_refresh_segmentation_for_current_slice`, which only
-        resets the current slice's on-screen state without discarding
-        other slices' already-computed results).
-
-        A single-slice or whole-volume job may still be in flight (each
-        slice is only ~1-2s now, but a multi-hundred-slice volume batch is
-        still a multi-minute background job - see `_on_segment_volume_
-        clicked`) when this fires - `cancel()` stops the volume worker from
-        starting further slices, but the slice already running inside
-        `model.predict()` can't be interrupted and will still emit its
-        signal(s) later; `blockSignals(True)` on both workers' signal
-        objects ensures that late emission is silently dropped instead of
-        writing a stale result into what could by then
-        be a different volume's cache (the same class of bug as the
-        stale-cache-under-a-new-volume fix below, just for a job that
-        outlives the reset instead of one that already finished).
-        """
-        # Results, jobs (late signals blocked), NIfTI volume and the structure
-        # selection/opacity belong to the series - the ViewModel drops them.
-        self._segmentation.reset()
-        self._reset_auto_rois()  # derived from the segmentation cache
+        """Segmentation widgets back to their no-results state (new/closed series)."""
+        self._reset_auto_rois_button()
         self._segment_slice_action.setEnabled(False)
         self._set_tip(self._segment_slice_action, "Open a study first")
         self._segment_volume_action.setEnabled(False)
@@ -2672,7 +2498,6 @@ class MainWindowView(QMainWindow):
             self._segment_selection_dialog.reset()
 
     def _reset_stroke_display(self) -> None:
-        self._stroke.reset()
         self._check_stroke_btn.setEnabled(False)
         self._set_tip(self._check_stroke_btn, "Open a study first")
         self._stroke_lesion_cb.blockSignals(True)
@@ -2682,7 +2507,7 @@ class MainWindowView(QMainWindow):
 
     def _refresh_segmentation_for_current_slice(self) -> None:
         """Per-slice-change refresh: re-applies the *persisted* structure
-        selection (`_selected_segmentation_names`) using this slice's
+        selection (`SegmentationViewModel.selected_names`) using this slice's
         cached result, if one exists - the selection itself is
         whole-volume-scoped and is never touched here (only
         `_reset_segmentation_display` clears it, on close study/new volume
@@ -2694,8 +2519,8 @@ class MainWindowView(QMainWindow):
         slice: the selected structures simply reappear once this slice
         actually gets segmented.
         """
-        self._segmentation_masks_for_current_slice = None
-        cached = self._segmentation_cache.get(self._current_slice_index)
+        self._segmentation.current_masks = None
+        cached = self._segmentation.cache.get(self._study.current_slice)
         # Browsing only redraws this slice's cached overlay: the status bar
         # and the Segment actions belong to the segmentation *task* (e.g. a
         # running volume segmentation) and must not change on a slice change.
@@ -2707,9 +2532,9 @@ class MainWindowView(QMainWindow):
         self._stroke_lesion_cb.setChecked(False)
         self._stroke_lesion_cb.setEnabled(False)
         self._stroke_lesion_cb.blockSignals(False)
-        if self._current_slice_index in self._stroke.cache:
+        if self._study.current_slice in self._stroke.cache:
             self._stroke_status_label.setText("Done (cached)")
-            self._on_stroke_checked(self._current_slice_index, True)
+            self._on_stroke_checked(self._study.current_slice, True)
         else:
             self._stroke_status_label.setText("—")
 
@@ -2764,7 +2589,7 @@ class MainWindowView(QMainWindow):
         self._roi_table.setStyleSheet(
             f"QTableWidget {{ background: {SURFACE}; border: none; }}"
             f"QHeaderView::section {{ background: {SURFACE}; color: {TEXT_MUTED}; border: none;"
-            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px; }}"
+            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: {px(10)}px; }}"
             f"QTableWidget::item {{ padding: 4px; border-bottom: 1px solid {BORDER}; }}"
             f"QTableWidget::item:selected {{ background: {SURFACE_RAISED}; }}"
         )
@@ -2880,7 +2705,7 @@ class MainWindowView(QMainWindow):
         self._run_all_btn.setObjectName("runAllBtn")
         self._run_all_btn.setMinimumHeight(36)
         self._run_all_btn.setStyleSheet(
-            f"QPushButton#runAllBtn {{ font-size: 14px; font-weight: 700; padding: 6px 18px; }}"
+            f"QPushButton#runAllBtn {{ font-size: {px(14)}px; font-weight: 700; padding: 6px 18px; }}"
             f"QPushButton#runAllBtn:enabled {{ background: {ACCENT}; color: {BG}; border: none; border-radius: 4px; }}"
         )
         self._run_all_btn.setEnabled(False)
@@ -2893,7 +2718,7 @@ class MainWindowView(QMainWindow):
         self._qa_recipe_label = QLabel("Legacy QA recipe (Octave)")
         self._qa_recipe_label.setStyleSheet(f"color: {ACCENT_2}; font-weight: 600;")
         self._set_tip(self._qa_recipe_label, "Tools > Advanced > QA Recipe - switch back to Physical (default)")
-        self._qa_recipe_label.setVisible(self._qa_recipe == RECIPE_OCTAVE)
+        self._qa_recipe_label.setVisible(self._qa.recipe == RECIPE_OCTAVE)
         header.addWidget(self._qa_recipe_label)
         header.addStretch(1)
         layout.addLayout(header)
@@ -2916,7 +2741,7 @@ class MainWindowView(QMainWindow):
         self._metrics_table.setStyleSheet(
             f"QTableWidget {{ background: {SURFACE}; border: none; }}"
             f"QHeaderView::section {{ background: {SURFACE}; color: {TEXT_MUTED}; border: none;"
-            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: 10px; }}"
+            f" border-bottom: 1px solid {BORDER}; padding: 4px; font-weight: 600; font-size: {px(10)}px; }}"
             f"QTableWidget::item {{ padding: 4px; border-bottom: 1px solid {BORDER}; }}"
         )
 
@@ -2999,14 +2824,13 @@ class MainWindowView(QMainWindow):
         self._run_all_btn.setEnabled(self._confirm_rois_cb.isChecked())
         self._update_confirm_availability()
         self._refresh_metrics_box()
-        if not self._qa_results:
+        if not self._qa.results:
             return
         self._results_tab_btn.setEnabled(True)
         self._set_tip(self._results_tab_btn, "")
         self._export_action.setEnabled(True)
         self._set_tip(self._export_action, "")
-        self._refresh_results_page()
-        shown = self._current_slice_index if self._current_slice_index in self._results_slices else self._results_slices[0]
+        shown = self._study.current_slice if self._study.current_slice in self._results.slices else self._results.slices[0]
         self._show_result_for_slice(shown)
         self._show_view_page(1)
 
@@ -3022,13 +2846,13 @@ class MainWindowView(QMainWindow):
         summary tab is shown, else the displayed slice's metrics (the Per
         slice tab keeps the viewer on the same slice).
         """
-        if self._showing_study_summary() and self._qa_results:
+        if self._showing_study_summary() and self._qa.results:
             self._show_study_average_metrics()
         else:
-            self._show_metrics_for_slice(self._current_slice_index)
+            self._show_metrics_for_slice(self._study.current_slice)
 
     def _show_study_average_metrics(self) -> None:
-        pair = self._results_pair if self._results_by_pair(self._results_pair) else next(
+        pair = self._results.pair if self._results_by_pair(self._results.pair) else next(
             pair for pair in PAIRS if self._results_by_pair(pair)
         )
         summary = summarize_metrics(self._results_by_pair(pair).values())
@@ -3060,9 +2884,9 @@ class MainWindowView(QMainWindow):
         """
         pair = self._shown_pair(index)
         if pair is None:
-            pair = next((p for p in [self._results_pair, *PAIRS] if (index, p) in self._qa_errors), self._results_pair)
-        result = self._qa_results.get((index, pair))
-        error = self._qa_errors.get((index, pair))
+            pair = next((p for p in [self._results.pair, *PAIRS] if (index, p) in self._qa.errors), self._results.pair)
+        result = self._qa.results.get((index, pair))
+        error = self._qa.errors.get((index, pair))
         if result is not None:
             self._set_metric_status("mtf", "statusDone", "done")
             self._metric_value_items["mtf"].setText(f"{result.mtf_area:.3f} mm⁻¹")
@@ -3078,8 +2902,8 @@ class MainWindowView(QMainWindow):
             for key, _ in _METRIC_ROWS:
                 self._set_metric_status(key, "statusError", "error", tooltip=error)
                 self._metric_value_items[key].setText("")
-        elif self._qa_jobs is not None and any(
-            job[0] == index for job in self._qa_jobs + [self._qa_active_job] if job is not None
+        elif self._qa.jobs is not None and any(
+            job[0] == index for job in self._qa.jobs + [self._qa.active_job] if job is not None
         ):
             for key, _ in _METRIC_ROWS:
                 self._set_metric_status(key, "statusQueued", "running")
@@ -3090,17 +2914,15 @@ class MainWindowView(QMainWindow):
                 self._metric_value_items[key].setText("")
 
     def _reset_qa_results(self) -> None:
-        """Drops every QA result (new/closed study) and stops a running batch."""
-        self._qa.reset()
+        """QA widgets back to their no-results state (the results were dropped:
+        new/closed series or recipe change)."""
         self._cancel_run_btn.setVisible(False)
-        self._refresh_results_page()
         self._results_slice_label.setText("No results yet")
         self._reset_metrics_display()
         self._results_tab_btn.setEnabled(False)
         self._set_tip(self._results_tab_btn, "Run metrics to see results")
         self._export_action.setEnabled(False)
         self._set_tip(self._export_action, "Run metrics first")
-        self._export.clear()
 
     def _reset_metrics_display(self) -> None:
         """Back to the idle, nothing-has-run-yet state - `_build_metrics_box`'s
@@ -3111,7 +2933,7 @@ class MainWindowView(QMainWindow):
             self._set_metric_status(key, "statusQueued", "—")
             self._metric_value_items[key].setText("")
         self._result_verdict_label.setText("—")
-        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px; font-weight: 700;")
+        self._result_verdict_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: {px(15)}px; font-weight: 700;")
         self._result_decision_label.setText("")
         for name in _FEATURE_NAMES:
             self._feature_labels[name].setText("—")
@@ -3120,7 +2942,14 @@ class MainWindowView(QMainWindow):
 
 
 def main() -> None:
+    register_windows_app_id()  # before any window, so the taskbar shows BICTool's icon, not Python's
     app = QApplication(sys.argv)
+    app.setApplicationName("BICTool")
+    load_text_scale()  # before any widget: stylesheets and fonts are built from it
+    font = app.font()
+    font.setPixelSize(px(12))  # widgets without a stylesheet size (menus, chart axes) follow the app font
+    app.setFont(font)
+    app.setWindowIcon(app_icon())
     window = MainWindowView()
     window.show()
     sys.exit(app.exec())

@@ -3,7 +3,7 @@ interval in the details (no patient data)."""
 
 import numpy as np
 
-from bictool.domain.results.head_ct_verdict import CORE_FEATURES, HeadCtModel, evaluate_study
+from bictool.domain.results.head_ct_verdict import CORE_FEATURES, HeadCtModel, apply_metal_rule, evaluate_study
 from bictool.presentation.viewmodels.head_ct_verdict_text import (
     TONE_BAD,
     TONE_GOOD,
@@ -50,10 +50,13 @@ def test_acceptable_study_headline_has_probability_and_interval():
     text = verdict_text(verdict, 25)
 
     assert text.tone == TONE_GOOD
-    assert text.headline.startswith("Study verdict: Acceptable - ")
-    assert "likely acceptable (range " in text.headline
+    assert text.headline.startswith("Study verdict: Acceptable (") and text.headline.endswith(" % likely acceptable)")
+    assert "interval" not in text.headline  # the interval is in the details
+    assert text.basics[0] == "The measurements clearly match the studies a radiologist rated acceptable."
     assert "No measurement is outside the range of good studies." in text.basics
-    assert "95 % interval" in text.details[0]
+    assert text.details[0] == "How the verdict is made:"
+    assert any("Score = the model's estimate" in line for line in text.details)
+    assert any("95 % of the scores lie between " in line for line in text.details)
 
 
 def test_not_acceptable_study_lists_each_reason_with_interval_and_good_range():
@@ -68,7 +71,9 @@ def test_not_acceptable_study_lists_each_reason_with_interval_and_good_range():
 def test_uncertain_study_is_neutral_toned():
     text = verdict_text(evaluate_study(_model(), _slices(_steady(20.0, spread=2.0))), 25)
 
-    assert text.tone == TONE_NEUTRAL and "Uncertain, leaning" in text.headline
+    assert text.tone == TONE_NEUTRAL
+    assert text.headline.startswith("Study verdict: Uncertain, leaning ") and text.headline.endswith(" % likely acceptable)")
+    assert text.basics[0].startswith("No clear answer") and "check the images yourself" in text.basics[0]
 
 
 def test_missing_verdict_and_missing_model_are_explained():
@@ -84,8 +89,8 @@ def test_artefact_levels_are_worded_differently():
     assert "within the good range" in " ".join(steady.details)
     assert "above the good range, confirmed" in " ".join(jumpy.details)
     assert "provisional" in " ".join(jumpy.details)
-    assert "Possible artefacts: no sign." in steady.basics
-    assert "Possible artefacts: likely - the noise changes strongly from slice to slice." in jumpy.basics
+    assert "Artefacts (noise across slices): no sign." in steady.basics
+    assert "Artefacts (noise across slices): likely - the noise changes strongly from slice to slice." in jumpy.basics
 
 
 def test_outlier_slices_are_listed_as_one_based_numbers_and_slice_lookup_works():
@@ -108,3 +113,16 @@ def test_slice_hint_uses_words_and_keeps_the_number_in_the_tooltip():
     assert slice_hint(0.50)[0] == "This slice resembles: unclear"
     assert "0.98 of 1" in slice_hint(0.98)[1] and "Only a hint" in slice_hint(0.98)[1]
     assert slice_hint(None) == ("", "")
+
+
+def test_metal_rule_headline_has_no_score_and_the_model_result_is_in_the_details():
+    verdict = apply_metal_rule(evaluate_study(_model(), _slices(_steady(15.0))), [13, 14, 15, 17])
+
+    text = verdict_text(verdict, 25)
+
+    assert text.tone == TONE_NEUTRAL  # not a quality judgement
+    assert text.headline == "Study verdict: Not assessable - metal artefacts in the brain (slices 14–16, 18)"
+    assert text.basics[0].startswith("Metal streaks reach the brain on slices 14–16, 18.")
+    assert "No measurement is outside the range of good studies." not in text.basics
+    rule = next(line for line in text.details if "Metal rule:" in line)
+    assert "Without this rule the measurements would give: Acceptable (" in rule and "not reliable here" in rule

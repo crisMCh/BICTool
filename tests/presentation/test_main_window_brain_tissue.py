@@ -20,6 +20,7 @@ import bictool.presentation.viewmodels.brain_tissue_viewmodel as brain_tissue_vm
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
 from bictool.presentation.views.main_window import MainWindowView
+from bictool.presentation.viewmodels.brain_tissue_viewmodel import METHOD_THRESHOLD
 
 _SLICE_SHAPE = (60, 60)
 
@@ -67,7 +68,7 @@ def _fake_dicom_volume(num_slices: int = 1) -> DicomVolume:
 
 def _load_fake_volume(window: MainWindowView, num_slices: int = 1) -> DicomVolume:
     volume = _fake_dicom_volume(num_slices)
-    window._maybe_auto_segment_volume = lambda: None
+    window.view_model.auto_segment_primary = False
     window._on_volume_loaded(volume)
     return volume
 
@@ -108,7 +109,7 @@ def test_brain_mask_checkbox_disabled_when_slice_not_yet_segmented(monkeypatch):
         main_window_module, "load_config", lambda: {"segmentation": {"anatomy_weights_path": "/fake/weights.hdf5"}}
     )
     window = MainWindowView()
-    _load_fake_volume(window)  # stubs `_maybe_auto_segment_volume`, so nothing actually segments
+    _load_fake_volume(window)  # automatic segmentation off, so nothing actually segments
 
     assert window._brain_mask_cb.isEnabled() is False
     assert "Waiting for anatomy segmentation on this slice…" in window._brain_mask_cb.toolTip()
@@ -178,7 +179,7 @@ def test_result_is_cached_per_slice_and_not_recomputed(monkeypatch):
     window._white_matter_cb.setChecked(True)
 
     assert call_count == 1
-    assert 0 in window._brain_tissue_cache
+    assert 0 in window.view_model.brain_tissue.cache
 
 
 def test_checked_boxes_persist_and_reapply_across_slice_navigation():
@@ -191,7 +192,7 @@ def test_checked_boxes_persist_and_reapply_across_slice_navigation():
     window._show_slice(1)
 
     assert "tissue_White Matter" in window._roi_viewport._overlay_items
-    assert 1 in window._brain_tissue_cache
+    assert 1 in window.view_model.brain_tissue.cache
 
 
 def test_closing_study_resets_and_disables_brain_tissue_box():
@@ -203,7 +204,7 @@ def test_closing_study_resets_and_disables_brain_tissue_box():
 
     assert window._white_matter_cb.isEnabled() is False
     assert window._white_matter_cb.isChecked() is False
-    assert window._brain_tissue_cache == {}
+    assert window.view_model.brain_tissue.cache == {}
 
 
 def test_settings_dialog_accept_updates_settings_and_recomputes(monkeypatch):
@@ -239,14 +240,14 @@ def test_settings_dialog_accept_updates_settings_and_recomputes(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     window._white_matter_cb.setChecked(True)
-    assert 0 in window._brain_tissue_cache
+    assert 0 in window.view_model.brain_tissue.cache
 
     window._on_brain_tissue_settings_clicked()
 
-    assert window._brain_tissue_settings == new_settings
+    assert window.view_model.brain_tissue.settings[METHOD_THRESHOLD] == new_settings
     # Checkbox was still checked, so the slice was recomputed under the new
     # settings rather than left stale.
-    assert 0 in window._brain_tissue_cache
+    assert 0 in window.view_model.brain_tissue.cache
 
 
 def test_settings_dialog_cancel_leaves_settings_unchanged(monkeypatch):
@@ -262,11 +263,11 @@ def test_settings_dialog_cancel_leaves_settings_unchanged(monkeypatch):
     monkeypatch.setattr(main_window_module, "BrainTissueSettingsDialog", _FakeDialog)
 
     window = MainWindowView()
-    original_settings = window._brain_tissue_settings
+    original_settings = window.view_model.brain_tissue.settings[METHOD_THRESHOLD]
 
     window._on_brain_tissue_settings_clicked()
 
-    assert window._brain_tissue_settings is original_settings
+    assert window.view_model.brain_tissue.settings[METHOD_THRESHOLD] is original_settings
 
 
 def test_ensure_result_passes_configured_settings_through(monkeypatch):
@@ -282,10 +283,10 @@ def test_ensure_result_passes_configured_settings_through(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     window._on_brain_tissue_method_selected("HU Thresholding")
-    window._brain_tissue_settings.smoothing_size = 7
-    window._brain_tissue_settings.min_component_size = 99
-    window._brain_tissue_settings.white_matter_low = 15.0
-    window._brain_tissue_settings.white_matter_high = 25.0
+    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].smoothing_size = 7
+    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].min_component_size = 99
+    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].white_matter_low = 15.0
+    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].white_matter_high = 25.0
 
     window._ensure_brain_tissue_result_for_current_slice()
 
@@ -294,12 +295,14 @@ def test_ensure_result_passes_configured_settings_through(monkeypatch):
     assert captured["white_matter_range"] == (15.0, 25.0)
 
 
-def test_method_dropdown_offers_all_three_methods_and_defaults_to_adaptive():
+def test_method_dropdown_offers_the_methods_and_the_prototype_and_defaults_to_adaptive():
     window = MainWindowView()
     combo = window._brain_tissue_method_combo
 
-    assert [combo.itemText(i) for i in range(combo.count())] == ["Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding"]
-    assert window._brain_tissue_method == "Adaptive Thresholding"
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding", "Anchored (prototype)"
+    ]
+    assert window.view_model.brain_tissue.method == "Adaptive Thresholding"
     assert combo.currentText() == "Adaptive Thresholding"
 
 
@@ -316,7 +319,7 @@ def test_choosing_a_method_in_the_dropdown_switches_the_classifier():
 
     window._brain_tissue_method_combo.setCurrentText("Adaptive Thresholding")
 
-    assert window._brain_tissue_method == "Adaptive Thresholding"
+    assert window.view_model.brain_tissue.method == "Adaptive Thresholding"
 
 
 def test_settings_button_opens_the_selected_methods_dialog(monkeypatch):
@@ -354,11 +357,11 @@ def test_switching_method_clears_cache_and_dispatches_to_the_right_function(monk
     # "apply now" behavior as a settings-dialog change.
     window._on_brain_tissue_method_selected("Fuzzy C-Means")
     assert calls == ["adaptive", "fcm"]
-    assert 0 in window._brain_tissue_cache
+    assert 0 in window.view_model.brain_tissue.cache
 
     window._on_brain_tissue_method_selected("HU Thresholding")
     assert calls == ["adaptive", "fcm"]  # real (unmocked) threshold method ran instead, not one of the fakes above
-    assert 0 in window._brain_tissue_cache  # still recomputed and cached, just via the real function
+    assert 0 in window.view_model.brain_tissue.cache  # still recomputed and cached, just via the real function
 
 
 def _empty_result():
@@ -368,3 +371,12 @@ def _empty_result():
     return BrainTissueResult(
         masks={"White Matter": np.zeros(shape, dtype=bool), "Gray Matter": np.zeros(shape, dtype=bool)}
     )
+
+
+def test_the_prototype_has_no_settings_button():
+    window = MainWindowView()
+    assert window._brain_tissue_settings_btn.isEnabled()
+    window._brain_tissue_method_combo.setCurrentText("Anchored (prototype)")
+    assert not window._brain_tissue_settings_btn.isEnabled()
+    window._brain_tissue_method_combo.setCurrentText("Adaptive Thresholding")
+    assert window._brain_tissue_settings_btn.isEnabled()

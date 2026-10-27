@@ -25,6 +25,9 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, METAL_STREAK_SHARE, ArtefactFlags
+from bictool.domain.metrics.basal_ganglia import NOT_PLAUSIBLE, PLAUSIBLE_DIFFERENCE_HU, BasalGangliaSlice
+from bictool.domain.segmentation.segmentation_plausibility import FRAGMENTATION_LIMIT, SegmentationPlausibility
 from bictool.domain.results.head_ct_verdict import (
     FEATURE_LABELS,
     MIN_SLICES,
@@ -145,6 +148,12 @@ class StudyExportContext:
     failed_slices: list
     # The study-level head-CT verdict (physical recipe; None without one).
     head_ct_verdict: HeadCtVerdict | None = None
+    # Possible-artefact hints (metal, posterior-fossa bands); None if not computed.
+    artefacts: ArtefactFlags | None = None
+    # Basal-ganglia visibility per slice (provisional); None if not computed.
+    basal_ganglia: dict[int, BasalGangliaSlice] | None = None
+    # Study-level segmentation check (provisional); None if it did not run.
+    segmentation_plausibility: SegmentationPlausibility | None = None
 
 
 def _is_physical(results) -> bool:
@@ -161,8 +170,13 @@ def _head_ct_verdict_rows(verdict: HeadCtVerdict | None, falx_slices: int) -> li
             ["Verdict", f"not available - needs at least {MIN_SLICES} measured falx slices (this study: {falx_slices})"],
             ["Note", PROVISIONAL_NOTE],
         ]
+    rows.append(["Verdict", verdict.verdict])
+    if verdict.metal_rule:
+        rows.append([
+            "Metal rule", f"applied - metal streaks reach the brain on slices {_listed(verdict.metal_slices)}",
+            f"model alone: {verdict.model_verdict}",
+        ])
     rows += [
-        ["Verdict", verdict.verdict],
         ["P(acceptable)", f"{verdict.probability:.3f}"],
         ["95 % CI", f"{verdict.probability_low:.3f}", f"{verdict.probability_high:.3f}"],
         ["Falx slices used", str(verdict.n_slices)],
@@ -201,6 +215,71 @@ def _head_ct_verdict_rows(verdict: HeadCtVerdict | None, falx_slices: int) -> li
     return rows
 
 
+def _listed(indices) -> str:
+    return ", ".join(str(index + 1) for index in indices)
+
+
+def _artefact_rows(flags: ArtefactFlags | None) -> list[list[str]]:
+    """Possible-artefact hints - not part of the verdict (metal streaks in the brain: see the metal rule)."""
+    if flags is None:
+        return []
+    rows = [[], ["Possible artefacts (hints, not part of the verdict)"]]
+    rows.append([
+        f"Metal (> {METAL_HU:.0f} HU) on slices",
+        ", ".join(str(index + 1) for index in flags.metal_slices) or "none",
+        f"highest {flags.metal_max_hu:.0f} HU" if flags.metal_max_hu is not None else "",
+    ])
+    if flags.metal_streak_shares:
+        rows.append([
+            f"Metal streaks in the brain (>= {100 * METAL_STREAK_SHARE:.0f} % disturbed, provisional) on slices",
+            _listed(flags.metal_streak_slices) or "none",
+        ])
+        rows.append(["Metal slice", "Brain near metal disturbed (share)"])
+        rows += [[str(index + 1), f"{share:.3f}"] for index, share in sorted(flags.metal_streak_shares.items())]
+    rows.append([
+        f"Brainstem dark band >= {BAND_DEPTH_HU:g} HU (provisional) on slices",
+        ", ".join(str(index + 1) for index in flags.band_slices) or "none",
+    ])
+    if flags.band_depths:
+        rows.append(["Posterior-fossa slice", "Band depth (HU)"])
+        rows += [[str(index + 1), f"{depth:.2f}"] for index, depth in sorted(flags.band_depths.items())]
+    return rows
+
+
+def _basal_ganglia_rows(slices: dict[int, BasalGangliaSlice] | None) -> list[list[str]]:
+    """Basal-ganglia visibility per slice - provisional, not part of the verdict."""
+    if not slices:
+        return []
+    low, high = PLAUSIBLE_DIFFERENCE_HU
+    rows = [
+        [],
+        ["Basal ganglia visibility (provisional, not part of the verdict)"],
+        ["Slice", "Visibility", "Border contrast", "Lentiform - internal capsule (HU)",
+         "Caudate - internal capsule (HU)", f"Plausible ({low:g}-{high:g} HU)"],
+    ]
+    for index, s in sorted(slices.items()):
+        rows.append([
+            str(index + 1), s.level, f"{s.border:.3f}",
+            *(f"{s.differences[name]:.2f}" if name in s.differences else "" for name in ("Lentiform Nucleus", "Caudate Nucleus")),
+            "yes" if s.plausible else "no",
+        ])
+    return rows
+
+
+def _plausibility_rows(plausibility: SegmentationPlausibility | None) -> list[list[str]]:
+    """Study-level segmentation check - provisional, not part of the verdict."""
+    if plausibility is None or plausibility.slices == 0:
+        return []
+    return [
+        [],
+        ["Segmentation check (provisional, not part of the verdict)"],
+        ["Segmentation", "may be unreliable - check the overlays" if plausibility.unreliable else "looks consistent"],
+        ["Fragmentation (pieces per slice, median)", f"{plausibility.fragmentation:.1f}", f"limit {FRAGMENTATION_LIMIT:g}"],
+        ["Most fragmented slices", ", ".join(str(index + 1) for index in plausibility.worst_slices)],
+        ["Lobe islands", str(plausibility.lobe_islands)],
+    ]
+
+
 def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> list[list[str]]:
     """Study context, then per structure (ROI pair) its verdict and metric
     averages - structures are never averaged together."""
@@ -218,6 +297,9 @@ def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> l
     physical = _is_physical(all_results)
     if physical:
         rows += _head_ct_verdict_rows(context.head_ct_verdict, len(results.get("Falx", {})))
+    rows += _artefact_rows(context.artefacts)
+    rows += _basal_ganglia_rows(context.basal_ganglia)
+    rows += _plausibility_rows(context.segmentation_plausibility)
     for structure, by_slice in results.items():
         summary = summarize_metrics(by_slice.values())
         rows += [[], [structure]]
@@ -237,12 +319,19 @@ def _study_summary_rows(results: StudyResults, context: StudyExportContext) -> l
     return rows
 
 
-def _study_slice_rows(results: StudyResults, head_ct_verdict: HeadCtVerdict | None = None) -> list[list[str]]:
+def _study_slice_rows(
+    results: StudyResults,
+    head_ct_verdict: HeadCtVerdict | None = None,
+    artefacts: ArtefactFlags | None = None,
+    basal_ganglia: dict[int, BasalGangliaSlice] | None = None,
+) -> list[list[str]]:
     """Header, then one row per slice and structure (1-based slice numbers,
     in slice order). Physical recipe: plus the head-CT model's indicative
-    slice score and noise-outlier flag for falx slices."""
+    slice score and noise-outlier flag for falx slices. Last column: possible
+    artefacts on that slice."""
     physical = _is_physical(r for by_slice in results.values() for r in by_slice.values())
-    rows = [list(_SLICE_TABLE_HEADER_PHYSICAL if physical else _SLICE_TABLE_HEADER)]
+    rows = [[*(_SLICE_TABLE_HEADER_PHYSICAL if physical else _SLICE_TABLE_HEADER), "Possible artefact",
+             "Basal ganglia (provisional)"]]
     v = head_ct_verdict
     jobs = sorted(
         ((index, position, structure) for position, (structure, by_slice) in enumerate(results.items()) for index in by_slice),
@@ -268,6 +357,8 @@ def _study_slice_rows(results: StudyResults, head_ct_verdict: HeadCtVerdict | No
                 "Acceptable" if result.predicted_label == 1 else "Unacceptable",
                 *(f"{value:.6g}" for value in result.feature_vector),
                 *extra,
+                "; ".join(artefacts.on_slice(index)) if artefacts is not None else "",
+                basal_ganglia[index].level if basal_ganglia and index in basal_ganglia else "",
             ]
         )
     return rows
@@ -284,7 +375,7 @@ def export_study_csv(
     """
     for path, rows in (
         (summary_path, _study_summary_rows(results, context)),
-        (slices_path, _study_slice_rows(results, context.head_ct_verdict)),
+        (slices_path, _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)),
     ):
         with open(path, "w", newline="", encoding="ascii", errors="replace") as f:
             csv.writer(f).writerows(rows)
@@ -304,7 +395,8 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
         summary_sheet.column_dimensions[column].width = 14
 
     slices_sheet = workbook.create_sheet("Per slice")
-    for row in _study_slice_rows(results, context.head_ct_verdict):
+    slice_rows = _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)
+    for row in slice_rows:
         slices_sheet.append(row)
     for (header_cell,) in slices_sheet.iter_cols(min_row=1, max_row=1):
         slices_sheet.column_dimensions[header_cell.column_letter].width = max(len(str(header_cell.value)) + 2, 10)
@@ -316,11 +408,14 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
 _UNTRUSTED_NOTE = (
     "Columns marked 'legacy chest SVM, untrusted' and the decision value: the SVM classifier was trained on "
     "chest CT and is not validated for head CT. The study verdict (physical recipe) is the head-CT model's, "
-    "on each study's Dural Folds (falx) row. " + PROVISIONAL_NOTE
+    "on each study's Dural Folds (falx) row; metal streaks in the brain make it Not assessable (metal rule). "
+    + PROVISIONAL_NOTE
 )
 # Study-level head-CT verdict columns of the dataset summary (falx row only).
 _DATASET_VERDICT_HEADER = [
     "Study verdict (head-CT model)",
+    "Metal rule: streaks in the brain on slices",
+    "Model verdict before the metal rule",
     "P(acceptable)",
     "P 95 % CI low",
     "P 95 % CI high",
@@ -329,6 +424,15 @@ _DATASET_VERDICT_HEADER = [
     "Artefact indicator (provisional)",
     "Noise outlier slices",
     "Model",
+]
+# Possible-artefact hints, per study (on its first structure row).
+_DATASET_ARTEFACT_HEADER = [
+    "Metal slices",
+    "Brainstem dark band slices (provisional)",
+    "Basal ganglia visible slices (provisional)",
+    "Basal ganglia label not plausible slices",
+    "Segmentation fragmentation (provisional)",
+    "Segmentation may be unreliable (provisional)",
 ]
 _DATASET_SUMMARY_HEADER = [
     "Dataset",
@@ -343,6 +447,7 @@ _DATASET_SUMMARY_HEADER = [
     f"Verdict{_LEGACY_SVM}",
     f"Acceptable slices{_LEGACY_SVM}",
     *_DATASET_VERDICT_HEADER,
+    *_DATASET_ARTEFACT_HEADER,
     "Sheet",
     "Note",
 ]
@@ -420,6 +525,8 @@ def _dataset_verdict_cells(volume, structure: str) -> list:
         return [f"not available - needs at least {MIN_SLICES} measured falx slices", *empty[1:]]
     return [
         v.verdict,
+        _listed(v.metal_slices),
+        v.model_verdict or v.verdict,
         round(v.probability, 4),
         round(v.probability_low, 4),
         round(v.probability_high, 4),
@@ -431,6 +538,26 @@ def _dataset_verdict_cells(volume, structure: str) -> list:
     ]
 
 
+def _dataset_artefact_cells(volume, first_row: bool) -> list:
+    flags = getattr(volume, "artefact_flags", None)
+    basal = getattr(volume, "basal_ganglia", None)
+    plausibility = getattr(volume, "segmentation_plausibility", None)
+    if not first_row or (flags is None and basal is None and plausibility is None):
+        return [""] * len(_DATASET_ARTEFACT_HEADER)
+
+    def listed(indices):
+        return ", ".join(str(index + 1) for index in indices) or "none"
+
+    return [
+        listed(flags.metal_slices) if flags is not None else "",
+        listed(flags.band_slices) if flags is not None else "",
+        listed(sorted(i for i, s in basal.items() if s.visible)) if basal is not None else "",
+        listed(sorted(i for i, s in basal.items() if s.level == NOT_PLAUSIBLE)) if basal is not None else "",
+        f"{plausibility.fragmentation:.1f}" if plausibility is not None and plausibility.slices else "",
+        ("yes" if plausibility.unreliable else "no") if plausibility is not None and plausibility.slices else "",
+    ]
+
+
 def _dataset_summary_rows(volumes, sheet_names) -> list[list]:
     rows = []
     for volume, sheet in zip(volumes, sheet_names):
@@ -438,7 +565,7 @@ def _dataset_summary_rows(volumes, sheet_names) -> list[list]:
             rows.append([volume.group, volume.name, "", volume.slice_count, volume.segmented_slices,
                          *[""] * (len(_DATASET_SUMMARY_HEADER) - 7), sheet, volume.error])
             continue
-        for structure, qa in volume.structures.items():
+        for position, (structure, qa) in enumerate(volume.structures.items()):
             summary = summarize_metrics(qa.results.values())
             verdict = study_verdict(qa.results.values())
             notes = [] if qa.results or qa.errors else [f"No {structure} ROI found on any slice"]
@@ -467,6 +594,7 @@ def _dataset_summary_rows(volumes, sheet_names) -> list[list]:
                     verdict.verdict if verdict else "",
                     f"{verdict.acceptable} of {verdict.total}" if verdict else "",
                     *_dataset_verdict_cells(volume, structure),
+                    *_dataset_artefact_cells(volume, position == 0),
                     sheet,
                     note,
                 ]
@@ -554,6 +682,10 @@ def export_dataset_excel(volumes, path: str | Path) -> None:
             falx = volume.structures.get(DURAL_FOLDS)
             for row in _head_ct_verdict_rows(getattr(volume, "head_ct_verdict", None), len(falx.results) if falx else 0):
                 sheet.append(row)
+        for row in _artefact_rows(getattr(volume, "artefact_flags", None)):
+            sheet.append(row)
+        for row in _basal_ganglia_rows(getattr(volume, "basal_ganglia", None)):
+            sheet.append(row)
         for structure, qa in volume.structures.items():
             summary = summarize_metrics(qa.results.values())
             verdict = study_verdict(qa.results.values())

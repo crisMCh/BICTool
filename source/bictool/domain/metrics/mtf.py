@@ -14,6 +14,8 @@ default "physical" recipe (`physical_spectra.py`) corrects that; see
 docs/qa_method/physical_qa_recipe.md.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import butter, filtfilt
@@ -40,7 +42,43 @@ LP_POINTS = 15
 INTERP_BUMP_REMOVAL = 4
 
 
-def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
+@dataclass
+class MtfSteps:
+    """The intermediate steps of one `calc_mtf` run, for display (they don't
+    change the numbers). Image coordinates are 0-based (row, col) on the
+    upsampled grid `calc_mtf` works on (`IMAGE_INTERP_FACTOR` refine passes,
+    i.e. 2**IMAGE_INTERP_FACTOR x the ROI).
+
+    Edges are dropped on the way: near the border (no full profile), by the
+    bump removal, and later for a non-finite MTF. `profile_edges[j]` is the
+    detected edge pixel profile column j came from; `kept[i]` is the profile
+    column that ESF/LSF column i (and, after `select`, MTF column i) came from.
+    """
+
+    image: np.ndarray            # upsampled, unfiltered ROI (HU)
+    upsample: int                # upsampled pixels per ROI pixel
+    seed_box: tuple[int, int, int, int]  # (row0, row1, col0, col1) active-contour start region
+    segmentation: np.ndarray     # active-contour result (bool)
+    edge_points: np.ndarray      # (n_edges, 2) row, col of every detected edge pixel
+    profile_edges: np.ndarray    # (n_profiles,) index into edge_points
+    profile_lines: np.ndarray    # (n_profiles, 4) row0, col0, row1, col1 of each sampled line
+    esf_raw: np.ndarray          # (LP_POINTS, n_profiles) sampled profiles (HU), dark side first
+    kept: np.ndarray             # (n_kept,) index into the profile columns
+    esf: np.ndarray              # (LP_POINTS, n_kept) mean removed, low-passed, bumps removed
+    lsf: np.ndarray              # (LP_POINTS - 1, n_kept) derivative of `esf`
+    n_after_bumps: int = 0       # profile columns that survived the bump removal (before `select`)
+
+    def select(self, columns: np.ndarray) -> "MtfSteps":
+        """Keep only these ESF/LSF columns (e.g. the edges with a finite MTF)."""
+        return MtfSteps(
+            image=self.image, upsample=self.upsample, seed_box=self.seed_box, segmentation=self.segmentation,
+            edge_points=self.edge_points, profile_edges=self.profile_edges, profile_lines=self.profile_lines,
+            esf_raw=self.esf_raw, kept=self.kept[columns], esf=self.esf[:, columns], lsf=self.lsf[:, columns],
+            n_after_bumps=self.n_after_bumps,
+        )
+
+
+def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, octave_step=False):
     """Port of `funcCalcMTFNew(myimg, ActContMask, PixSpc, ...)`.
 
     Parameters
@@ -49,6 +87,8 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     act_cont_mask_x, act_cont_mask_y : active-contour seed location
         (before interpolation; matches `ActContMask.x` / `ActContMask.y`)
     pix_spc : pixel spacing [mm] of `img_roi`
+    octave_step : the active contour's original (sign-flipping) step size, for
+        the legacy recipe - see `active_contour.region_seg`
 
     Returns
     -------
@@ -57,6 +97,18 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     MTFarea : 1D float64 array, shape (n_edges,) - area under each MTF
         curve up to the Nyquist frequency
     """
+    xaxis, MTF, MTFarea, _steps = _calc_mtf(
+        img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=False, octave_step=octave_step
+    )
+    return xaxis, MTF, MTFarea
+
+
+def calc_mtf_with_steps(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, octave_step=False):
+    """`calc_mtf` plus its intermediate steps: `(xaxis, MTF, MTFarea, MtfSteps)`."""
+    return _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, keep_steps=True, octave_step=octave_step)
+
+
+def _calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc, *, keep_steps, octave_step=False):
     # (1) Preprocessing (interpolation + enhancement chain used only to
     # improve edge detection - the original, unfiltered image is restored
     # before line-profile sampling).
@@ -83,7 +135,7 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     x0, x1 = mask_x - win_width, mask_x + win_width
     m[y0 - 1:y1, x0 - 1:x1] = 1.0
 
-    seg = region_seg(myimg, m, ACTIVE_CONTOUR_MAX_ITS, ACTIVE_CONTOUR_ALPHA)
+    seg = region_seg(myimg, m, ACTIVE_CONTOUR_MAX_ITS, ACTIVE_CONTOUR_ALPHA, octave_step=octave_step)
 
     myimgedge = edge_kirsch(seg.astype(np.float64))
 
@@ -102,7 +154,8 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     vec_len = int(oround(VEC_LEN_MM / pix_spc))
     pix_spc_lp = (2 * VEC_LEN_MM) / LP_POINTS
 
-    esf_bak = line_profile(myimg, x_edge, y_edge, gdir, vec_len, LP_POINTS, imgxsize, imgysize)
+    lines = [] if keep_steps else None
+    esf_bak = line_profile(myimg, x_edge, y_edge, gdir, vec_len, LP_POINTS, imgxsize, imgysize, lines=lines)
 
     # Upsample the ESF for the following bump removal
     n = esf_bak.shape[0]
@@ -118,7 +171,8 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     esf = esf_lp
 
     # Bump removal
-    esf_no_bump = _remove_bumps(esf)
+    kept = [] if keep_steps else None
+    esf_no_bump = _remove_bumps(esf, kept=kept)
 
     esf = esf_no_bump
     if esf.shape[1] == 0:
@@ -127,6 +181,27 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
     # Downsample the ESF (was upsampled for better bump removal)
     esf = esf[::INTERP_BUMP_REMOVAL]
     pix_spc_lp = pix_spc_lp * INTERP_BUMP_REMOVAL
+
+    steps = None
+    if keep_steps:
+        upsample = 2 ** IMAGE_INTERP_FACTOR
+        steps = MtfSteps(
+            image=myimgorig.astype(np.float64),
+            upsample=upsample,
+            seed_box=(int(y0 - 1), int(y1), int(x0 - 1), int(x1)),
+            segmentation=np.asarray(seg, dtype=bool),
+            edge_points=np.column_stack([y_edge0, x_edge0]).astype(np.int64),
+            profile_edges=np.array([line[0] for line in lines], dtype=np.int64),
+            # (x0, y0, x1, y1), 1-based -> (row0, col0, row1, col1), 0-based
+            profile_lines=np.array(
+                [[ya - 1, xa - 1, yb - 1, xb - 1] for _k, xa, ya, xb, yb in lines], dtype=np.float64
+            ).reshape(-1, 4),
+            esf_raw=np.asarray(esf_bak, dtype=np.float64),
+            kept=np.array(kept, dtype=np.int64),
+            esf=esf.copy(),
+            lsf=np.diff(esf, axis=0),
+            n_after_bumps=len(kept),
+        )
 
     # Extend the ESF to the left and right (edge-value padding) to
     # generate more data points
@@ -146,10 +221,12 @@ def calc_mtf(img_roi, act_cont_mask_x, act_cont_mask_y, pix_spc):
 
     MTFarea = _mtf_area(MTF, xaxis)
 
-    return xaxis, MTF, MTFarea
+    return xaxis, MTF, MTFarea, steps
 
 
-def _remove_bumps(esf):
+def _remove_bumps(esf, kept=None):
+    """ESF columns whose LSF peak is compact enough; `kept`, if given,
+    receives the surviving column indices."""
     n_samples, n_cols = esf.shape
     idx_peak_left = int(oround(0.40 * n_samples))
     idx_peak_right = int(oround(0.60 * n_samples))
@@ -185,6 +262,8 @@ def _remove_bumps(esf):
             tmp[:idx_left] = tmp[idx_left - 1]
             tmp[idx_right - 1:] = tmp[idx_right - 1]
             columns.append(tmp)
+            if kept is not None:
+                kept.append(idx_col)
 
     if not columns:
         return np.zeros((n_samples, 0), dtype=np.float64)

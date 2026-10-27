@@ -38,6 +38,7 @@ class SegmentationViewModel(QObject):
     cancel_available_changed = Signal(bool)  # the running job (volume) can be cancelled
     slice_segmented = Signal(int)           # slice index whose result is now in `cache`
     message = Signal(str, str, str)         # (level "warning"/"critical", title, text) for a dialog
+    plausibility_changed = Signal()         # `plausibility` was (re)computed or dropped
 
     def __init__(
         self,
@@ -66,6 +67,11 @@ class SegmentationViewModel(QObject):
         self.selected_names: set[str] = set(mapping)
         self.opacity = DEFAULT_OPACITY
         self.current_masks: dict | None = None  # decoded masks of the shown slice (or None)
+        # Does the segmentation of the study look plausible (provisional, study-level) - computed in the
+        # background after the volume segmentation (`segmentation_plausibility.assess_plausibility`).
+        self.plausibility = None
+        self.active_plausibility_worker = None
+        self.primary_plausibility = None
 
     # ---- configuration ----
 
@@ -128,6 +134,7 @@ class SegmentationViewModel(QObject):
             self.active_volume_worker.cancel()
             self.active_volume_worker.signals.blockSignals(True)
         self.active_slice_worker = self.active_volume_worker = self.active_nifti_worker = None
+        self._drop_plausibility()
         self.nifti_volume = None
         self.cache = {}
         self.current_masks = None
@@ -142,10 +149,12 @@ class SegmentationViewModel(QObject):
         """Keep the primary series' results while another series is shown."""
         self.primary_cache = self.cache
         self.primary_nifti_volume = self.nifti_volume
+        self.primary_plausibility = self.plausibility
 
     def forget_primary(self) -> None:
         self.primary_cache = None
         self.primary_nifti_volume = None
+        self.primary_plausibility = None
 
     def restore_primary(self) -> bool:
         """Back on the primary series: its results return. False if none kept."""
@@ -153,6 +162,8 @@ class SegmentationViewModel(QObject):
             return False
         self.cache = self.primary_cache
         self.nifti_volume = self.primary_nifti_volume
+        self.plausibility = self.primary_plausibility
+        self.plausibility_changed.emit()
         return True
 
     # ---- internals ----
@@ -265,6 +276,8 @@ class SegmentationViewModel(QObject):
             self._set_status(
                 "Done (all segmentable slices already segmented)" if not_segmentable else "Done (all slices already segmented)"
             )
+            if self.plausibility is None and self.active_plausibility_worker is None:
+                self.assess_plausibility()
             return
         logger.info(
             "Segmenting volume: %d of %d slice(s) pending (%d not segmentable)...", len(pending), total, not_segmentable
@@ -294,6 +307,51 @@ class SegmentationViewModel(QObject):
     def _on_volume_finished(self) -> None:
         logger.info("Volume segmentation finished.")
         self._end_volume_job("Done (volume)")
+        self.assess_plausibility()
+
+    # ---- segmentation plausibility ----
+
+    def assess_plausibility(self) -> None:
+        """(Re)compute `plausibility` in the background from the current results (a no-op without a volume or
+        results). Runs on a snapshot, so the job never mixes series."""
+        volume = self._volume()
+        if volume is None or not self.cache:
+            return
+        from bictool.application.segmentation_plausibility_worker import SegmentationPlausibilityWorker
+        from bictool.domain.segmentation.segmentation_plausibility import assess_plausibility
+
+        masks = {index: result.masks for index, result in self.cache.items()}
+        spacing = volume.pixel_spacing_mm
+        self._drop_plausibility(emit=False)
+        worker = SegmentationPlausibilityWorker(lambda: assess_plausibility(masks, spacing))
+        worker.signals.finished.connect(self._on_plausibility_finished)
+        worker.signals.error.connect(lambda message: logger.warning("Segmentation check failed: %s", message))
+        self.active_plausibility_worker = worker
+        self._submit(worker)
+
+    def plausibility_line(self) -> str:
+        """The line in the Anatomical box ("" before the check ran)."""
+        from bictool.presentation.viewmodels.segmentation_plausibility_text import plausibility_line
+
+        return plausibility_line(self.plausibility)
+
+    def _on_plausibility_finished(self, plausibility) -> None:
+        self.active_plausibility_worker = None
+        self.plausibility = plausibility
+        logger.info(
+            "Segmentation check: fragmentation %.1f (%s)", plausibility.fragmentation,
+            "may be unreliable" if plausibility.unreliable else "consistent",
+        )
+        self.plausibility_changed.emit()
+
+    def _drop_plausibility(self, emit: bool = True) -> None:
+        if self.active_plausibility_worker is not None:
+            self.active_plausibility_worker.signals.blockSignals(True)  # a late result must not land
+            self.active_plausibility_worker = None
+        had = self.plausibility is not None
+        self.plausibility = None
+        if emit and had:
+            self.plausibility_changed.emit()
 
     def on_volume_cancelled(self, completed: int, total: int) -> None:
         logger.info("Volume segmentation cancelled after %d/%d slice(s).", completed, total)

@@ -46,6 +46,7 @@ where = ["source"]
 
 [tool.setuptools.package-data]
 "bictool.domain.results" = ["*.npz"]
+"bictool.presentation.resources" = ["*.png", "*.svg", "*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

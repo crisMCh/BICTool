@@ -21,6 +21,13 @@ In short:
 * **Outlier slices**: noise above 3x the study median - descriptive only.
 * **Plausibility**: septum minus falx medians of scan properties
   (sharpness, noise texture) compared with the range seen in training.
+* **Metal rule** (`apply_metal_rule`, after the model): metal streaks that
+  reach the brain within the verdict's slice range make the study Not
+  assessable. Streaks disturb the measurements themselves (the noise ROI
+  avoids them, so the study can look better than it is), and metal
+  artefacts do not make a study unacceptable as such - with implants CT is
+  often the only option; the reader decides. The model's own result is kept
+  in `model_verdict`.
 
 The model itself (`HeadCtModel`) is trained by
 `application/train_classifier.py fit-study`; the shipped one is
@@ -31,7 +38,7 @@ The model itself (`HeadCtModel`) is trained by
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.special import expit
@@ -54,6 +61,7 @@ FEATURE_LABELS = {
 ACCEPTABLE = "Acceptable"
 NOT_ACCEPTABLE = "Not acceptable"
 UNCERTAIN = "Uncertain"
+NOT_ASSESSABLE = "Not assessable"  # metal rule only - the model never gives it
 
 # Shown with every verdict of the shipped model (GUI and exports) - see
 # docs/qa_method/head_ct_model_card.md. Update with each new model version.
@@ -184,6 +192,12 @@ class HeadCtVerdict:
     slice_ids: tuple[int, ...]                    # the usable slices, in input order
     slice_probabilities: np.ndarray               # indicative only - the model is fitted on study medians
     model_version: str
+    metal_slices: tuple[int, ...] = ()            # slices with metal streaks in the brain (metal rule)
+    model_verdict: str | None = None              # the model's verdict when the metal rule overrode it
+
+    @property
+    def metal_rule(self) -> bool:
+        return bool(self.metal_slices)
 
 
 def _sigmoid(z):
@@ -328,3 +342,17 @@ def evaluate_study_results(
     falx, ids = slice_values(falx_results)
     septum = slice_values(septum_results)[0] if septum_results else None
     return evaluate_study(model, falx, septum, ids)
+
+
+def apply_metal_rule(verdict: HeadCtVerdict | None, streak_slices: Sequence[int]) -> HeadCtVerdict | None:
+    """Not assessable if metal streaks reach the brain (`streak_slices`, e.g.
+    `ArtefactFlags.metal_streak_slices`) on a slice within the range of the
+    verdict's slices - failed slices in between count (streaks can make the
+    measurement fail)."""
+    if verdict is None or not verdict.slice_ids:
+        return verdict
+    first, last = min(verdict.slice_ids), max(verdict.slice_ids)
+    hit = tuple(sorted(index for index in set(streak_slices) if first <= index <= last))
+    if not hit:
+        return verdict
+    return replace(verdict, verdict=NOT_ASSESSABLE, metal_slices=hit, model_verdict=verdict.verdict)

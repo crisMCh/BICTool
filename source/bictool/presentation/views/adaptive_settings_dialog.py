@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QLabel,
@@ -17,8 +18,9 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from bictool.presentation.views.text_scale import px
 
-# Same palette as `main_window.STYLESHEET` - duplicated rather than imported
+# Same palette as `main_window.stylesheet()` - duplicated rather than imported
 # to avoid a circular import, matching `export_dialog.py`'s own precedent.
 BG = "#11151a"
 SURFACE_RAISED = "#20262d"
@@ -27,10 +29,12 @@ TEXT = "#e7eaed"
 TEXT_MUTED = "#8d96a0"
 ACCENT = "#49c8de"
 
-_STYLESHEET = f"""
-QDialog {{ background: {BG}; color: {TEXT}; font-size: 12px; }}
+
+def _stylesheet() -> str:
+    return f"""
+QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLabel {{ color: {TEXT}; }}
-QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: 11px; }}
+QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: {px(11)}px; }}
 QDoubleSpinBox, QSpinBox {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 3px 6px; color: {TEXT};
@@ -47,9 +51,11 @@ QPushButton#adaptiveAcceptBtn {{ background: {ACCENT}; color: #08181c; font-weig
 @dataclass
 class AdaptiveSettings:
     block_size: int
-    plausible_low: float
+    plausible_low: float           # fixed range - used when no study range is available (or it's off)
     plausible_high: float
     min_component_size: int
+    smoothing_mm: float = 0.0      # Gaussian sigma before classifying (app default 1 mm)
+    use_study_range: bool = False  # plausible range from the study's basal-ganglia references (app default on)
 
 
 class AdaptiveSettingsDialog(QDialog):
@@ -61,7 +67,7 @@ class AdaptiveSettingsDialog(QDialog):
     def __init__(self, current: AdaptiveSettings, defaults: AdaptiveSettings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Adaptive Threshold Settings")
-        self.setStyleSheet(_STYLESHEET)
+        self.setStyleSheet(_stylesheet())
         self.setMinimumWidth(360)
         self._defaults = defaults
 
@@ -104,6 +110,24 @@ class AdaptiveSettingsDialog(QDialog):
         self._min_component_spin.setValue(current.min_component_size)
         form.addRow("Minimum region size (px)", self._min_component_spin)
 
+        self._smoothing_spin = QDoubleSpinBox()
+        self._smoothing_spin.setRange(0.0, 5.0)
+        self._smoothing_spin.setDecimals(1)
+        self._smoothing_spin.setSingleStep(0.5)
+        self._smoothing_spin.setSuffix(" mm")
+        self._smoothing_spin.setValue(current.smoothing_mm)
+        self._smoothing_spin.setToolTip("Light smoothing before classifying - less speckle. 0 = off.")
+        form.addRow("Smoothing", self._smoothing_spin)
+
+        self._study_range_check = QCheckBox("Use the study's own range (from the basal ganglia)")
+        self._study_range_check.setChecked(current.use_study_range)
+        self._study_range_check.setToolTip(
+            "Brain-tissue HU range from this study's caudate/lentiform (gray), internal capsule (white) and "
+            "ventricles (CSF) instead of the fixed range above - HU levels differ between scanners. "
+            "Falls back to the fixed range until the basal ganglia are segmented."
+        )
+        form.addRow("", self._study_range_check)
+
         layout.addLayout(form)
 
         restore_btn = QPushButton("Restore Defaults")
@@ -122,6 +146,8 @@ class AdaptiveSettingsDialog(QDialog):
         self._plausible_low_spin.setValue(self._defaults.plausible_low)
         self._plausible_high_spin.setValue(self._defaults.plausible_high)
         self._min_component_spin.setValue(self._defaults.min_component_size)
+        self._smoothing_spin.setValue(self._defaults.smoothing_mm)
+        self._study_range_check.setChecked(self._defaults.use_study_range)
 
     def settings(self) -> AdaptiveSettings:
         return AdaptiveSettings(
@@ -129,4 +155,6 @@ class AdaptiveSettingsDialog(QDialog):
             plausible_low=self._plausible_low_spin.value(),
             plausible_high=self._plausible_high_spin.value(),
             min_component_size=self._min_component_spin.value(),
+            smoothing_mm=self._smoothing_spin.value(),
+            use_study_range=self._study_range_check.isChecked(),
         )
