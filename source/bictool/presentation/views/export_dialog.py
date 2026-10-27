@@ -1,29 +1,24 @@
 """Export dialog (FR-07): lets the user pick what to export - the current
-slice's result or the whole study (averages + every slice) - which pieces,
-and where.
+slice's result or the whole study - and in which formats. The file name and
+folder are chosen next, in the standard save dialog (`main_window`).
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
-    QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QPushButton,
     QRadioButton,
     QVBoxLayout,
 )
+
+from bictool.presentation.viewmodels.export_viewmodel import SCOPE_SLICE, SCOPE_STUDY
 from bictool.presentation.views.text_scale import px
 
-SCOPE_SLICE = "slice"
-SCOPE_STUDY = "study"
+__all__ = ["SCOPE_SLICE", "SCOPE_STUDY", "ExportDialog"]
 
 # Same palette as `main_window.stylesheet()` - duplicated rather than imported
 # to avoid a circular import (main_window constructs this dialog), matching
@@ -43,10 +38,6 @@ QDialog {{ background: {BG}; color: {TEXT}; font-size: {px(12)}px; }}
 QLabel {{ color: {TEXT}; }}
 QLabel[role="muted"] {{ color: {TEXT_MUTED}; font-size: {px(11)}px; }}
 QCheckBox, QRadioButton {{ color: {TEXT}; padding: 2px 0; }}
-QLineEdit {{
-    background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
-    padding: 5px 8px; color: {TEXT};
-}}
 QPushButton {{
     background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 6px;
     padding: 5px 11px; color: {TEXT};
@@ -59,12 +50,13 @@ QPushButton#exportAcceptBtn:disabled {{ background: {SURFACE_RAISED}; color: {TE
 
 
 class ExportDialog(QDialog):
-    """Lets the user choose which result pieces to export - metrics as an
-    Excel workbook, metrics as ASCII/CSV, charts as JPG images, any
-    combination of at least one - and a destination folder.
+    """Lets the user choose which result pieces to export - a readable Excel
+    report, the complete tables as ASCII/CSV, charts as JPG images, any
+    combination of at least one.
 
     Doesn't perform the export itself: `main_window` reads `selected_items()`
-    /`destination()` after `exec()` returns `Accepted` and writes the files,
+    /`scope()` after `exec()` returns `Accepted`, asks for the file name and
+    writes the files,
     since chart-image export needs the live `QChartView`s this dialog has no
     reason to know about (keeps this dialog a plain, testable-without-a-
     result "what do you want" prompt).
@@ -73,7 +65,6 @@ class ExportDialog(QDialog):
     def __init__(
         self,
         *,
-        default_dir: str = "",
         study_available: bool = False,
         default_scope: str = SCOPE_SLICE,
         parent=None,
@@ -99,9 +90,9 @@ class ExportDialog(QDialog):
         layout.addSpacing(6)
 
         layout.addWidget(QLabel("What to export"))
-        self._excel_cb = QCheckBox("Metrics — Excel workbook (.xlsx)")
+        self._excel_cb = QCheckBox("Report — Excel workbook (.xlsx)")
         self._excel_cb.setChecked(True)
-        self._csv_cb = QCheckBox("Metrics — ASCII / CSV (.csv)")
+        self._csv_cb = QCheckBox("All numbers — CSV tables for analysis (.csv)")
         self._jpg_cb = QCheckBox("Charts — JPG images (MTF, NPS, PS, PS/MTF)")
         for cb in (self._excel_cb, self._csv_cb, self._jpg_cb):
             cb.toggled.connect(self._update_accept_enabled)
@@ -110,15 +101,11 @@ class ExportDialog(QDialog):
         self._on_scope_toggled(self._study_rb.isChecked())
 
         layout.addSpacing(6)
-        layout.addWidget(QLabel("Destination folder"))
-        dest_row = QHBoxLayout()
-        self._dest_edit = QLineEdit(default_dir)
-        self._dest_edit.textChanged.connect(self._update_accept_enabled)
-        browse_btn = QPushButton("Browse…")
-        browse_btn.clicked.connect(self._on_browse_clicked)
-        dest_row.addWidget(self._dest_edit, 1)
-        dest_row.addWidget(browse_btn)
-        layout.addLayout(dest_row)
+        naming = QLabel(
+            "Next you choose the file name and folder. All files of this export get that name."
+        )
+        naming.setWordWrap(True)
+        layout.addWidget(naming)
 
         note = QLabel("Exports contain only de-identified fields (no patient name/ID) — NFR-06, GDPR/BDSG.")
         note.setProperty("role", "muted")
@@ -126,18 +113,13 @@ class ExportDialog(QDialog):
         layout.addWidget(note)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        self._accept_btn = button_box.addButton("Export", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._accept_btn = button_box.addButton("Save as…", QDialogButtonBox.ButtonRole.AcceptRole)
         self._accept_btn.setObjectName("exportAcceptBtn")
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
         self._update_accept_enabled()
-
-    def _on_browse_clicked(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Choose export destination", self._dest_edit.text())
-        if directory:
-            self._dest_edit.setText(directory)
 
     def _on_scope_toggled(self, study: bool) -> None:
         if study:
@@ -147,7 +129,7 @@ class ExportDialog(QDialog):
 
     def _update_accept_enabled(self) -> None:
         any_selected = self._excel_cb.isChecked() or self._csv_cb.isChecked() or self._jpg_cb.isChecked()
-        self._accept_btn.setEnabled(any_selected and bool(self._dest_edit.text().strip()))
+        self._accept_btn.setEnabled(any_selected)
 
     def selected_items(self) -> set[str]:
         items: set[str] = set()
@@ -161,6 +143,3 @@ class ExportDialog(QDialog):
 
     def scope(self) -> str:
         return SCOPE_STUDY if self._study_rb.isChecked() else SCOPE_SLICE
-
-    def destination(self) -> Path:
-        return Path(self._dest_edit.text().strip())

@@ -836,13 +836,13 @@ def test_perform_export_writes_the_selected_files(monkeypatch, tmp_path):
     _load_fake_volume(window)
     _complete_a_run(window, monkeypatch)
 
-    window._perform_export({"excel", "csv", "jpg"}, tmp_path)
+    window._perform_export({"excel", "csv", "jpg"}, tmp_path / "Slice 1.xlsx")
 
     written = sorted(p.name for p in tmp_path.iterdir())
-    assert any(name.endswith("_metrics.xlsx") for name in written)
-    assert any(name.endswith("_metrics.csv") for name in written)
-    assert any(name.endswith("_mtf.jpg") for name in written)
-    assert any(name.endswith("_ratio.jpg") for name in written)
+    assert written == [
+        "Slice 1 - MTF.jpg", "Slice 1 - NPS.jpg", "Slice 1 - PS-MTF ratio.jpg", "Slice 1 - PS.jpg",
+        "Slice 1.csv", "Slice 1.xlsx",
+    ]
 
 
 def test_perform_export_only_writes_the_selected_items(monkeypatch, tmp_path):
@@ -851,11 +851,9 @@ def test_perform_export_only_writes_the_selected_items(monkeypatch, tmp_path):
     _load_fake_volume(window)
     _complete_a_run(window, monkeypatch)
 
-    window._perform_export({"csv"}, tmp_path)
+    window._perform_export({"csv"}, tmp_path / "Slice 1.csv")
 
-    written = list(tmp_path.iterdir())
-    assert len(written) == 1
-    assert written[0].name.endswith("_metrics.csv")
+    assert [p.name for p in tmp_path.iterdir()] == ["Slice 1.csv"]
 
 
 def test_roi_and_metrics_table_cells_are_center_aligned():
@@ -1041,15 +1039,40 @@ def test_study_export_writes_the_summary_and_per_slice_files(monkeypatch, tmp_pa
     _set_rois_on_slices(window, [0, 2])
     _run_batch_to_completion(window)
 
-    window._perform_study_export({"excel", "csv"}, tmp_path)
+    window._perform_study_export({"excel", "csv"}, tmp_path / "Study")
 
     written = sorted(path.name for path in tmp_path.iterdir())
-    assert len(written) == 3
-    assert any(name.endswith("_study_metrics.xlsx") for name in written)
-    assert any(name.endswith("_study_summary.csv") for name in written)
-    assert any(name.endswith("_study_slices.csv") for name in written)
-    workbook = openpyxl.load_workbook(next(tmp_path.glob("*_study_metrics.xlsx")))
+    assert written == ["Study - per slice.csv", "Study - summary.csv", "Study.xlsx"]
+    workbook = openpyxl.load_workbook(tmp_path / "Study.xlsx")
+    assert workbook.sheetnames == ["Summary", "Per slice"]
     assert len(list(workbook["Per slice"].iter_rows())) == 3  # header + slices 1 and 3
+
+
+def test_the_export_is_saved_under_the_chosen_name_and_the_folder_is_remembered(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QFileDialog
+
+    from bictool.infrastructure.ui_settings import EXPORT_FOLDER
+
+    window = MainWindowView()
+    _load_fake_volume(window)
+    _complete_a_run(window, monkeypatch)
+    asked = []
+
+    def save_dialog(_parent, _title, suggested, file_filter):
+        asked.append((Path(suggested).name, file_filter))
+        return str(tmp_path / "chosen.xlsx"), file_filter
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", save_dialog)
+
+    path = window._ask_export_path("slice", {"excel", "csv"})
+
+    assert path == tmp_path / "chosen.xlsx"
+    assert asked[0][0].startswith("BICTool slice 1 ") and asked[0][0].endswith(".xlsx")
+    assert window._ui_settings.get_str(EXPORT_FOLDER) == str(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: ("", ""))
+    assert window._ask_export_path("slice", {"excel"}) is None  # cancelled
 
 
 def _menu_path(window, *titles):
@@ -1247,3 +1270,9 @@ def test_sidebar_and_its_boxes_grow_with_the_window_and_the_handle():
     window.resize(2400, 1300)  # full screen
     QApplication.processEvents()
     assert window._main_splitter.sizes()[1] > before
+
+
+def test_the_wm_gm_box_tells_the_user_to_choose_the_method():
+    window = MainWindowView()
+    hint = window._brain_tissue_method_hint.text()
+    assert "Choose the method that fits this scan best" in hint

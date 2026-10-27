@@ -38,10 +38,9 @@ def format_dicom_date(raw: str | None) -> str:
         return raw
 
 
-def safe_file_stem(series_label: str) -> str:
-    """Filesystem-safe stem from a series label. The label has "·"/"×" and
-    spaces from its human-readable form (see `dicom_file_loader._build_candidate`);
-    runs of "_" are collapsed so e.g. "CT · 1 slice(s) · 512×434" doesn't
-    become "CT___1_slice_s_..._".
-    """
-    return re.sub(r"_+", "_", "".join(c if c.isalnum() else "_" for c in series_label)).strip("_")
+def safe_file_name(text: str, max_length: int = 150) -> str:
+    """A readable file name (no extension) from free text: characters Windows
+    forbids become "-", runs of spaces collapse, no trailing dots or spaces."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", text)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:max_length].rstrip(" .") or "BICTool export"

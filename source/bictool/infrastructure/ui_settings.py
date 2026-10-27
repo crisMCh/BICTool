@@ -18,6 +18,7 @@ ROI_DETAILS_OPEN = "ui/roi_details_open"
 VERDICT_DETAILS_OPEN = "ui/verdict_details_open"
 MAIN_SPLITTER = "ui/main_splitter"        # viewer | sidebar widths
 TRACE_SPLITTER = "ui/trace_splitter"      # content | trace log heights
+EXPORT_FOLDER = "ui/export_folder"        # last folder an export was saved in
 
 
 def section_key(name: str) -> str:

@@ -64,11 +64,11 @@ UNCERTAIN = "Uncertain"
 NOT_ASSESSABLE = "Not assessable"  # metal rule only - the model never gives it
 
 # Shown with every verdict of the shipped model (GUI and exports) - see
-# docs/qa_method/head_ct_model_card.md. Update with each new model version.
+# docs/qa_method/head_ct_model_card.md. User-facing text never states how many
+# studies the model was trained or tested on (user decision 2026-10-27).
 PROVISIONAL_NOTE = (
-    "Provisional model: trained on 11 head-CT studies rated by one radiologist; not yet confirmed on "
-    "independent data (one-time test: 2 of 4 point estimates correct, no confident wrong verdict). "
-    "Decision support only - see docs/qa_method/head_ct_model_card.md."
+    "Provisional model: trained on head-CT studies rated by a radiologist; not yet confirmed on independent "
+    "data. Decision support only - see docs/qa_method/head_ct_model_card.md."
 )
 
 CONFIDENCE = 0.95

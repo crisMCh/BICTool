@@ -12,7 +12,7 @@ PLAUSIBILITY_NOTE = (
     "Segmentation check (provisional): the anatomy CNN was trained on normal-looking brains; where it struggles "
     "(lesions, artefacts, noise) its labels break into many scattered pieces. Fragmentation = pieces of at least "
     f"20 mm² per label beyond its largest piece, summed over the labels, median over the slices with enough brain; "
-    f"above {FRAGMENTATION_LIMIT:g} the segmentation may be unreliable (limit from 16 studies). It does not say "
+    f"above {FRAGMENTATION_LIMIT:g} the segmentation may be unreliable (provisional limit). It does not say "
     "why, and it is not part of the verdict."
 )
 

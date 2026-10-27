@@ -10,6 +10,10 @@ default even though the GUI itself shows them (NFR-06, GDPR/BDSG), matching
 the intent already noted in `design/bictool_console_mockup.html`'s export
 modal ("Exports contain only de-identified fields").
 
+Two audiences: the **Excel** workbooks are readable reports (plain names,
+units, the verdict in words, formatting); the **CSV** files are the complete
+plain-ASCII tables for analysis.
+
 Chart-image export (JPG) isn't here - it needs a live `QChartView` to
 render from, so `main_window` handles that step directly rather than
 through this (Qt-free, testable) module.
@@ -21,9 +25,13 @@ import csv
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+
+from bictool import __version__
 
 from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, METAL_STREAK_SHARE, ArtefactFlags
 from bictool.domain.metrics.basal_ganglia import NOT_PLAUSIBLE, PLAUSIBLE_DIFFERENCE_HU, BasalGangliaSlice
@@ -100,13 +108,40 @@ def export_metrics_csv(result: SliceQualityResult, context: ExportContext, path:
 
 
 def export_metrics_excel(result: SliceQualityResult, context: ExportContext, path: str | Path) -> None:
+    """The shown slice as a readable one-sheet report."""
     workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "BICTool metrics"
-    for row in _export_rows(result, context):
-        sheet.append(row)
-    sheet.column_dimensions["A"].width = 26
-    sheet.column_dimensions["B"].width = 16
+    report = _Report(workbook.active, "Slice")
+    report.title(f"{_REPORT_TITLE} - single slice")
+    report.study_block([
+        ("Series", context.series_label),
+        ("Slice", f"{context.slice_number} of {context.slice_count}"),
+        *([("ROI pair", context.structure)] if context.structure else []),
+        ("Acquisition date", iso_date(context.acquisition_date)),
+        ("Pixel spacing", f"{context.pixel_spacing_mm:.3f} mm"),
+        ("QA method", _method_label([result])),
+    ])
+    report.heading("Measurements")
+    report.header("Measurement", "Value", "Unit")
+    values = {"mtf_area": result.mtf_area, "nps_variance": result.nps_roi2.var_nps,
+              "ps_mtf_ratio": result.ratio.ratio_lf_hf, "contrast": result.contrast_roi1}
+    for name, value in values.items():
+        label, unit, number_format = _PLAIN_METRICS[name]
+        report.row(label, value, unit, formats={2: number_format})
+    report.blank()
+    if _is_physical([result]):
+        report.note("The study verdict covers the whole study - export the whole study to get it.")
+    else:
+        report.row("Verdict (chest-CT classifier)", "Acceptable" if result.predicted_label == 1 else "Unacceptable")
+        report.row("Decision value", result.decision_value, formats={2: "0.000"})
+    report.blank()
+    report.heading("Technical details")
+    if _is_physical([result]):
+        report.row(f"Decision value{_LEGACY_SVM}", result.decision_value, formats={2: "0.000"})
+        report.row(f"Verdict{_LEGACY_SVM}", "Acceptable" if result.predicted_label == 1 else "Unacceptable")
+    report.header("Feature vector entry", "Value")
+    for name, value in zip(_FEATURE_NAMES, result.feature_vector):
+        report.row(name, float(value), formats={2: "0.0000"})
+    report.widths(44, 16, 12)
     workbook.save(str(path))
 
 
@@ -154,6 +189,11 @@ class StudyExportContext:
     basal_ganglia: dict[int, BasalGangliaSlice] | None = None
     # Study-level segmentation check (provisional); None if it did not run.
     segmentation_plausibility: SegmentationPlausibility | None = None
+    # The Study summary as the app words it (Excel report): headline, its tone
+    # ("good"/"bad"/"neutral") and the plain lines below it.
+    headline: str = ""
+    headline_tone: str = ""
+    summary_lines: tuple[str, ...] = ()
 
 
 def _is_physical(results) -> bool:
@@ -382,25 +422,244 @@ def export_study_csv(
 
 
 def export_study_excel(results: StudyResults, context: StudyExportContext, path: str | Path) -> None:
-    """One workbook: "Study summary" and "Per slice" sheets. `results`:
-    structure name -> {0-based slice index: result}.
+    """A readable workbook: "Summary" (study, result in words, measurements,
+    technical details below) and "Per slice" (one row per slice and ROI pair).
+    `results`: structure name -> {0-based slice index: result}.
     """
     workbook = Workbook()
-    summary_sheet = workbook.active
-    summary_sheet.title = "Study summary"
-    for row in _study_summary_rows(results, context):
-        summary_sheet.append(row)
-    summary_sheet.column_dimensions["A"].width = 26
-    for column in "BCD":
-        summary_sheet.column_dimensions[column].width = 14
-
-    slices_sheet = workbook.create_sheet("Per slice")
-    slice_rows = _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)
-    for row in slice_rows:
-        slices_sheet.append(row)
-    for (header_cell,) in slices_sheet.iter_cols(min_row=1, max_row=1):
-        slices_sheet.column_dimensions[header_cell.column_letter].width = max(len(str(header_cell.value)) + 2, 10)
+    _write_study_report(_Report(workbook.active, "Summary"), results, context)
+    _write_slice_table(workbook.create_sheet("Per slice"), results, context)
     workbook.save(str(path))
+
+
+# --- Excel report layout ---
+
+_REPORT_TITLE = "BICTool image-quality report"
+_REPORT_COLUMNS = 8  # columns a report sheet uses (widths, the headline band)
+_TONE_FILLS = {"good": "C6EFCE", "bad": "FFC7CE", "neutral": "FFEB9C"}
+# Study metric -> (plain name, unit, Excel number format) for people reading the report.
+_PLAIN_METRICS = {
+    "mtf_area": ("Sharpness (MTF area)", "1/mm", "0.000"),
+    "nps_variance": ("Noise (NPS variance)", "HU²·mm²", "0.0"),
+    "ps_mtf_ratio": ("Structure-to-noise (PS/MTF ratio, LF/HF)", "", "0.00"),
+    "contrast": ("Contrast", "HU", "0.00"),
+    "decision_value": ("Decision value (chest-CT classifier)", "", "0.000"),
+}
+_NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")
+_MUTED = "6B7480"
+
+
+def iso_date(dicom_date: str | None) -> str:
+    """DICOM `YYYYMMDD` -> `YYYY-MM-DD`; anything else unchanged ("" if missing)."""
+    if dicom_date and len(dicom_date) == 8 and dicom_date.isdigit():
+        return f"{dicom_date[:4]}-{dicom_date[4:6]}-{dicom_date[6:]}"
+    return dicom_date or ""
+
+
+def _method_label(results) -> str:
+    return "Physical QA recipe (head CT)" if _is_physical(results) else "Legacy recipe (Octave port, chest-CT classifier)"
+
+
+def _excel_value(value, digits: int | None = None):
+    """Numbers written as text by the shared row builders become real numbers
+    in Excel, rounded to `digits` significant digits if given."""
+    if isinstance(value, str) and _NUMBER.fullmatch(value.strip()):
+        if "." not in value and "e" not in value.lower():
+            return int(value)
+        value = float(value)
+    if digits is not None and isinstance(value, float):
+        return float(f"{value:.{digits}g}")
+    return value
+
+
+def _is_number(value) -> bool:
+    return isinstance(_excel_value(value), (int, float))
+
+
+class _Report:
+    """Writes a report sheet top to bottom: title, headings, label/value rows."""
+
+    def __init__(self, sheet, title: str) -> None:
+        self.sheet = sheet
+        self.sheet.title = title
+        self.sheet.sheet_view.showGridLines = False
+        self.next_row = 1
+
+    def _put(self, values, font=None, fill=None, formats=None, digits=None, wrap=False) -> None:
+        for column, value in enumerate(values, start=1):
+            if value is None or value == "":
+                continue
+            cell = self.sheet.cell(row=self.next_row, column=column, value=_excel_value(value, digits))
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=wrap)
+            if font is not None:
+                cell.font = font
+            if formats and column in formats and isinstance(cell.value, float):
+                cell.number_format = formats[column]
+        if fill is not None:  # the whole band, not only the text's cell
+            for column in range(1, _REPORT_COLUMNS + 1):
+                self.sheet.cell(row=self.next_row, column=column).fill = PatternFill("solid", start_color=fill)
+        self.next_row += 1
+
+    def title(self, text: str) -> None:
+        self._put([text], font=Font(bold=True, size=15))
+        self._put([f"Exported {date.today():%Y-%m-%d} with BICTool {__version__}. Contains no patient identifiers."],
+                  font=Font(italic=True, color=_MUTED))
+        self.blank()
+
+    def heading(self, text: str) -> None:
+        self._put([text], font=Font(bold=True, size=12))
+
+    def subheading(self, text: str) -> None:
+        self._put([text], font=Font(bold=True))
+
+    def header(self, *values) -> None:
+        self._put(values, font=Font(bold=True, color=_MUTED), wrap=len(values) > 2)
+
+    def row(self, *values, formats=None) -> None:
+        self._put(values, formats=formats)
+
+    def note(self, text: str) -> None:
+        self._put([text], font=Font(italic=True, color=_MUTED))
+
+    def headline(self, text: str, tone: str) -> None:
+        self._put([text], font=Font(bold=True, size=13), fill=_TONE_FILLS.get(tone, _TONE_FILLS["neutral"]))
+
+    def blank(self) -> None:
+        self.next_row += 1
+
+    def study_block(self, pairs) -> None:
+        self.heading("Study")
+        for label, value in pairs:
+            self._put([label, value])
+            self.sheet.cell(row=self.next_row - 1, column=1).font = Font(color=_MUTED)
+        self.blank()
+
+    def rows(self, rows) -> None:
+        """Rows from the shared CSV builders: one-cell rows are sub-headings,
+        rows of four or more labels are table headers; numbers rounded."""
+        for row in rows:
+            if not row:
+                self.blank()
+            elif len(row) == 1:
+                self.subheading(row[0])
+            elif len(row) >= 4 and not any(_is_number(value) for value in row):
+                self.header(*row)
+            else:
+                self._put(row, digits=4)
+
+    def widths(self, *widths) -> None:
+        for column, width in enumerate(widths, start=1):
+            self.sheet.column_dimensions[self.sheet.cell(row=1, column=column).column_letter].width = width
+
+
+def _write_study_report(report: _Report, results: StudyResults, context: StudyExportContext) -> None:
+    all_results = [result for by_slice in results.values() for result in by_slice.values()]
+    analysed = sorted({index for by_slice in results.values() for index in by_slice})
+    physical = _is_physical(all_results)
+    per_pair = ", ".join(f"{structure} {len(by_slice)}" for structure, by_slice in results.items())
+    report.title(_REPORT_TITLE)
+    report.study_block([
+        ("Series", context.series_label),
+        ("Acquisition date", iso_date(context.acquisition_date)),
+        ("Slices analysed", f"{len(analysed)} of {context.slice_count} ({per_pair})"),
+        *([("Failed slices", ", ".join(str(item) for item in context.failed_slices))] if context.failed_slices else []),
+        ("Pixel spacing", f"{context.pixel_spacing_mm:.3f} mm"),
+        ("QA method", _method_label(all_results)),
+    ])
+
+    report.heading("Result")
+    headline, tone, lines = context.headline, context.headline_tone, list(context.summary_lines)
+    if not headline:  # no text from the app: the bare verdict
+        headline, tone, lines = _bare_result(results, context, physical)
+    report.headline(headline, tone)
+    for line in lines:
+        report.row(line)
+    if physical:
+        report.note(PROVISIONAL_NOTE)
+    report.blank()
+
+    report.heading("Measurements (mean and SD over the slices)")
+    report.header("Measurement", "Unit", *(f"{structure} {stat}" for structure in results for stat in ("mean", "SD")))
+    summaries = {structure: summarize_metrics(by_slice.values()) for structure, by_slice in results.items()}
+    for name, (label, unit, number_format) in _PLAIN_METRICS.items():
+        if physical and name == "decision_value":
+            continue
+        cells, formats = [label, unit], {}
+        for structure in results:
+            metric = summaries[structure].get(name)
+            cells += [metric.mean, metric.std] if metric is not None else ["", ""]
+            formats.update({len(cells) - 1: number_format, len(cells): number_format})
+        report.row(*cells, formats=formats)
+    report.blank()
+
+    report.heading("Technical details")
+    report.note("The numbers behind the result, for experts.")
+    if physical:
+        report.rows(_head_ct_verdict_rows(context.head_ct_verdict, len(results.get("Falx", {})))[1:])
+    report.rows(_artefact_rows(context.artefacts))
+    report.rows(_basal_ganglia_rows(context.basal_ganglia))
+    report.rows(_plausibility_rows(context.segmentation_plausibility))
+    report.widths(44, 16, 16, 16, 16, 16, 16, 16)
+
+
+def _bare_result(results: StudyResults, context: StudyExportContext, physical: bool) -> tuple[str, str, list[str]]:
+    """Headline without the app's wording (e.g. exports outside the GUI)."""
+    if physical:
+        v = context.head_ct_verdict
+        if v is None:
+            return "Study verdict: not available", "neutral", []
+        tone = {"Acceptable": "good", "Not acceptable": "bad"}.get(v.verdict, "neutral")
+        return f"Study verdict: {v.verdict}", tone, []
+    lines = []
+    for structure, by_slice in results.items():
+        verdict = study_verdict(by_slice.values())
+        if verdict is not None:
+            lines.append(f"{structure}: {verdict.verdict} - {verdict.acceptable} of {verdict.total} slice(s) acceptable")
+    return "Study verdict (legacy majority vote)", "neutral", lines
+
+
+def _write_slice_table(sheet, results: StudyResults, context: StudyExportContext) -> None:
+    """One row per slice and ROI pair - plain names, numbers as numbers, filterable."""
+    physical = _is_physical(r for by_slice in results.values() for r in by_slice.values())
+    v, artefacts, basal = context.head_ct_verdict, context.artefacts, context.basal_ganglia
+    columns = [("Slice", None), ("ROI pair", None)] + [
+        (f"{label} ({unit})" if unit else label, number_format)
+        for name, (label, unit, number_format) in _PLAIN_METRICS.items() if name != "decision_value"
+    ]
+    if physical:
+        columns += [("Quality hint (0-1, indicative)", "0.00"), ("Noise outlier", None)]
+    else:
+        columns += [("Verdict (chest-CT classifier)", None), ("Decision value", "0.000")]
+    columns += [("Possible artefact", None), ("Basal ganglia (provisional)", None)]
+    sheet.title = "Per slice"
+    sheet.append([name for name, _format in columns])
+    jobs = sorted((index, position, structure)
+                  for position, (structure, by_slice) in enumerate(results.items()) for index in by_slice)
+    for index, _position, structure in jobs:
+        result = results[structure][index]
+        row = [index + 1, structure, result.mtf_area, result.nps_roi2.var_nps, result.ratio.ratio_lf_hf,
+               result.contrast_roi1]
+        if physical:
+            falx = structure == "Falx" and v is not None and index in v.slice_ids
+            row += [float(v.slice_probabilities[v.slice_ids.index(index)]) if falx else None,
+                    "yes" if falx and index in v.outlier_slices else None]
+        else:
+            row += ["Acceptable" if result.predicted_label == 1 else "Unacceptable", result.decision_value]
+        row += ["; ".join(artefacts.on_slice(index)) if artefacts is not None else None,
+                basal[index].level if basal and index in basal else None]
+        sheet.append([float(value) if hasattr(value, "dtype") else value for value in row])
+    for column, (name, number_format) in enumerate(columns, start=1):
+        header = sheet.cell(row=1, column=column)
+        header.font = Font(bold=True)
+        header.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+        sheet.column_dimensions[header.column_letter].width = 8 if column == 1 else 16
+        for (cell,) in sheet.iter_rows(min_row=2, min_col=column, max_col=column):
+            cell.alignment = Alignment(horizontal="center")
+            if number_format:
+                cell.number_format = number_format
+    sheet.row_dimensions[1].height = 45
+    sheet.freeze_panes = "C2"
+    sheet.auto_filter.ref = sheet.dimensions
 
 
 # --- Dataset export (many volumes, ROI1 structures kept apart) ---

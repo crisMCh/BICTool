@@ -126,7 +126,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pydicom
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QStandardPaths, Qt
 from PySide6.QtGui import QActionGroup, QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
     QScrollArea,
@@ -209,6 +209,7 @@ from bictool.domain.segmentation.brain_tissue_fcm import (
 from bictool.infrastructure.config import load_config
 from bictool.infrastructure.logging_config import QtLogHandler, configure_logging
 from bictool.infrastructure.ui_settings import (
+    EXPORT_FOLDER,
     MAIN_SPLITTER,
     ROI_DETAILS_OPEN,
     SHOW_TRACE_LOG,
@@ -963,25 +964,41 @@ class MainWindowView(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        path = self._ask_export_path(dialog.scope(), dialog.selected_items())
+        if path is None:
+            return
         if dialog.scope() == SCOPE_STUDY:
-            self._perform_study_export(dialog.selected_items(), dialog.destination())
+            self._perform_study_export(dialog.selected_items(), path)
         else:
-            self._perform_export(dialog.selected_items(), dialog.destination())
+            self._perform_export(dialog.selected_items(), path)
 
-    def _perform_study_export(self, items: set[str], destination: Path) -> None:
-        self._export.export_study(items, destination, self._series_combo.currentText())
+    def _ask_export_path(self, scope: str, items: set[str]) -> Path | None:
+        """Standard save dialog with a readable suggested name, in the last export folder."""
+        folder = self._ui_settings.get_str(EXPORT_FOLDER) or QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+        extension, file_filter = self._export.file_type(items)
+        suggested = Path(folder) / f"{self._export.suggested_name(scope)}{extension}"
+        chosen, _filter = QFileDialog.getSaveFileName(self, "Save export as", str(suggested), file_filter)
+        if not chosen:
+            return None
+        self._ui_settings.set_str(EXPORT_FOLDER, str(Path(chosen).parent))
+        return Path(chosen)
 
-    def _perform_export(self, items: set[str], destination: Path) -> None:
-        self._export.export_slice(items, destination, self._save_chart_images)
+    def _perform_study_export(self, items: set[str], path: Path) -> None:
+        self._export.export_study(items, path, self._series_combo.currentText())
 
-    def _save_chart_images(self, destination: Path, stem: str) -> list[Path]:
+    def _perform_export(self, items: set[str], path: Path) -> None:
+        self._export.export_slice(items, path, self._save_chart_images)
+
+    def _save_chart_images(self, folder: Path, name: str) -> list[Path]:
         """The four result charts of the shown slice as JPG (needs the widgets)."""
         written = []
-        for name, chart_view in (
-            ("mtf", self._mtf_chart_view), ("nps", self._nps_chart_view),
-            ("ps", self._ps_chart_view), ("ratio", self._ratio_chart_view),
+        for label, chart_view in (
+            ("MTF", self._mtf_chart_view), ("NPS", self._nps_chart_view),
+            ("PS", self._ps_chart_view), ("PS-MTF ratio", self._ratio_chart_view),
         ):
-            path = destination / f"{stem}_{name}.jpg"
+            path = folder / f"{name} - {label}.jpg"
             chart_view.grab().save(str(path), "JPG")
             written.append(path)
         return written
@@ -2248,6 +2265,15 @@ class MainWindowView(QMainWindow):
         method_row.addWidget(self._brain_tissue_settings_btn)
         self._update_brain_tissue_settings_button()
         layout.addLayout(method_row)
+        # No method fits every scan, and ROI2 (the noise ROI) is placed in the
+        # white matter it finds - so the user picks the one that fits.
+        self._brain_tissue_method_hint = QLabel(
+            "ⓘ Choose the method that fits this scan best: show WM/GM and compare. "
+            "The noise ROIs are placed in the white matter it finds."
+        )
+        self._brain_tissue_method_hint.setProperty("role", "muted")
+        self._brain_tissue_method_hint.setWordWrap(True)
+        layout.addWidget(self._brain_tissue_method_hint)
 
         # Overlays in a 2x2 grid - half the height of a single column. The
         # two tissue classes share the left column, CSF and the skull-strip
