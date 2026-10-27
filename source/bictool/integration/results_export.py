@@ -25,7 +25,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, ArtefactFlags
+from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, METAL_STREAK_SHARE, ArtefactFlags
 from bictool.domain.metrics.basal_ganglia import NOT_PLAUSIBLE, PLAUSIBLE_DIFFERENCE_HU, BasalGangliaSlice
 from bictool.domain.segmentation.segmentation_plausibility import FRAGMENTATION_LIMIT, SegmentationPlausibility
 from bictool.domain.results.head_ct_verdict import (
@@ -170,8 +170,13 @@ def _head_ct_verdict_rows(verdict: HeadCtVerdict | None, falx_slices: int) -> li
             ["Verdict", f"not available - needs at least {MIN_SLICES} measured falx slices (this study: {falx_slices})"],
             ["Note", PROVISIONAL_NOTE],
         ]
+    rows.append(["Verdict", verdict.verdict])
+    if verdict.metal_rule:
+        rows.append([
+            "Metal rule", f"applied - metal streaks reach the brain on slices {_listed(verdict.metal_slices)}",
+            f"model alone: {verdict.model_verdict}",
+        ])
     rows += [
-        ["Verdict", verdict.verdict],
         ["P(acceptable)", f"{verdict.probability:.3f}"],
         ["95 % CI", f"{verdict.probability_low:.3f}", f"{verdict.probability_high:.3f}"],
         ["Falx slices used", str(verdict.n_slices)],
@@ -210,8 +215,12 @@ def _head_ct_verdict_rows(verdict: HeadCtVerdict | None, falx_slices: int) -> li
     return rows
 
 
+def _listed(indices) -> str:
+    return ", ".join(str(index + 1) for index in indices)
+
+
 def _artefact_rows(flags: ArtefactFlags | None) -> list[list[str]]:
-    """Possible-artefact hints - not part of the verdict."""
+    """Possible-artefact hints - not part of the verdict (metal streaks in the brain: see the metal rule)."""
     if flags is None:
         return []
     rows = [[], ["Possible artefacts (hints, not part of the verdict)"]]
@@ -220,6 +229,13 @@ def _artefact_rows(flags: ArtefactFlags | None) -> list[list[str]]:
         ", ".join(str(index + 1) for index in flags.metal_slices) or "none",
         f"highest {flags.metal_max_hu:.0f} HU" if flags.metal_max_hu is not None else "",
     ])
+    if flags.metal_streak_shares:
+        rows.append([
+            f"Metal streaks in the brain (>= {100 * METAL_STREAK_SHARE:.0f} % disturbed, provisional) on slices",
+            _listed(flags.metal_streak_slices) or "none",
+        ])
+        rows.append(["Metal slice", "Brain near metal disturbed (share)"])
+        rows += [[str(index + 1), f"{share:.3f}"] for index, share in sorted(flags.metal_streak_shares.items())]
     rows.append([
         f"Brainstem dark band >= {BAND_DEPTH_HU:g} HU (provisional) on slices",
         ", ".join(str(index + 1) for index in flags.band_slices) or "none",
@@ -392,11 +408,14 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
 _UNTRUSTED_NOTE = (
     "Columns marked 'legacy chest SVM, untrusted' and the decision value: the SVM classifier was trained on "
     "chest CT and is not validated for head CT. The study verdict (physical recipe) is the head-CT model's, "
-    "on each study's Dural Folds (falx) row. " + PROVISIONAL_NOTE
+    "on each study's Dural Folds (falx) row; metal streaks in the brain make it Not assessable (metal rule). "
+    + PROVISIONAL_NOTE
 )
 # Study-level head-CT verdict columns of the dataset summary (falx row only).
 _DATASET_VERDICT_HEADER = [
     "Study verdict (head-CT model)",
+    "Metal rule: streaks in the brain on slices",
+    "Model verdict before the metal rule",
     "P(acceptable)",
     "P 95 % CI low",
     "P 95 % CI high",
@@ -506,6 +525,8 @@ def _dataset_verdict_cells(volume, structure: str) -> list:
         return [f"not available - needs at least {MIN_SLICES} measured falx slices", *empty[1:]]
     return [
         v.verdict,
+        _listed(v.metal_slices),
+        v.model_verdict or v.verdict,
         round(v.probability, 4),
         round(v.probability_low, 4),
         round(v.probability_high, 4),

@@ -1,11 +1,19 @@
 """Text for the possible-artefact flags (`domain.artefacts.artefact_flags`) on
 the Results page: plain lines for the study summary, numbers for the details.
-They are hints where to look, not part of the verdict. Qt-free.
+They are hints where to look, not part of the verdict - except metal streaks
+in the brain, which make the verdict Not assessable (metal rule). Qt-free.
 """
 
 from __future__ import annotations
 
-from bictool.domain.artefacts.artefact_flags import BAND_DEPTH_HU, METAL_HU, ArtefactFlags
+from bictool.domain.artefacts.artefact_flags import (
+    BAND_DEPTH_HU,
+    METAL_HU,
+    METAL_STREAK_REACH_MM,
+    METAL_STREAK_SHARE,
+    STREAK_DEVIATION_HU,
+    ArtefactFlags,
+)
 from bictool.presentation.viewmodels.display_text import format_slice_ranges
 
 BAND_NOTE = (
@@ -19,8 +27,13 @@ def artefact_basics(flags: ArtefactFlags | None) -> list[str]:
     if flags is None:
         return []
     lines = []
-    if flags.metal_slices:
-        lines.append(f"Artefacts (metal): {_on_slices(flags.metal_slices)} - expect streaks nearby.")
+    if flags.metal_streak_slices:
+        lines.append(
+            f"Artefacts (metal): {_on_slices(flags.metal_slices)} - streaks reach the brain "
+            f"{_on_slices(flags.metal_streak_slices)}."
+        )
+    elif flags.metal_slices:
+        lines.append(f"Artefacts (metal): {_on_slices(flags.metal_slices)} - no streaks measured in the brain.")
     if flags.band_slices:
         lines.append(
             f"Artefacts (posterior fossa): possible dark band across the brainstem {_on_slices(flags.band_slices)}."
@@ -45,6 +58,13 @@ def artefact_details(flags: ArtefactFlags | None) -> list[str]:
     details = []
     if flags.metal_slices:
         details.append(f"Metal: pixels above {METAL_HU:.0f} HU, highest {flags.metal_max_hu:.0f} HU.")
+        if flags.metal_streak_shares:
+            shares = ", ".join(f"{index + 1}: {100 * share:.0f} %" for index, share in sorted(flags.metal_streak_shares.items()))
+            details.append(
+                f"Metal streaks in the brain: share of brain tissue within {METAL_STREAK_REACH_MM:g} mm of the metal "
+                f"that differs by more than {STREAK_DEVIATION_HU:g} HU from the brain median, per slice "
+                f"(streaks from {100 * METAL_STREAK_SHARE:.0f} %, provisional): {shares}."
+            )
     else:
         details.append(f"Metal: none (no pixels above {METAL_HU:.0f} HU).")
     if flags.band_depths:

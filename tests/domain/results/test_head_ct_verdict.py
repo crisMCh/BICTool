@@ -8,8 +8,10 @@ from bictool.domain.results.head_ct_verdict import (
     CORE_FEATURES,
     MIN_SLICES,
     NOT_ACCEPTABLE,
+    NOT_ASSESSABLE,
     UNCERTAIN,
     HeadCtModel,
+    apply_metal_rule,
     evaluate_study,
     probability,
 )
@@ -189,3 +191,17 @@ def test_results_are_turned_into_per_slice_values_in_slice_order():
     many = {i: result(0.5) for i in range(10)}
     verdict = evaluate_study_results(_model(), many, many)
     assert verdict.slice_ids == tuple(range(10)) and len(verdict.plausibility) == 2
+
+
+def test_metal_streaks_in_the_verdict_range_make_the_study_not_assessable():
+    ids = [index for index in range(10, 36) if index != 14]  # slice 14 failed
+    v = evaluate_study(_model(), _slices(_steady(15.0)), slice_ids=ids)
+    assert v.verdict == ACCEPTABLE
+
+    ruled = apply_metal_rule(v, [3, 12, 14])
+
+    assert ruled.verdict == NOT_ASSESSABLE and ruled.metal_rule
+    assert ruled.metal_slices == (12, 14)          # within the verdict's slice range, the failed slice included
+    assert ruled.model_verdict == ACCEPTABLE and ruled.probability == v.probability
+    assert apply_metal_rule(v, [3, 40]) is v and not v.metal_rule  # streaks elsewhere do not decide
+    assert apply_metal_rule(None, [12]) is None

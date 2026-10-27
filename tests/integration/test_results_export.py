@@ -499,3 +499,19 @@ def test_segmentation_check_rows():
     assert ["Most fragmented slices", "14, 19, 12"] in rows
     assert _plausibility_rows(SegmentationPlausibility(12.0, 28, (1,), 0))[2] == ["Segmentation", "looks consistent"]
     assert _plausibility_rows(None) == [] and _plausibility_rows(SegmentationPlausibility(0.0, 0, (), 0)) == []
+
+
+def test_the_metal_rule_is_exported_with_the_model_verdict(tmp_path):
+    from dataclasses import replace
+
+    from bictool.domain.results.head_ct_verdict import NOT_ASSESSABLE, apply_metal_rule
+
+    results = _physical_results()
+    verdict, context = _physical_context(results)
+    ruled = apply_metal_rule(verdict, [verdict.slice_ids[0]])
+    export_study_csv(results, replace(context, head_ct_verdict=ruled), tmp_path / "s.csv", tmp_path / "p.csv")
+    summary = _read_csv(tmp_path / "s.csv")
+
+    assert ["Verdict", NOT_ASSESSABLE] in summary
+    rule = next(row for row in summary if row[:1] == ["Metal rule"])
+    assert rule[1].endswith(f"slices {verdict.slice_ids[0] + 1}") and rule[2] == f"model alone: {verdict.verdict}"

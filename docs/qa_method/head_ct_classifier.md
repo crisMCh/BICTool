@@ -575,6 +575,16 @@ Figures (local, derived from patient data): `debugs/brain_threshold.png`
 `debugs/brain_threshold_slices.png` (examples of dropped slices with their
 ROIs).
 
+### 6.6 Metal rule (2026-10-21, revised 2026-10-22)
+
+Metal streaks that reach the brain within the verdict's slice range make the study **Not assessable**,
+whatever the model says (user decision; "Not acceptable" on 2026-10-21, changed because with implants CT is
+often the only option and the reader decides whether the images are adequate). The model's verdict and score
+stay in the details and exports. Reason: streaks disturb the measurements themselves - ROI2 avoids them, so
+the implants study (rated not acceptable) scored P = 0.55. Measure, evidence (2 studies with metal) and limits:
+`artefact_flags.md`, "Metal rule". The rule sits outside the model: training and the LOPO evaluation
+(`train_classifier.py`) are unchanged.
+
 ## 7. Legacy versus new
 
 | | Legacy (octave recipe) | New (physical recipe) |
@@ -600,6 +610,7 @@ Limitations:
 * Only soft head kernels (Canon FC26, Siemens H30s, Hr44), as in the
   physical recipe's scope.
 * Only 2 artefact studies, so the artefact indicator is provisional.
+* Only 2 studies with metal, so the metal rule's streak threshold is provisional (6.6).
 
 What would improve the model most:
 

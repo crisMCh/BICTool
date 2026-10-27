@@ -29,7 +29,7 @@ import numpy as np
 
 from bictool.domain.artefacts.artefact_flags import evaluate_artefact_flags
 from bictool.domain.metrics.basal_ganglia import evaluate_basal_ganglia
-from bictool.domain.results.head_ct_verdict import evaluate_study_results
+from bictool.domain.results.head_ct_verdict import apply_metal_rule, evaluate_study_results
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL, RECIPES
 from bictool.domain.results.volume_qa import VolumeQa, evaluate_volume_qa
 from bictool.domain.segmentation.brain_tissue_adaptive import (
@@ -148,8 +148,11 @@ def run_study(
         if recipe == RECIPE_PHYSICAL:
             # The study verdict comes from the falx; the septum only feeds the plausibility check.
             falx, septum = qa.structures.get(DURAL_FOLDS), qa.structures.get(SEPTUM_PELLUCIDUM)
-            qa.head_ct_verdict = evaluate_study_results(
-                default_head_ct_model(), falx.results if falx else {}, septum.results if septum else None
+            qa.head_ct_verdict = apply_metal_rule(
+                evaluate_study_results(
+                    default_head_ct_model(), falx.results if falx else {}, septum.results if septum else None
+                ),
+                qa.artefact_flags.metal_streak_slices,
             )
     except Exception as exc:  # one broken study must not stop the dataset
         logger.exception("Study %s / %s failed", group, study_dir.name)

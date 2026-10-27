@@ -3,7 +3,7 @@ interval in the details (no patient data)."""
 
 import numpy as np
 
-from bictool.domain.results.head_ct_verdict import CORE_FEATURES, HeadCtModel, evaluate_study
+from bictool.domain.results.head_ct_verdict import CORE_FEATURES, HeadCtModel, apply_metal_rule, evaluate_study
 from bictool.presentation.viewmodels.head_ct_verdict_text import (
     TONE_BAD,
     TONE_GOOD,
@@ -113,3 +113,16 @@ def test_slice_hint_uses_words_and_keeps_the_number_in_the_tooltip():
     assert slice_hint(0.50)[0] == "This slice resembles: unclear"
     assert "0.98 of 1" in slice_hint(0.98)[1] and "Only a hint" in slice_hint(0.98)[1]
     assert slice_hint(None) == ("", "")
+
+
+def test_metal_rule_headline_has_no_score_and_the_model_result_is_in_the_details():
+    verdict = apply_metal_rule(evaluate_study(_model(), _slices(_steady(15.0))), [13, 14, 15, 17])
+
+    text = verdict_text(verdict, 25)
+
+    assert text.tone == TONE_NEUTRAL  # not a quality judgement
+    assert text.headline == "Study verdict: Not assessable - metal artefacts in the brain (slices 14–16, 18)"
+    assert text.basics[0].startswith("Metal streaks reach the brain on slices 14–16, 18.")
+    assert "No measurement is outside the range of good studies." not in text.basics
+    rule = next(line for line in text.details if "Metal rule:" in line)
+    assert "Without this rule the measurements would give: Acceptable (" in rule and "not reliable here" in rule

@@ -4,7 +4,8 @@ Built from the QA run's results (`QaRunViewModel`): the slices that have a
 result (the Per-slice slider's positions), which ROI pair is shown
 (Falx/Septum switch), the study-level head-CT verdict (physical recipe) or
 the legacy majority vote (Octave recipe), the possible-artefact flags (metal,
-posterior-fossa bands - hints, not part of the verdict), the study table's
+posterior-fossa bands - hints; only metal streaks in the brain change the
+verdict, `apply_metal_rule`), the study table's
 rows, and the texts of one slice's view. Colours are a view decision - the ViewModel
 gives tones ("good", "bad", "neutral"). QtCore only - no widgets.
 """
@@ -18,7 +19,7 @@ from PySide6.QtCore import QObject, Signal
 
 from bictool.domain.artefacts.artefact_flags import ArtefactFlags, evaluate_artefact_flags
 from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice, evaluate_basal_ganglia
-from bictool.domain.results.head_ct_verdict import evaluate_study_results
+from bictool.domain.results.head_ct_verdict import apply_metal_rule, evaluate_study_results
 from bictool.domain.results.study_quality import RECIPE_PHYSICAL
 from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict
 from bictool.presentation.viewmodels.artefact_text import artefact_basics, artefact_details, slice_artefact_notes
@@ -110,13 +111,16 @@ class ResultsViewModel(QObject):
     def refresh(self) -> None:
         results = self._qa.results
         self.slices = sorted({index for index, _pair in results})
+        self.artefacts, self.basal_ganglia = self._image_hints() if results else (None, None)
         self.verdict = (
-            evaluate_study_results(self._model(), self._qa.results_by_pair(FALX), self._qa.results_by_pair(SEPTUM))
+            apply_metal_rule(
+                evaluate_study_results(self._model(), self._qa.results_by_pair(FALX), self._qa.results_by_pair(SEPTUM)),
+                self.artefacts.metal_streak_slices if self.artefacts else (),
+            )
             if self.is_physical()
             else None
         )
         self.table_jobs = sorted(results, key=lambda job: (job[0], PAIRS.index(job[1])))
-        self.artefacts, self.basal_ganglia = self._image_hints() if results else (None, None)
         self.changed.emit()
 
     def _image_hints(self) -> tuple[ArtefactFlags | None, dict[int, BasalGangliaSlice] | None]:

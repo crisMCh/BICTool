@@ -94,7 +94,7 @@ def test_artefact_flags_are_computed_from_the_shown_series():
     vm.refresh()
 
     assert vm.artefacts.metal_slices == (1,)
-    assert vm.artefact_lines() == ["Artefacts (metal): on slice 2 - expect streaks nearby."]
+    assert vm.artefact_lines() == ["Artefacts (metal): on slice 2 - no streaks measured in the brain."]
     qa.results = {}
     vm.refresh()
     assert vm.artefacts is None and vm.artefact_lines() == []

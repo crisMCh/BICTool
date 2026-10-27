@@ -93,6 +93,8 @@ def test_physical_recipe_studies_get_the_head_ct_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr(batch_qa, "evaluate_volume_qa", lambda *a, **k: {"Dural Folds": falx})
     calls = []
     monkeypatch.setattr(batch_qa, "evaluate_study_results", lambda model, f, s: calls.append((f, s)) or "verdict")
+    rules = []
+    monkeypatch.setattr(batch_qa, "apply_metal_rule", lambda verdict, streaks: rules.append(streaks) or verdict)
     monkeypatch.setattr(batch_qa, "export_dataset_excel", lambda *a: None)
     monkeypatch.setattr(batch_qa, "export_dataset_csv", lambda *a: None)
 
@@ -101,4 +103,5 @@ def test_physical_recipe_studies_get_the_head_ct_verdict(monkeypatch, tmp_path):
 
     assert [volume.head_ct_verdict for volume in physical] == ["verdict", "verdict"]
     assert calls[0] == ({0: "falx result"}, None)  # falx results; no septum in this fake
+    assert rules == [(), ()]  # the metal rule sees the streak slices (none here)
     assert [volume.head_ct_verdict for volume in legacy] == [None, None]

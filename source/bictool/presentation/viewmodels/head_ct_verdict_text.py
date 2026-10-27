@@ -12,7 +12,7 @@ Qt-free.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from bictool.domain.results.head_ct_verdict import (
     ACCEPTABLE,
@@ -20,10 +20,12 @@ from bictool.domain.results.head_ct_verdict import (
     MIN_SLICES,
     MIN_SLICES_ARTEFACT,
     NOT_ACCEPTABLE,
+    NOT_ASSESSABLE,
     OUTLIER_FACTOR,
     PROVISIONAL_NOTE,
     HeadCtVerdict,
 )
+from bictool.presentation.viewmodels.display_text import format_slice_ranges
 
 __all__ = [
     "PROVISIONAL_NOTE", "PROVISIONAL_SHORT", "VerdictText", "is_outlier", "resembles", "slice_hint", "slice_score",
@@ -79,8 +81,21 @@ def _leaning(v: HeadCtVerdict) -> str:
     return "acceptable" if v.probability >= 0.5 else "not acceptable"
 
 
+def _on_slices(indices) -> str:
+    indices = list(indices)
+    return f"slice{'s' if len(indices) > 1 else ''} {format_slice_ranges(indices)}"
+
+
+def _model_alone(v: HeadCtVerdict) -> HeadCtVerdict:
+    """The verdict as the model gave it, before the metal rule."""
+    return replace(v, verdict=v.model_verdict, metal_slices=(), model_verdict=None) if v.metal_rule else v
+
+
 def _headline(v: HeadCtVerdict) -> str:
-    """Plain words and the score - its interval is in the details."""
+    """Plain words and the score - its interval is in the details. With the
+    metal rule no score: the measurements are not valid there."""
+    if v.metal_rule:
+        return f"Study verdict: {NOT_ASSESSABLE} - metal artefacts in the brain ({_on_slices(v.metal_slices)})"
     score = f"({_pct(v.probability)} likely acceptable)"
     if v.verdict in (ACCEPTABLE, NOT_ACCEPTABLE):
         return f"Study verdict: {v.verdict} {score}"
@@ -89,6 +104,12 @@ def _headline(v: HeadCtVerdict) -> str:
 
 def _plain_meaning(v: HeadCtVerdict) -> str:
     """One sentence for users who do not know the model."""
+    if v.metal_rule:
+        return (
+            f"Metal streaks reach the brain on {_on_slices(v.metal_slices)}. They disturb the measurements, so "
+            "BICTool cannot judge this study. Whether the images are good enough is for the reader to decide - "
+            "with metal implants CT is often the only option."
+        )
     if v.verdict == ACCEPTABLE:
         return "The measurements clearly match the studies a radiologist rated acceptable."
     if v.verdict == NOT_ACCEPTABLE:
@@ -102,8 +123,15 @@ def _plain_meaning(v: HeadCtVerdict) -> str:
 def _how_it_is_made(v: HeadCtVerdict) -> list[str]:
     """The method and the numbers behind the headline, in plain words (top of the details)."""
     low, high = f"{100 * v.probability_low:.0f}", f"{100 * v.probability_high:.0f}"
+    metal = [
+        f"  • Metal rule: metal streaks reach the brain on {_on_slices(v.metal_slices)}, so the study is "
+        f"{NOT_ASSESSABLE.lower()}. Without this rule the measurements would give: "
+        f"{_headline(_model_alone(v)).removeprefix('Study verdict: ')} - not reliable here, the streaks "
+        "disturb the measurements.",
+    ] if v.metal_rule else []
     return [
         "How the verdict is made:",
+        *metal,
         f"  • Five measurements (median over the {v.n_slices} falx slices, listed below) are compared with "
         f"studies rated by a radiologist, using a statistical model (logistic regression, model {v.model_version}, "
         "provisional).",
@@ -112,6 +140,8 @@ def _how_it_is_made(v: HeadCtVerdict) -> list[str]:
         f"the rated studies and of this study's slices. 95 % of the scores lie between {low} and {high} %.",
         "  • Rule: Acceptable if that whole range is above 50 %, Not acceptable if it is below 50 %, "
         "otherwise Uncertain, leaning towards the side of the score.",
+        "  • Metal streaks that reach the brain in the analysed slices make the study Not assessable "
+        "(rule, provisional).",
     ]
 
 
@@ -174,12 +204,13 @@ def verdict_text(verdict: HeadCtVerdict | None, falx_slices: int, *, model_avail
             (),
         )
     basics = [_plain_meaning(verdict)]
-    if verdict.reasons:
+    # With the metal rule the measurements did not decide - their reasons stay in the details.
+    if verdict.reasons and not verdict.metal_rule:
         basics += [
             f"• {_PLAIN[f.name]} is {'higher' if f.outside == 'above' else 'lower'} than in good studies."
             for f in verdict.reasons
         ]
-    else:
+    elif not verdict.metal_rule:
         basics.append("No measurement is outside the range of good studies.")
     basics.append(_artefact_basic(verdict))
     if verdict.outlier_slices:

@@ -6,11 +6,13 @@ import pytest
 from bictool.domain.artefacts.artefact_flags import (
     BAND_DEPTH_HU,
     METAL_HU,
+    METAL_STREAK_SHARE,
     ArtefactFlags,
     band_depth,
     evaluate_artefact_flags,
     find_brainstem,
     metal_pixels,
+    metal_streak_share,
     posterior_fossa_slices,
 )
 
@@ -107,3 +109,45 @@ def test_no_segmentation_still_finds_metal():
     flags = evaluate_artefact_flags({}, lambda i: img, 2, SPACING)
     assert flags.metal_slices == (0, 1) and flags.band_depths == {} and flags.band_slices == ()
     assert ArtefactFlags().band_slices == ()
+
+
+def _head(shape=(200, 200)):
+    """A round brain (35 HU) in air, with a ventricle; metal at the edge of the head."""
+    brain = _disc(shape, (100, 100), 80)
+    ventricle = _disc(shape, (100, 100), 10)
+    img = np.full(shape, -1000.0)
+    img[brain] = 35.0
+    img[ventricle] = 5.0
+    metal = np.zeros(shape, bool)
+    metal[95:105, 185:190] = True  # 7.5 mm outside the brain
+    img[metal] = 3071.0
+    return img, {"Brain Parenchyma": brain & ~ventricle, "Ventricular System": ventricle}, metal
+
+
+def test_metal_streaks_count_only_when_they_disturb_the_brain_near_the_metal():
+    img, masks, metal = _head()
+    clean = metal_streak_share(img, metal, masks, SPACING)
+    assert clean == pytest.approx(0.0)  # a screw without streaks; the ventricle is not brain tissue
+
+    streaked = img.copy()
+    streaked[80:120, 120:180] += 120.0  # a bright streak next to the metal
+    assert metal_streak_share(streaked, metal, masks, SPACING) >= METAL_STREAK_SHARE
+
+    far = img.copy()
+    far[80:120, 25:60] += 120.0  # the same change more than 30 mm away: not a streak of this metal
+    assert metal_streak_share(far, metal, masks, SPACING) == pytest.approx(0.0)
+
+
+def test_streak_slices_need_metal_and_enough_brain_near_it():
+    img, masks, metal = _head()
+    streaked = img.copy()
+    streaked[80:120, 120:180] += 120.0
+    no_brain = {name: np.zeros_like(mask) for name, mask in masks.items()}
+    assert metal_streak_share(streaked, metal, no_brain, SPACING) is None
+
+    slices = {0: img, 1: streaked, 2: streaked}
+    flags = evaluate_artefact_flags({0: masks, 1: masks}, slices.__getitem__, 3, SPACING)  # slice 2 not segmented
+
+    assert flags.metal_slices == (0, 1, 2) and set(flags.metal_streak_shares) == {0, 1}
+    assert flags.metal_streak_slices == (1,)
+    assert flags.on_slice(1) == ("metal streaks in the brain",) and flags.on_slice(0) == ("metal",)

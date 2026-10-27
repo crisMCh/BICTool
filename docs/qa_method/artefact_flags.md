@@ -1,7 +1,8 @@
 # Possible-artefact flags: metal and posterior-fossa bands
 
-*Status: implemented 2026-10-08 (`domain/artefacts/artefact_flags.py`). Descriptive hints only — not part of
-the study verdict (`head_ct_classifier.md`). The band threshold is provisional.*
+*Status: implemented 2026-10-08 (`domain/artefacts/artefact_flags.py`). Descriptive hints, not part of the
+study verdict (`head_ct_classifier.md`) - except metal streaks in the brain, which make the verdict Not
+assessable (metal rule, 2026-10-21/22). The band and streak thresholds are provisional.*
 
 ## Why
 
@@ -18,6 +19,45 @@ A slice is flagged when at least 3 connected pixels exceed **2800 HU**.
   studies). Metal reached 3071 HU (scanner ceiling) and 4224 HU in the two studies containing metal.
   2800 HU leaves a margin on both sides; a single hot pixel is ignored.
 * Metal is a *source* of streaks, not proof of a bad image: one of the two studies with metal was rated good.
+
+## Metal rule: streaks in the brain (2026-10-21)
+
+**Problem.** The implants study (rated not acceptable, heavy streaks) was reported "Uncertain, leaning
+acceptable" (P = 0.55). Its noise ROI (ROI2) avoids the streaks since the WM/GM method change of 2026-10-09, so
+the measurements look better than the image.
+
+**Decision (user).** 2026-10-21 first "Not acceptable"; changed 2026-10-22 to **Not assessable**: metal
+artefacts do not make a study unacceptable as such - for patients with implants CT is often the only option
+(no MRI), and whether the images answer the clinical question is the reader's call. BICTool only says that its
+measurements cannot judge the study.
+
+**Why not "metal near the brain".** The second study with metal (tumor, rated acceptable) has small
+craniotomy screws 6-14 mm from the brain; the implants are 4-25 mm away. Distance does not separate them.
+Whether the streaks reach the brain does.
+
+**Measure** (per metal slice with segmentation): brain tissue = CNN labels without ventricles, subarachnoid
+space, septum and dural folds, eroded 2 mm (away from the bone edge). Take the tissue within **30 mm** of the
+metal and count the share that differs by more than **30 HU** from the slice's brain-tissue median. From
+**5 %** the streaks reach the brain. Fewer than 20 mm² of tissue near the metal: not judged.
+
+| Study | Metal slices | Disturbed share near the metal |
+|---|---|---|
+| implants (rated not acceptable) | 14-22 | 4, 8, 60, 98, -, 15, 22, 0, 38 % (slice 18: too little tissue) |
+| tumor, craniotomy screws (rated acceptable) | 27-30, 33 | 0, 0, 0, 0, 0.2 % |
+
+The same share far from the metal (> 60 mm) is 0-0.1 % on all these slices.
+
+**Rule** (`head_ct_verdict.apply_metal_rule`, after the model): if any slice within the verdict's slice range
+(first to last falx slice, failed slices in between included) has streaks in the brain, the verdict is **Not
+assessable - metal artefacts in the brain (slices ...)**, without a score and in neutral colour. The model's
+own result is kept and shown in the details ("Without this rule the measurements would give: ... - not
+reliable here") and exported. Result: implants study Not assessable (slices 15-17, 19-20, 22); tumor study
+unchanged, Acceptable (P = 0.93). No other study of the 16 contains metal.
+
+**Limits.** Two studies with metal; the 5 % threshold lies between 0.2 % and the weakest flagged slices. A
+large haemorrhage next to a clip can differ by more than 30 HU from the brain and could be mistaken for
+streaks. Iterative metal-artefact reduction (iMAR etc.) lowers the share, as intended: only streaks that
+remain visible count.
 
 ## Dark band across the brainstem
 
@@ -57,12 +97,17 @@ enter a verdict (head-ct-2), the 3.5 HU threshold needs confirming on new data r
 
 ## In the app and exports
 
-* Results → Study summary, under the verdict: "Artefacts (metal): on slices …" and "Artefacts (posterior
-  fossa): possible dark band across the brainstem on slice(s) …" (both recipes); the per-slice band depths are
-  in the details.
+* Results → Study summary, under the verdict: "Artefacts (metal): on slices … - streaks reach the brain on
+  slices …" (or "- no streaks measured in the brain") and "Artefacts (posterior fossa): possible dark band
+  across the brainstem on slice(s) …" (both recipes); the per-slice band depths and streak shares are in the
+  details. Study table and Per-slice view: "metal" or "metal streaks in the brain".
+* With the metal rule the verdict headline reads "Study verdict: Not assessable - metal artefacts in the brain
+  (slices …)".
 * Study export: block "Possible artefacts (hints, not part of the verdict)" with metal slices and highest HU,
-  band slices and the band depth per posterior-fossa slice. Dataset export (`batch_qa`): columns "Metal
-  slices" and "Brainstem dark band slices (provisional)", once per study.
+  streak slices and the share per metal slice, band slices and the band depth per posterior-fossa slice;
+  verdict block row "Metal rule" with the model's own verdict. Dataset export (`batch_qa`): columns "Metal
+  slices" and "Brainstem dark band slices (provisional)", once per study; "Metal rule: streaks in the brain on
+  slices" and "Model verdict before the metal rule" on the falx row.
 
 ## Not pursued (tested 2026-10-08)
 
