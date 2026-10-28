@@ -27,13 +27,15 @@ Input: an axial head-CT DICOM series with a soft-tissue (brain) kernel; any matr
 
 ## Getting the program (portable ZIP for Windows)
 
-The ready-to-run program is a ZIP file, **`BICTool-<version>-win64.zip`** (about 0.8 GB). It is **not in this
-repository and not on GitHub**: it contains the third-party CNN weights, which may only be used internally
-for now (see below). There are two ways to get it:
+The ready-to-run program is a ZIP file, **`BICTool-<version>-win64.zip`** (about 0.8 GB).
 
-- **Ask the BICTool project team** for the current ZIP (internal distribution).
-- **Build it yourself** from this repository (Windows, Python environment and CNN weights as described under
-  *Development setup*):
+- **Download it** from this repository's **[Releases](../../releases)** page (right-hand side of the
+  repository's main page): open the latest release (currently *BICTool 1.0.0*) and click
+  `BICTool-1.0.0-win64.zip` under *Assets*. It is not stored in the source code itself.
+  The ZIP contains the third-party CNN weights, which may only be used internally for now (see below) - do
+  not pass it on outside the project.
+- **Or build it yourself** from this repository (Windows, Python environment and CNN weights as described
+  under *Development setup*):
 
   ```bash
   python docs/manual/build_manual.py      # manuals and help pages (needs Microsoft Edge)
