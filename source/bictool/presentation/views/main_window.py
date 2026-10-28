@@ -126,8 +126,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pydicom
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QEvent, QStandardPaths, Qt
-from PySide6.QtGui import QActionGroup, QBrush, QColor, QPainter
+from PySide6.QtCore import QEvent, QStandardPaths, Qt, QUrl
+from PySide6.QtGui import QActionGroup, QBrush, QColor, QCursor, QDesktopServices, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QScrollArea,
     QStackedWidget,
@@ -206,10 +206,18 @@ from bictool.domain.segmentation.brain_tissue_fcm import (
 from bictool.domain.segmentation.brain_tissue_fcm import (
     DEFAULT_MIN_COMPONENT_SIZE as FCM_DEFAULT_MIN_COMPONENT_SIZE,
 )
+from bictool.infrastructure.app_paths import (
+    HELP_INDEX_FILE,
+    help_folder,
+    manual_path,
+    notices_path,
+    technical_reference_path,
+)
 from bictool.infrastructure.config import load_config
 from bictool.infrastructure.logging_config import QtLogHandler, configure_logging
 from bictool.infrastructure.ui_settings import (
     EXPORT_FOLDER,
+    HELP_LANGUAGE,
     MAIN_SPLITTER,
     ROI_DETAILS_OPEN,
     SHOW_TRACE_LOG,
@@ -219,7 +227,9 @@ from bictool.infrastructure.ui_settings import (
     section_key,
 )
 from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate, load_series
+from bictool.integration.help_files import load_help_documents
 from bictool.integration.model_files import default_head_ct_model
+from bictool.presentation.viewmodels.about_text import about_text
 from bictool.presentation.viewmodels.chart_data import mtf_display_curve
 from bictool.presentation.viewmodels.display_text import format_dicom_date
 from bictool.presentation.viewmodels.head_ct_verdict_text import (
@@ -231,6 +241,7 @@ from bictool.presentation.viewmodels.head_ct_verdict_text import (
 )
 from bictool.presentation.viewmodels.main_viewmodel import MainViewModel
 from bictool.presentation.viewmodels.help_text import STEP_HINTS, TAB_TOOLTIPS, TOOLTIPS
+from bictool.presentation.viewmodels.help_viewmodel import WIDGET_TOPICS, HelpViewModel
 from bictool.presentation.viewmodels.roi_pairs import (
     FALX,
     PAIR_LABELS,
@@ -259,6 +270,7 @@ from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueS
 from bictool.presentation.views.custom_window_dialog import CustomWindowDialog
 from bictool.presentation.views.dicom_tags_dialog import DicomTagsDialog
 from bictool.presentation.views.fcm_settings_dialog import FcmSettings, FcmSettingsDialog
+from bictool.presentation.views.help_window import HelpWindow
 from bictool.presentation.views.export_dialog import SCOPE_STUDY, ExportDialog
 from bictool.presentation.views.roi_viewport import RoiViewport
 from bictool.presentation.views.segmentation_selection_dialog import SegmentationSelectionDialog
@@ -538,6 +550,8 @@ class MainWindowView(QMainWindow):
         # The "Select Segments…" dialog, created on first use (the structure
         # choice and opacity live in the SegmentationViewModel).
         self._segment_selection_dialog: SegmentationSelectionDialog | None = None
+        # The help window (F1), created on first use.
+        self._help_window: HelpWindow | None = None
 
         # Remembered view choices (trace log, ROI details, verdict details).
         self._ui_settings = UiSettings()
@@ -891,6 +905,76 @@ class MainWindowView(QMainWindow):
         self._export_action.setEnabled(False)
         self._set_tip(self._export_action, "Run metrics first")
 
+        help_menu = menu_bar.addMenu("&Help")
+        # F1 is context help: the manual section of the control under the mouse
+        # (`_on_help_requested`). Window-wide, so it works wherever the focus is.
+        self._help_action = help_menu.addAction("Help Contents", self._on_help_requested)
+        self._help_action.setShortcut(QKeySequence(Qt.Key.Key_F1))
+        self._help_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        help_menu.addAction("Technical Reference", lambda: self._show_help("", "technical_reference"))
+        help_menu.addSeparator()
+        help_menu.addAction("User Manual (PDF, English)", lambda: self._open_pdf(manual_path("en")))
+        help_menu.addAction("Benutzerhandbuch (PDF, Deutsch)", lambda: self._open_pdf(manual_path("de")))
+        help_menu.addAction("Technical Reference (PDF)", lambda: self._open_pdf(technical_reference_path()))
+        help_menu.addSeparator()
+        help_menu.addAction("About BICTool", self._on_about_clicked)
+
+    def _open_pdf(self, path) -> None:
+        if not path.is_file():
+            QMessageBox.warning(self, "Manual", f"The manual was not found:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    # ---- help window (F1) ----
+
+    def _help(self) -> HelpWindow:
+        if self._help_window is None:
+            view_model = HelpViewModel(
+                load_help_documents(help_folder(), HELP_INDEX_FILE),
+                self._ui_settings.get_str(HELP_LANGUAGE, "en"),
+                parent=self,
+            )
+            view_model.language_changed.connect(lambda language: self._ui_settings.set_str(HELP_LANGUAGE, language))
+            self._help_window = HelpWindow(view_model, parent=self)
+        return self._help_window
+
+    def _show_help(self, anchor: str, document: str = "user_guide") -> None:
+        window = self._help()
+        window.show_topic(window.view_model.topic(anchor, document))
+
+    def _on_help_requested(self) -> None:
+        """F1 / "? Help": the manual section of the control under the mouse (or with the
+        focus), else the section of the shown page."""
+        widget = QApplication.widgetAt(QCursor.pos())
+        if widget is None or widget.window() is not self:
+            widget = QApplication.focusWidget()
+        names = []
+        by_widget = self._help_topic_names()
+        while widget is not None:
+            if widget in by_widget:
+                names.append(by_widget[widget])
+            widget = widget.parentWidget()
+        window = self._help()
+        window.show_topic(window.view_model.topic_for_widgets(names, self._page_help_topic()))
+
+    def _help_topic_names(self) -> dict:
+        """Widget -> its attribute name, for the controls listed in `WIDGET_TOPICS`."""
+        by_widget = {}
+        for name in WIDGET_TOPICS:
+            target = getattr(self, name, None)
+            for widget in (target.values() if isinstance(target, dict) else [target]):
+                if isinstance(widget, QWidget):
+                    by_widget[widget] = name
+        return by_widget
+
+    def _page_help_topic(self) -> str:
+        if self._view_stack.currentIndex() == 0:
+            return "main-window"
+        return "study-summary" if self._results_tabs.currentIndex() == 1 else "results-per-slice"
+
+    def _on_about_clicked(self) -> None:
+        QMessageBox.about(self, "About BICTool", about_text(notices_path()))
+
     def _on_close_study_clicked(self) -> None:
         self._study.close()
 
@@ -1153,6 +1237,12 @@ class MainWindowView(QMainWindow):
         self._window_preset_combo.currentTextChanged.connect(self._on_window_preset_clicked)
         controls_layout.addWidget(self._window_preset_combo)
         toolbar.addWidget(self._viewer_controls_widget)
+
+        # Always visible, on both pages: the help window (also F1).
+        self._help_btn = QPushButton("? Help")
+        self._help_btn.setObjectName("helpBtn")
+        self._help_btn.clicked.connect(lambda: self._show_help(self._page_help_topic()))
+        toolbar.addWidget(self._help_btn)
         outer.addLayout(toolbar)
 
         self._view_stack = QStackedWidget()
@@ -2887,7 +2977,7 @@ class MainWindowView(QMainWindow):
             "mtf": ("mtf_area", "{:.3f}", " mm⁻¹"),
             "nps": ("nps_variance", "{:.5f}", " HU²mm²"),
             "ratio": ("ps_mtf_ratio", "{:.2f}", " LF/HF"),
-            "contrast": ("contrast", "{:.1f}", " HU"),
+            "contrast": ("contrast", "{:.3f}", ""),  # RMS contrast: SD / mean, no unit
         }
         for key, _ in _METRIC_ROWS:
             name, number, unit = rows[key]
@@ -2923,7 +3013,7 @@ class MainWindowView(QMainWindow):
             self._set_metric_status("ratio", "statusDone", "done")
             self._metric_value_items["ratio"].setText(f"{result.ratio.ratio_lf_hf:.2f} LF/HF")
             self._set_metric_status("contrast", "statusDone", "done")
-            self._metric_value_items["contrast"].setText(f"{result.contrast_roi1:.1f} HU")
+            self._metric_value_items["contrast"].setText(f"{result.contrast_roi1:.3f}")
         elif error is not None:
             for key, _ in _METRIC_ROWS:
                 self._set_metric_status(key, "statusError", "error", tooltip=error)

@@ -77,9 +77,9 @@ def load_anatomy_weights(model, weights_path: str | Path) -> None:
     _load_keras_weights(
         model,
         weights_path,
-        "Anatomy segmentation weights not found at {path}. This file is not bundled with "
-        "BICTool - download it from https://github.com/jasonccai/HeadCTSegmentation and "
-        "configure its path (see infrastructure.config).",
+        "Anatomy segmentation weights not found at {path}. The packaged BICTool keeps them in its "
+        "models folder; otherwise download them from https://github.com/jasonccai/HeadCTSegmentation "
+        "and configure their path (see infrastructure.config).",
     )
 
 

@@ -89,8 +89,8 @@ class ExportViewModel(QObject):
     # ---- naming ----
 
     def suggested_name(self, scope: str) -> str:
-        """A readable default file name, e.g. "BICTool study 2026-01-31 CCT nativ Hr44"
-        or "BICTool slice 18 Falx 2026-01-31 CCT nativ Hr44"."""
+        """A readable default file name, e.g. "BICTool study 2026-03-12 Head native 4.0 Hr40"
+        or "BICTool slice 18 Falx 2026-03-12 Head native 4.0 Hr40"."""
         volume = self._volume()
         what = "study"
         if scope == SCOPE_SLICE and self.last_context is not None:

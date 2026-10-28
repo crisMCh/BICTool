@@ -89,7 +89,7 @@ def _export_rows(result: SliceQualityResult, context: ExportContext) -> list[tup
         ("MTF area (mm^-1)", f"{result.mtf_area:.4f}"),
         ("NPS variance (HU^2mm^2)", f"{result.nps_roi2.var_nps:.6f}"),
         ("PS/MTF ratio (LF/HF)", f"{result.ratio.ratio_lf_hf:.4f}"),
-        ("Contrast (HU)", f"{result.contrast_roi1:.2f}"),
+        ("Contrast (RMS, SD/mean)", f"{result.contrast_roi1:.4f}"),
         # The SVM is trained on chest CT; under the physical recipe the verdict
         # of a head CT is the study-level one (study export), not this.
         (f"Decision value{suffix}", f"{result.decision_value:.4f}"),
@@ -152,7 +152,7 @@ _STUDY_METRIC_LABELS = {
     "mtf_area": "MTF area (mm^-1)",
     "nps_variance": "NPS variance (HU^2mm^2)",
     "ps_mtf_ratio": "PS/MTF ratio (LF/HF)",
-    "contrast": "Contrast (HU)",
+    "contrast": "Contrast (RMS, SD/mean)",
     "decision_value": "Decision value",
 }
 _SLICE_TABLE_HEADER = ["Slice", "Structure", *_STUDY_METRIC_LABELS.values(), "Verdict", *_FEATURE_NAMES]
@@ -442,7 +442,7 @@ _PLAIN_METRICS = {
     "mtf_area": ("Sharpness (MTF area)", "1/mm", "0.000"),
     "nps_variance": ("Noise (NPS variance)", "HU²·mm²", "0.0"),
     "ps_mtf_ratio": ("Structure-to-noise (PS/MTF ratio, LF/HF)", "", "0.00"),
-    "contrast": ("Contrast", "HU", "0.00"),
+    "contrast": ("Contrast (RMS, SD/mean)", "", "0.000"),
     "decision_value": ("Decision value (chest-CT classifier)", "", "0.000"),
 }
 _NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")

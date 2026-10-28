@@ -50,3 +50,20 @@ def test_no_env_vars_set_leaves_config_untouched(tmp_path, monkeypatch):
     config = load_config(str(tmp_path / "does_not_exist.json"))
 
     assert config == {}
+
+
+def test_the_packaged_app_uses_its_bundled_weights_unless_a_path_is_configured(tmp_path, monkeypatch):
+    import sys
+
+    from bictool.infrastructure.config import BUNDLED_ANATOMY_WEIGHTS
+
+    weights = tmp_path / BUNDLED_ANATOMY_WEIGHTS
+    weights.parent.mkdir()
+    weights.write_bytes(b"x")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "BICTool.exe"))
+    monkeypatch.delenv("BICTOOL_HEADCT_WEIGHTS", raising=False)
+
+    assert load_config(str(tmp_path / "none.json"))["segmentation"]["anatomy_weights_path"] == str(weights)
+    monkeypatch.setenv("BICTOOL_HEADCT_WEIGHTS", "custom.hdf5")
+    assert load_config(str(tmp_path / "none.json"))["segmentation"]["anatomy_weights_path"] == "custom.hdf5"

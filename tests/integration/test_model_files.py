@@ -49,7 +49,7 @@ def test_missing_weights_file_raises_a_clear_error(tmp_path, load):
     loaded = []
     model = SimpleNamespace(load_weights=loaded.append)
 
-    with pytest.raises(FileNotFoundError, match="not found .* not bundled with BICTool"):
+    with pytest.raises(FileNotFoundError, match="weights not found at"):
         load(model, tmp_path / "missing.h5")
     assert loaded == []
 

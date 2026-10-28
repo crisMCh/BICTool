@@ -126,7 +126,7 @@ def test_window_has_expected_title_and_menus():
     window = MainWindowView()
     assert window.windowTitle() == "BICTool"
     menu_titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert menu_titles == ["File", "Study", "View", "Tools", "Settings", "Export"]
+    assert menu_titles == ["File", "Study", "View", "Tools", "Settings", "Export", "Help"]
 
 
 def test_metric_status_starts_idle_not_queued():
@@ -572,7 +572,7 @@ def test_run_all_dispatches_worker_and_renders_real_result(monkeypatch):
 
     assert window._metric_status_items["mtf"].text() == "done"
     assert window._metric_value_items["mtf"].text() == "0.418 mm⁻¹"
-    assert window._metric_value_items["contrast"].text() == "812.3 HU"
+    assert window._metric_value_items["contrast"].text() == "812.300"  # RMS contrast has no unit
     assert window._result_verdict_label.text() == "Acceptable"
     assert window._result_decision_label.text() == "decision +1.42"
     assert window._feature_labels["mtf_area"].text() == "0.418"
@@ -1276,3 +1276,122 @@ def test_the_wm_gm_box_tells_the_user_to_choose_the_method():
     window = MainWindowView()
     hint = window._brain_tissue_method_hint.text()
     assert "Choose the method that fits this scan best" in hint
+
+
+def test_help_menu_has_the_help_window_the_pdfs_and_the_about_box(monkeypatch, tmp_path):
+    from PySide6.QtGui import QDesktopServices
+
+    window = MainWindowView()
+    help_menu = _menu_path(window, "Help")
+    assert [a.text() for a in help_menu.actions() if a.text()] == [
+        "Help Contents", "Technical Reference", "User Manual (PDF, English)", "Benutzerhandbuch (PDF, Deutsch)",
+        "Technical Reference (PDF)", "About BICTool",
+    ]
+    assert window._help_action.shortcut().toString() == "F1"
+    manual = tmp_path / "manual.pdf"
+    manual.write_bytes(b"%PDF")
+    opened, warned = [], []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: warned.append(a[1]))
+
+    window._open_pdf(manual)
+    window._open_pdf(tmp_path / "missing.pdf")
+
+    assert opened == [str(manual).replace("\\", "/")] and warned == ["Manual"]
+
+
+def _fake_help(folder):
+    """A minimal built help (docs/manual/build_manual.py output): both manuals and the technical reference."""
+    import json
+
+    from bictool.infrastructure.app_paths import HELP_INDEX_FILE
+
+    documents = []
+    for key, language, ids in (
+        ("user_guide", "en", ["main-window", "roi-selection", "results-per-slice", "study-summary"]),
+        ("user_guide", "de", ["main-window", "roi-selection", "results-per-slice", "study-summary"]),
+        ("technical_reference", "en", ["tr-rois"]),
+    ):
+        name = f"{key}_{language}.html"
+        body = "".join(f'<h2 id="{i}">{i}</h2><p>text {language} {i}</p>' for i in ids)
+        (folder / name).write_text(f"<html><body>{body}</body></html>", encoding="utf-8")
+        documents.append({"key": key, "language": language, "title": f"{key} {language}", "file": name,
+                          "sections": [{"id": i, "title": i, "level": 2, "text": f"text {language} {i}"} for i in ids]})
+    (folder / HELP_INDEX_FILE).write_text(json.dumps({"documents": documents}), encoding="utf-8")
+    return folder
+
+
+def test_f1_opens_the_manual_section_of_the_control_under_the_mouse(monkeypatch, tmp_path):
+    import bictool.presentation.views.main_window as module
+
+    monkeypatch.setattr(module, "help_folder", lambda: _fake_help(tmp_path))
+    window = MainWindowView()
+    monkeypatch.setattr(module.QApplication, "widgetAt", lambda pos: window._auto_rois_btn)
+
+    window._help_action.trigger()
+
+    help_window = window._help_window
+    assert help_window.isVisible()
+    assert help_window.current_url().fileName() == "user_guide_en.html"
+    assert help_window.current_url().fragment() == "roi-selection"
+    help_window.close()
+
+
+def test_f1_outside_a_known_control_opens_the_section_of_the_shown_page(monkeypatch, tmp_path):
+    import bictool.presentation.views.main_window as module
+
+    monkeypatch.setattr(module, "help_folder", lambda: _fake_help(tmp_path))
+    window = MainWindowView()
+    monkeypatch.setattr(module.QApplication, "widgetAt", lambda pos: None)
+    monkeypatch.setattr(module.QApplication, "focusWidget", lambda: None)
+
+    window._on_help_requested()
+    assert window._help_window.current_url().fragment() == "main-window"
+
+    window._view_stack.setCurrentIndex(1)
+    window._results_tabs.setCurrentIndex(1)
+    window._on_help_requested()
+    assert window._help_window.current_url().fragment() == "study-summary"
+    window._help_window.close()
+
+
+def test_the_help_button_is_visible_and_the_manual_language_is_remembered(monkeypatch, tmp_path):
+    import bictool.presentation.views.main_window as module
+
+    monkeypatch.setattr(module, "help_folder", lambda: _fake_help(tmp_path))
+    window = MainWindowView()
+    assert not window._help_btn.isHidden()
+
+    window._help_btn.click()
+    window._help_window._language_combo.setCurrentIndex(window._help_window._language_combo.findData("de"))
+    assert window._help_window.current_url().fileName() == "user_guide_de.html"
+    window._help_window.close()
+
+    again = MainWindowView()
+    again._help_btn.click()
+    assert again._help_window.view_model.language == "de"
+    assert again._help_window.current_url().fileName() == "user_guide_de.html"
+    again._help_window.close()
+
+
+def test_every_f1_topic_is_a_control_of_the_window_and_a_section_of_both_manuals():
+    from pathlib import Path
+
+    from bictool.presentation.viewmodels.help_viewmodel import START_TOPIC, WIDGET_TOPICS
+
+    window = MainWindowView()
+    assert [name for name in WIDGET_TOPICS if getattr(window, name, None) is None] == []
+    manuals = Path(__file__).resolve().parents[2] / "docs" / "manual"
+    for language in ("en", "de"):
+        text = (manuals / f"{language}.md").read_text(encoding="utf-8")
+        for topic in {*WIDGET_TOPICS.values(), START_TOPIC, "results-per-slice", "study-summary"}:
+            assert f"{{#{topic}}}" in text, (language, topic)
+
+
+def test_about_text_names_version_license_and_the_cnn_source(tmp_path):
+    from bictool import __version__
+    from bictool.presentation.viewmodels.about_text import about_text
+
+    text = about_text(tmp_path / "THIRD_PARTY_NOTICES.txt")
+    assert f"BICTool {__version__}" in text and "GNU General Public License v3" in text
+    assert "Radiol Artif Intell" in text and "THIRD_PARTY_NOTICES.txt" in text

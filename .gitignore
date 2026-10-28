@@ -11,8 +11,10 @@ venv/
 .ruff_cache/
 
 # Outputs derived from real patient DICOM data - local validation only,
-# never committed.
-reference/
+# never committed. reference/ also holds the CNN weights (third-party);
+# only its README (how to get the weights) is tracked.
+reference/*
+!reference/README.md
 reference.zip
 debugs/
 
