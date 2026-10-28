@@ -73,18 +73,20 @@ def test_export_metrics_csv_marks_unacceptable_verdict(tmp_path):
     assert ("Verdict", "Unacceptable") in rows
 
 
-def test_export_metrics_excel_writes_the_expected_rows(tmp_path):
+def test_export_metrics_excel_is_a_readable_report(tmp_path):
     path = tmp_path / "result.xlsx"
 
     export_metrics_excel(_fake_result(), _fake_context(), path)
 
-    workbook = openpyxl.load_workbook(path)
-    sheet = workbook.active
-    rows = [tuple(cell.value for cell in row) for row in sheet.iter_rows()]
+    sheet = openpyxl.load_workbook(path).active
+    rows = [row[:3] for row in sheet.iter_rows(values_only=True)]
 
-    assert ("Slice", "12/467") in rows
-    assert ("Verdict", "Acceptable") in rows
-    assert any(r[0] == "MTF area (mm^-1)" for r in rows)
+    assert sheet.title == "Slice" and rows[0][0] == "BICTool image-quality report - single slice"
+    assert ("Slice", "12 of 467", None) in rows
+    assert ("Acquisition date", "2026-01-01", None) in rows
+    assert ("Sharpness (MTF area)", 0.418, "1/mm") in rows  # a number, with its unit
+    assert ("Verdict (chest-CT classifier)", "Acceptable", None) in rows
+    assert ("mtf_area", 0.418, None) in rows
 
 
 def _study_results() -> dict:
@@ -139,18 +141,43 @@ def test_export_study_csv_writes_the_averages_and_a_row_per_slice(tmp_path):
     assert slices[2][7] == "Unacceptable"
 
 
-def test_export_study_excel_has_a_summary_and_a_per_slice_sheet(tmp_path):
-    path = tmp_path / "study.xlsx"
+def test_export_study_excel_is_a_report_with_a_per_slice_table(tmp_path):
+    from dataclasses import replace
 
-    export_study_excel(_study_results(), _study_context(), path)
+    path = tmp_path / "study.xlsx"
+    context = replace(_study_context(), headline="Study verdict: Acceptable", headline_tone="good",
+                      summary_lines=("Falx: Acceptable - 2 of 3 slice(s) acceptable",))
+
+    export_study_excel(_study_results(), context, path)
 
     workbook = openpyxl.load_workbook(path)
-    assert workbook.sheetnames == ["Study summary", "Per slice"]
-    summary = list(workbook["Study summary"].iter_rows(values_only=True))
-    assert ("Study verdict", "Acceptable") in [row[:2] for row in summary]
-    assert any(row[0] == "QA recipe" for row in summary)
+    assert workbook.sheetnames == ["Summary", "Per slice"]
+    sheet = workbook["Summary"]
+    summary = list(sheet.iter_rows(values_only=True))
+    first = [row[0] for row in summary]
+    assert first[0] == "BICTool image-quality report"
+    assert ("Slices analysed", "3 of 467 (Falx 3, Septum 1)") in [row[:2] for row in summary]
+    assert ("Failed slices", "14 (Falx), 30 (Septum)") in [row[:2] for row in summary]
+    headline = first.index("Study verdict: Acceptable")
+    assert first[headline + 1] == "Falx: Acceptable - 2 of 3 slice(s) acceptable"
+    assert sheet.cell(row=headline + 1, column=1).fill.start_color.rgb.endswith("C6EFCE")  # green
+    header = summary[first.index("Measurements (mean and SD over the slices)") + 1]
+    assert header[:6] == ("Measurement", "Unit", "Falx mean", "Falx SD", "Septum mean", "Septum SD")
+    mtf = summary[first.index("Sharpness (MTF area)")]
+    assert mtf[2] == pytest.approx((0.418 + 0.218 + 0.418) / 3) and mtf[4] == pytest.approx(0.9)
+    assert "Technical details" in first
+
     per_slice = list(workbook["Per slice"].iter_rows(values_only=True))
     assert len(per_slice) == 5  # header + 3 falx slices + 1 septum slice
+    assert per_slice[0][:3] == ("Slice", "ROI pair", "Sharpness (MTF area) (1/mm)")
+    assert per_slice[1][:3] == (12, "Falx", 0.418)  # numbers, not text
+    assert "mtf_area" not in per_slice[0]  # internal names stay in the CSV
+
+
+def test_study_excel_without_the_app_text_still_states_the_verdict(tmp_path):
+    export_study_excel(_study_results(), _study_context(), tmp_path / "s.xlsx")
+    first = [row[0] for row in openpyxl.load_workbook(tmp_path / "s.xlsx")["Summary"].iter_rows(values_only=True)]
+    assert "Falx: Acceptable - 2 of 3 slice(s) acceptable" in first
 
 
 def test_export_study_never_contains_patient_identifiers(tmp_path):
@@ -326,9 +353,13 @@ def test_physical_study_excel_contains_the_verdict(tmp_path):
     verdict, context = _physical_context(results)
 
     export_study_excel(results, context, tmp_path / "s.xlsx")
-    sheet = openpyxl.load_workbook(tmp_path / "s.xlsx")["Study summary"]
+    sheet = openpyxl.load_workbook(tmp_path / "s.xlsx")["Summary"]
+    rows = [row[:2] for row in sheet.iter_rows(values_only=True)]
 
-    assert ["Verdict", verdict.verdict] in [[c for c in row[:2]] for row in sheet.iter_rows(values_only=True)]
+    assert (f"Study verdict: {verdict.verdict}", None) in rows  # headline without the app's wording
+    assert ("Verdict", verdict.verdict) in rows  # technical details
+    per_slice = list(openpyxl.load_workbook(tmp_path / "s.xlsx")["Per slice"].iter_rows(values_only=True))
+    assert "Quality hint (0-1, indicative)" in per_slice[0] and "Decision value" not in per_slice[0]
 
 
 def test_physical_single_slice_export_marks_the_chest_svm_verdict_as_untrusted(tmp_path):

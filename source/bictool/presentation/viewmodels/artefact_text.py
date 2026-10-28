@@ -17,7 +17,7 @@ from bictool.domain.artefacts.artefact_flags import (
 from bictool.presentation.viewmodels.display_text import format_slice_ranges
 
 BAND_NOTE = (
-    "Dark band across the brainstem: provisional measure (checked against non-expert ratings of 16 studies) - "
+    "Dark band across the brainstem: provisional measure (checked against non-expert ratings) - "
     "a hint where to look, not part of the verdict."
 )
 

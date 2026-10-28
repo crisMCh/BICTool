@@ -1708,9 +1708,9 @@ def test_study_export_lists_both_pairs(monkeypatch, tmp_path):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     _run_all(window)
 
-    window._perform_study_export({"csv"}, tmp_path)
+    window._perform_study_export({"csv"}, tmp_path / "Study")
 
-    slices_csv = next(tmp_path.glob("*_study_slices.csv"))
+    slices_csv = tmp_path / "Study - per slice.csv"
     with open(slices_csv, newline="", encoding="ascii") as f:
         rows = list(csv.reader(f))
     assert rows[0][:2] == ["Slice", "Structure"]

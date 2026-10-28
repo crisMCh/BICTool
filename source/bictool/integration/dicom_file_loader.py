@@ -285,7 +285,7 @@ def discover_series(
     logger.debug("Grouped into %d distinct stud(y/ies)", len(study_groups))
     if len(study_groups) > 1:
         patients = sorted({str(getattr(g[0], "PatientID", "")) or "?" for g in study_groups.values()})
-        logger.error("Refusing to load: %d studies found under %s (patients: %s)", len(study_groups), p, patients)
+        logger.error("Refusing to load: %d studies found under %s", len(study_groups), p)  # no patient IDs in the log
         raise ValueError(
             f"Found {len(study_groups)} different studies ({len(datasets)} DICOM files total) under {p} - "
             f"patients: {', '.join(patients)}. Point at a single study's folder instead of one "

@@ -16,7 +16,7 @@ from bictool.presentation.viewmodels.display_text import format_slice_ranges
 
 BASAL_GANGLIA_NOTE = (
     "Basal ganglia visibility: provisional measure (border contrast of the CNN-labelled lentiform and caudate "
-    "nuclei against the internal capsule), checked against one non-clinician's ratings of 16 studies - a hint, "
+    "nuclei against the internal capsule), checked against a non-clinician's ratings - a hint, "
     "not part of the verdict. A CNN label whose contrast to the internal capsule is outside "
     f"{PLAUSIBLE_DIFFERENCE_HU[0]:g}-{PLAUSIBLE_DIFFERENCE_HU[1]:g} HU is not counted (provisional limit)."
 )

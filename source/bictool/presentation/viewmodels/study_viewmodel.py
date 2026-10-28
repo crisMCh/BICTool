@@ -88,10 +88,8 @@ class StudyViewModel(QObject):
     def adopt_volume(self, volume: DicomVolume, *, is_primary_series: bool = True, force_reload: bool = False) -> None:
         """Makes `volume` the shown series (also the entry point for a volume
         loaded by other means, e.g. tests)."""
-        logger.info(
-            "Volume loaded: %d slice(s), patient=%s, pixel_spacing=%.4f mm",
-            volume.num_slices, volume.patient_id, volume.pixel_spacing_mm,
-        )
+        # No patient identifiers in the log - it is the file users send for troubleshooting.
+        logger.info("Volume loaded: %d slice(s), pixel_spacing=%.4f mm", volume.num_slices, volume.pixel_spacing_mm)
         previous_was_primary = self.is_primary_series and self.volume is not None
         self.active_load_worker = None
         self.volume = volume

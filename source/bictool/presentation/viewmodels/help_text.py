@@ -49,6 +49,10 @@ TOOLTIPS = {
     # Page switch, viewer
     "_viewer_tab_btn": "The image viewer: segmentation overlays, ROIs and the QA run.",
     "_results_tab_btn": "The QA results: per slice, and the study summary with its verdict.",
+    "_help_btn": (
+        "Opens the help: the user manual and the technical reference (algorithms, parameters). "
+        "F1 opens the help for the control under the mouse."
+    ),
     "_window_preset_combo": "Grey-level window for viewing only - does not change any measurement.",
     "_slice_slider": "Move through the slices (or use the mouse wheel over the image).",
     "_series_combo": "The image series being analysed. BICTool picks the axial ~4 mm head series; choose another here.",
@@ -80,7 +84,7 @@ TOOLTIPS = {
     "_restore_auto_btn": "Undo your moves and deletions on this slice and bring the automatic ROIs back.",
     "_confirm_rois_cb": "Lock all ROIs and enable the QA run. Untick to edit them again.",
     # 3. QA run
-    "_run_all_btn": "Measure every confirmed ROI pair on every slice. Takes about half a second per pair.",
+    "_run_all_btn": "Measure every confirmed ROI pair on every slice. Takes about a second per pair.",
     "_cancel_run_btn": "Stop the QA run (finished slices are kept).",
     "_metrics_table": "The measurements of the shown slice - or, on the Study summary tab, the study averages.",
     # Results

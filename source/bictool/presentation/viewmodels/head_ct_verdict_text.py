@@ -176,7 +176,7 @@ def _details(v: HeadCtVerdict) -> list[str]:
             else "within the good range"
         )
         details.append(
-            f"Artefact indicator (provisional, 2 artefact studies): noise scatter across slices "
+            f"Artefact indicator (provisional): noise scatter across slices "
             f"{a.value:.2f} (95 % interval {a.low:.2f}-{a.high:.2f}; good studies ≤ {a.good_high:.2f}) - {level}."
         )
     if v.outlier_slices:

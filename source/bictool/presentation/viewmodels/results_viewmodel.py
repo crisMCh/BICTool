@@ -279,3 +279,14 @@ class ResultsViewModel(QObject):
             )
             tones.append({ACCEPTABLE: TONE_GOOD, UNACCEPTABLE: TONE_BAD}.get(verdict.verdict, TONE_NEUTRAL))
         return lines, tones
+
+    def report(self) -> tuple[str, str, list[str]]:
+        """The Study summary as shown - headline, tone and plain lines - for the export."""
+        if self.is_physical():
+            text, _details = self.head_ct_text(model_available=self._model() is not None)
+            return text.headline, text.tone, list(text.basics)
+        lines, tones = self.legacy_verdict()
+        if not lines:
+            return "Study verdict: not available", TONE_NEUTRAL, self.artefact_lines()
+        tone = tones[0] if len(set(tones)) == 1 else TONE_NEUTRAL
+        return "Study verdict (majority of slices, legacy chest-CT classifier)", tone, lines + self.artefact_lines()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bictool"
-version = "0.0.1"
+version = "1.0.0"
 description = "Objective, automated, quantitative image-quality assessment for head/skull CT DICOM images."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,6 +40,8 @@ train = ["scikit-learn"]
 # a lossy resample. Pulls in python-gdcm (~34MB) as its own dependency.
 ml = ["tensorflow", "dicom2nifti"]
 dev = ["pytest"]
+# Portable Windows build (packaging/build_portable.py).
+build = ["pyinstaller", "markdown"]
 
 [tool.setuptools.packages.find]
 where = ["source"]
