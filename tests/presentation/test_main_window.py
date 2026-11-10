@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-import bictool.application.worker as worker_module
+import bictool.application.pipeline as worker_module  # measure_pair calls evaluate_slice_quality
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume, SeriesCandidate
 from bictool.presentation.viewmodels.roi_selection import RoiRect
@@ -306,7 +306,7 @@ def test_run_all_seeds_the_mtf_active_contour_on_roi1s_bright_line(monkeypatch):
     captured = {}
 
     def fake_evaluate(
-        img_roi1, img_roi2, pix_spc, act_cont_mask_x, act_cont_mask_y, *, svm_model, mtf_seeds=None, recipe=None,
+        img_roi1, img_roi2, pix_spc, act_cont_mask_x=10, act_cont_mask_y=10, *, svm_model, mtf_seeds=None, recipe=None,
         keep_steps=False, mtf_structure=None,
     ):
         captured["seeds"] = mtf_seeds

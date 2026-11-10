@@ -8,8 +8,6 @@ threshold).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -20,6 +18,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from bictool.application.qa_settings import FcmSettings
 from bictool.presentation.views.text_scale import px
 
 # Same palette as `main_window.stylesheet()` - duplicated rather than imported
@@ -48,14 +47,6 @@ QPushButton {{
 QPushButton:hover {{ border-color: {TEXT_MUTED}; }}
 QPushButton#fcmAcceptBtn {{ background: {ACCENT}; color: #08181c; font-weight: 600; border: none; }}
 """
-
-
-@dataclass
-class FcmSettings:
-    fuzziness: float
-    max_iter: int
-    spatial_weight: float
-    min_component_size: int
 
 
 class FcmSettingsDialog(QDialog):

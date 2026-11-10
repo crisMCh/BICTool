@@ -4,8 +4,10 @@ Owns the QA recipe (physical by default; the legacy Octave one under
 Tools > Advanced), the job queue - one job per (slice, ROI pair) - the job
 running in the background (`application.worker.Worker`, one at a time),
 the results and errors per job, and cancelling (the running job finishes,
-no further one starts). For each job it crops the two ROIs from the slice
-and seeds the MTF contour on the structure (segmentation as a hint).
+no further one starts). Each job is `pipeline.measure_pair` (the segmentation
+seeds the MTF contour on the structure) followed by the plug-ins' values for
+that pair; with plug-ins that report series values, one more job at the end
+runs them (`plugin_values`, `study_plugin_values` - descriptive only).
 QtCore only - no widgets.
 """
 
@@ -14,16 +16,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from bictool.application import pipeline, plugin_manager
 from bictool.application.worker import Worker
-from bictool.domain.metrics.mtf_seed import mtf_seed_candidates
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL
-from bictool.domain.roi_selection.structured_roi import STRUCTURES
 from bictool.presentation.viewmodels.display_text import format_slice_ranges
 from bictool.presentation.viewmodels.roi_pairs import PAIR_LABELS, roi_key
-from bictool.presentation.viewmodels.roi_selection import RoiRect, crop_roi
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +59,10 @@ class QaRunViewModel(QObject):
         self.active_worker: Worker | None = None
         self.results: dict[Job, object] = {}  # (slice, pair) -> SliceQualityResult
         self.errors: dict[Job, str] = {}
+        self.plugin_values: dict[Job, tuple] = {}  # (slice, pair) -> PluginValues of each plug-in
+        self.study_plugin_values: tuple = ()      # PluginValues for the whole series
+        self._contexts: dict[Job, object] = {}     # what the plug-ins saw of each pair
+        self._study_job_started = False
 
     # ---- queries ----
 
@@ -93,6 +96,7 @@ class QaRunViewModel(QObject):
         if not jobs:
             return
         self.results, self.errors = {}, {}
+        self._drop_plugin_values()
         self.jobs = list(jobs)
         self.total = len(jobs)
         self.cancel_requested = False
@@ -131,44 +135,47 @@ class QaRunViewModel(QObject):
         self.cancel_requested = False
         self.total = 0
         self.results, self.errors = {}, {}
+        self._drop_plugin_values()
         self.progress_changed.emit("")
         self.reset_done.emit()
 
-    # ---- the batch ----
+    def _drop_plugin_values(self) -> None:
+        self.plugin_values, self.study_plugin_values, self._contexts = {}, (), {}
+        self._study_job_started = False
 
-    def mtf_structure_mask(self, index: int, rect: RoiRect) -> np.ndarray | None:
-        """The ROI1 structures (septum + dural folds) cropped to `rect`, or None
-        if the slice isn't segmented - places the MTF seed and checks that the
-        measured edge lies on the structure."""
-        result = self._segmentation_cache().get(index)
-        if result is None:
-            return None
-        masks = [result.masks[name] for name in STRUCTURES if name in result.masks]
-        return crop_roi(np.logical_or.reduce(masks), rect) if masks else None
+    # ---- the batch ----
 
     def _run_next(self) -> None:
         if not self.jobs or self.cancel_requested:
-            self._finish()
+            if not self.cancel_requested and self._needs_study_job():
+                self._run_study_job()
+            else:
+                self._finish()
             return
         index, pair = self.jobs.pop(0)
         rois = self._rois(index)
         roi1, roi2 = rois[roi_key(pair, "roi1")], rois[roi_key(pair, "roi2")]
         volume = self._volume()
         pixels = volume.get_slice_hu(index)
-        img_roi1, img_roi2 = crop_roi(pixels, roi1), crop_roi(pixels, roi2)
-        # calc_mtf's active contour must start inside the edge structure: seed
-        # it on the structure's centerline, with fallbacks if a seed finds no edges.
-        structure = self.mtf_structure_mask(index, roi1)
-        seeds = mtf_seed_candidates(img_roi1, structure)
+        result = self._segmentation_cache().get(index)
+        masks = None if result is None else result.masks
+        spacing, recipe = volume.pixel_spacing_mm, self.recipe
         logger.info(
-            "Run All: slice=%d (%s), roi1 shape=%s, roi2 shape=%s, pix_spc=%.4f, mtf seeds=%s",
-            index, PAIR_LABELS[pair], img_roi1.shape, img_roi2.shape, volume.pixel_spacing_mm, seeds,
+            "Run All: slice=%d (%s), roi1=%s, roi2=%s, pix_spc=%.4f",
+            index, PAIR_LABELS[pair], roi1, roi2, spacing,
         )
-        # Intermediate steps kept for Results > Advanced (a few MB per study, no extra time).
-        worker = Worker(
-            img_roi1, img_roi2, volume.pixel_spacing_mm, mtf_seeds=seeds, recipe=self.recipe, keep_steps=True,
-            mtf_structure=structure,
-        )
+        plugins = plugin_manager.current()
+        with_plugins = plugins.has_pair_metrics or plugins.has_study_metrics
+
+        def job():
+            # Intermediate steps kept for Results > Advanced (a few MB per study, no extra time).
+            quality = pipeline.measure_pair(pixels, masks, roi1, roi2, spacing, recipe, keep_steps=True)
+            if not with_plugins:
+                return quality, None, ()
+            context = pipeline.pair_context(index, pair, pixels, masks, roi1, roi2, spacing, quality)
+            return quality, context, pipeline.plugin_pair_metrics(context)
+
+        worker = Worker(job)
         # Bound methods (not lambdas) so Qt queues the call onto the GUI thread.
         worker.signals.finished.connect(self._on_worker_finished)
         worker.signals.error.connect(self._on_worker_error)
@@ -176,7 +183,8 @@ class QaRunViewModel(QObject):
         self.active_worker = worker  # keep a reference alive while it runs
         self._submit(worker)
 
-    def _on_worker_finished(self, result) -> None:
+    def _on_worker_finished(self, outcome) -> None:
+        result, context, plugin_values = outcome
         index, pair = self.active_job
         logger.info(
             "Run All succeeded: slice=%d (%s), mtf_area=%.4f, predicted_label=%s, decision_value=%.4f",
@@ -184,6 +192,10 @@ class QaRunViewModel(QObject):
         )
         self.active_worker = None
         self.results[(index, pair)] = result
+        if context is not None:
+            self._contexts[(index, pair)] = context
+        if plugin_values:
+            self.plugin_values[(index, pair)] = plugin_values
         self._job_ended((index, pair))
 
     def _on_worker_error(self, message: str) -> None:
@@ -197,6 +209,32 @@ class QaRunViewModel(QObject):
         self.job_done.emit(job)
         self.progress_changed.emit(self.progress_text())
         self._run_next()
+
+    def _needs_study_job(self) -> bool:
+        return not self._study_job_started and bool(self._contexts) and plugin_manager.current().has_study_metrics
+
+    def _run_study_job(self) -> None:
+        """The plug-ins' values for the whole series, in the background."""
+        self._study_job_started = True
+        volume = self._volume()
+        masks = {index: result.masks for index, result in self._segmentation_cache().items()}
+        contexts = tuple(self._contexts[job] for job in sorted(self._contexts))
+        worker = Worker(lambda: pipeline.plugin_study_metrics(pipeline.study_context(volume, masks, contexts)))
+        worker.signals.finished.connect(self._on_study_job_finished)
+        worker.signals.error.connect(self._on_study_job_error)
+        self.active_worker = worker
+        self.progress_changed.emit("Plug-ins…")
+        self._submit(worker)
+
+    def _on_study_job_finished(self, values) -> None:
+        self.active_worker = None
+        self.study_plugin_values = tuple(values)
+        self._finish()
+
+    def _on_study_job_error(self, message: str) -> None:
+        logger.error("Plug-in series values failed: %s", message)
+        self.active_worker = None
+        self._finish()
 
     def _finish(self) -> None:
         cancelled = self.cancel_requested

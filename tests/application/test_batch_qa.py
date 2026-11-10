@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import bictool.application.pipeline as steps
 import bictool.application.batch_qa as batch_qa
+from bictool.api.results import StudyResult
+from bictool.application.qa_settings import METHOD_ANCHORED
+from bictool.api.study import Study
 from bictool.application.batch_qa import find_studies, run_batch
 
 
@@ -17,27 +21,48 @@ def test_find_studies_looks_through_single_folder_wrappers(tmp_path):
     assert [study.name for study in find_studies(tmp_path / "CanonPrime")] == ["study a", "study b"]
 
 
+def _fake_volume(path):
+    return SimpleNamespace(
+        num_slices=2,
+        pixel_spacing_mm=0.5,
+        acquisition_date="20000101",
+        series_description="Head 4mm",
+        slice_thickness_mm=4.0,
+        slice_paths=[],
+        get_slice_hu=lambda i: np.zeros((8, 8)),
+    )
+
+
+def _fake_pipeline(monkeypatch, seen=None):
+    """No DICOM, no CNN: a fake series, one segmented slice, nothing measured."""
+
+    def segment(study, model=None, *, cache_file=None, **kwargs):
+        study.set_segmentation({0: {"A": np.ones((8, 8), dtype=bool)}})
+        return 1
+
+    def measure(study, *a, **k):
+        if seen is not None:
+            seen.append(study.settings)
+        return StudyResult(label=study.label, series=study.series, settings=study.settings, rois_reviewed=False, rois_edited=False,
+                           measurements=(), segmented_slices=len(study.masks_by_slice))
+
+    monkeypatch.setattr(steps, "load_anatomy_model", lambda weights_path=None: "model")
+    monkeypatch.setattr(Study, "segment", segment)
+    monkeypatch.setattr(Study, "measure", measure)
+
+
 def test_a_broken_study_is_recorded_and_the_batch_continues(monkeypatch, tmp_path):
     dataset = tmp_path / "Scanner"
     (dataset / "good").mkdir(parents=True)
     (dataset / "broken").mkdir()
 
-    def fake_load(path):
+    def fake_open(path):
         if path.name == "broken":
             raise ValueError("no DICOM series found")
-        return SimpleNamespace(
-            num_slices=2,
-            pixel_spacing_mm=0.5,
-            acquisition_date="20260101",
-            series_description="Head 4mm",
-            slice_thickness_mm=4.0,
-            slice_paths=[],
-            get_slice_hu=lambda i: np.zeros((8, 8)),
-        )
+        return _fake_volume(path)
 
-    monkeypatch.setattr(batch_qa, "load_dicom_volume", fake_load)
-    monkeypatch.setattr(batch_qa, "_segment_volume", lambda volume, get_model: ({0: {"A": np.ones((8, 8), dtype=bool)}}, {}))
-    monkeypatch.setattr(batch_qa, "evaluate_volume_qa", lambda *a, **k: {})
+    monkeypatch.setattr(steps, "open_series", fake_open)
+    _fake_pipeline(monkeypatch)
 
     volumes = run_batch([dataset], tmp_path / "out", weights_path="unused")
 
@@ -45,6 +70,7 @@ def test_a_broken_study_is_recorded_and_the_batch_continues(monkeypatch, tmp_pat
     assert by_name["broken"].error == "ValueError: no DICOM series found"
     assert by_name["good"].error is None
     assert by_name["good"].segmented_slices == 1
+    assert by_name["good"].series_label == "Head 4mm (2 slices, 4.0 mm)"
     assert (tmp_path / "out" / "dataset_qa.xlsx").is_file()
     assert (tmp_path / "out" / "dataset_qa_summary.csv").is_file()
     assert (tmp_path / "out" / "dataset_qa_slices.csv").is_file()
@@ -52,8 +78,8 @@ def test_a_broken_study_is_recorded_and_the_batch_continues(monkeypatch, tmp_pat
 
 def test_excluded_studies_are_skipped(monkeypatch, tmp_path):
     dataset = tmp_path / "Scanner"
-    (dataset / "20260131_171926 - bad motion artefacts").mkdir(parents=True)
-    (dataset / "20260131_164257 - good").mkdir()
+    (dataset / "study 2 - bad motion artefacts").mkdir(parents=True)
+    (dataset / "study 1 - good").mkdir()
     seen = []
     monkeypatch.setattr(batch_qa, "run_study", lambda study_dir, *a: seen.append(study_dir.name) or SimpleNamespace(
         error=None, name=study_dir.name, group="Scanner", structures={}))
@@ -62,7 +88,7 @@ def test_excluded_studies_are_skipped(monkeypatch, tmp_path):
 
     run_batch([dataset], tmp_path / "out", weights_path="unused", exclude=["bad motion artefacts"])
 
-    assert seen == ["20260131_164257 - good"]
+    assert seen == ["study 1 - good"]
 
 
 def test_recipe_option_reaches_the_volume_qa(monkeypatch, tmp_path):
@@ -81,27 +107,16 @@ def test_recipe_option_reaches_the_volume_qa(monkeypatch, tmp_path):
     assert seen == [("octave", "anchored"), ("octave", "anchored")]
 
 
-def test_physical_recipe_studies_get_the_head_ct_verdict(monkeypatch, tmp_path):
+def test_the_recipe_and_wmgm_method_reach_the_study(monkeypatch, tmp_path):
     dataset = tmp_path / "Scanner"
     (dataset / "study a").mkdir(parents=True)
     (dataset / "study b").mkdir()
-    monkeypatch.setattr(batch_qa, "load_dicom_volume", lambda path: SimpleNamespace(
-        num_slices=2, pixel_spacing_mm=0.5, acquisition_date=None, series_description="Head",
-        slice_thickness_mm=4.0, slice_paths=[], get_slice_hu=lambda i: np.zeros((8, 8))))
-    monkeypatch.setattr(batch_qa, "_segment_volume", lambda volume, get_model: ({0: {"A": np.ones((8, 8), dtype=bool)}}, {}))
-    falx = SimpleNamespace(results={0: "falx result"})
-    monkeypatch.setattr(batch_qa, "evaluate_volume_qa", lambda *a, **k: {"Dural Folds": falx})
-    calls = []
-    monkeypatch.setattr(batch_qa, "evaluate_study_results", lambda model, f, s: calls.append((f, s)) or "verdict")
-    rules = []
-    monkeypatch.setattr(batch_qa, "apply_metal_rule", lambda verdict, streaks: rules.append(streaks) or verdict)
+    monkeypatch.setattr(steps, "open_series", _fake_volume)
+    seen = []
+    _fake_pipeline(monkeypatch, seen)
     monkeypatch.setattr(batch_qa, "export_dataset_excel", lambda *a: None)
     monkeypatch.setattr(batch_qa, "export_dataset_csv", lambda *a: None)
 
-    physical = run_batch([dataset], tmp_path / "out", weights_path="unused", recipe="physical")
-    legacy = run_batch([dataset], tmp_path / "out2", weights_path="unused", recipe="octave")
+    run_batch([dataset], tmp_path / "out", weights_path="unused", recipe="octave", tissue_method="anchored")
 
-    assert [volume.head_ct_verdict for volume in physical] == ["verdict", "verdict"]
-    assert calls[0] == ({0: "falx result"}, None)  # falx results; no septum in this fake
-    assert rules == [(), ()]  # the metal rule sees the streak slices (none here)
-    assert [volume.head_ct_verdict for volume in legacy] == [None, None]
+    assert [(s.recipe, s.tissue.method) for s in seen] == [("octave", METHOD_ANCHORED)] * 2

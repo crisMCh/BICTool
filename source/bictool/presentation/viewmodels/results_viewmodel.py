@@ -3,7 +3,8 @@
 Built from the QA run's results (`QaRunViewModel`): the slices that have a
 result (the Per-slice slider's positions), which ROI pair is shown
 (Falx/Septum switch), the study-level head-CT verdict (physical recipe) or
-the legacy majority vote (Octave recipe), the possible-artefact flags (metal,
+the legacy majority vote (Octave recipe), the plug-ins' values (descriptive),
+the possible-artefact flags (metal,
 posterior-fossa bands - hints; only metal streaks in the brain change the
 verdict, `apply_metal_rule`), the study table's
 rows, and the texts of one slice's view. Colours are a view decision - the ViewModel
@@ -17,9 +18,9 @@ from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Signal
 
-from bictool.domain.artefacts.artefact_flags import ArtefactFlags, evaluate_artefact_flags
-from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice, evaluate_basal_ganglia
-from bictool.domain.results.head_ct_verdict import apply_metal_rule, evaluate_study_results
+from bictool.application import pipeline
+from bictool.domain.artefacts.artefact_flags import ArtefactFlags
+from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice
 from bictool.domain.results.study_quality import RECIPE_PHYSICAL
 from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict
 from bictool.presentation.viewmodels.artefact_text import artefact_basics, artefact_details, slice_artefact_notes
@@ -113,9 +114,8 @@ class ResultsViewModel(QObject):
         self.slices = sorted({index for index, _pair in results})
         self.artefacts, self.basal_ganglia = self._image_hints() if results else (None, None)
         self.verdict = (
-            apply_metal_rule(
-                evaluate_study_results(self._model(), self._qa.results_by_pair(FALX), self._qa.results_by_pair(SEPTUM)),
-                self.artefacts.metal_streak_slices if self.artefacts else (),
+            pipeline.study_verdict(
+                self._model(), self._qa.results_by_pair(FALX), self._qa.results_by_pair(SEPTUM), self.artefacts
             )
             if self.is_physical()
             else None
@@ -129,9 +129,8 @@ class ResultsViewModel(QObject):
         if volume is None:
             return None, None
         cache = self._segmentation_cache() if self._segmentation_cache else {}
-        masks = {index: result.masks for index, result in cache.items()}
-        artefacts = evaluate_artefact_flags(masks, volume.get_slice_hu, volume.num_slices, volume.pixel_spacing_mm)
-        return artefacts, evaluate_basal_ganglia(masks, volume.get_slice_hu)
+        hints = pipeline.image_hints({index: result.masks for index, result in cache.items()}, volume)
+        return hints.artefacts, hints.basal_ganglia
 
     @property
     def plausibility(self):
@@ -151,6 +150,25 @@ class ResultsViewModel(QObject):
 
     def is_physical(self) -> bool:
         return self._qa.is_physical()
+
+    # ---- plug-in values (descriptive, never part of the verdict) ----
+
+    def plugin_lines(self) -> list[str]:
+        """The plug-ins' series values, and which plug-ins had problems."""
+        lines = [f"Plug-in {v.plugin}: {_plugin_text(v)}" for v in self._qa.study_plugin_values if v.values or v.error]
+        failures: dict[str, list[str]] = {}
+        for values in self._qa.plugin_values.values():
+            for v in values:
+                if v.error:
+                    failures.setdefault(v.plugin, []).append(v.error)
+        for plugin, errors in sorted(failures.items()):
+            lines.append(f"Plug-in {plugin}: problem on {len(errors)} ROI pair(s) - {errors[0]}")
+        return lines
+
+    def plugin_note(self, index: int, pair: str) -> str:
+        """One slice's plug-in values ("" without any)."""
+        values = self._qa.plugin_values.get((index, pair), ())
+        return " · ".join(f"{v.plugin}: {_plugin_text(v)}" for v in values if v.values or v.error)
 
     def select_pair(self, pair: str) -> None:
         self.pair = pair
@@ -189,6 +207,9 @@ class ResultsViewModel(QObject):
         if basal:
             basal = basal[0].upper() + basal[1:]
             note = f"{note} · {basal}" if note else basal
+        plugin_note = self.plugin_note(index, pair)
+        if plugin_note:
+            note = f"{note} · {plugin_note}" if note else plugin_note
         return SliceView(
             pair=pair,
             position=self.slices.index(index),
@@ -256,6 +277,7 @@ class ResultsViewModel(QObject):
             list(text.details) + artefact_details(self.artefacts) + basal_ganglia_details(self.basal_ganglia)
             + plausibility_details(self.plausibility)
         )
+        details += self.plugin_lines()
         if self._qa.results_by_pair(SEPTUM):
             details.append(SEPTUM_NOTE)
         failed = sorted(self._qa.errors)
@@ -289,4 +311,18 @@ class ResultsViewModel(QObject):
         if not lines:
             return "Study verdict: not available", TONE_NEUTRAL, self.artefact_lines()
         tone = tones[0] if len(set(tones)) == 1 else TONE_NEUTRAL
-        return "Study verdict (majority of slices, legacy chest-CT classifier)", tone, lines + self.artefact_lines()
+        return (
+            "Study verdict (majority of slices, legacy chest-CT classifier)", tone,
+            lines + self.artefact_lines() + self.plugin_lines(),
+        )
+
+
+def _plugin_text(values) -> str:
+    """'roi1_mean 30.1 HU, roi2_sd 4.02 HU' (+ the plug-in's problem, if any)."""
+    parts = [
+        f"{v.name} {'n/a' if v.value != v.value else f'{v.value:.4g}'}{f' {v.unit}' if v.unit else ''}"
+        for v in values.values
+    ]
+    if values.error:
+        parts.append(f"problem: {values.error}")
+    return ", ".join(parts)

@@ -5,6 +5,7 @@ source.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -45,3 +46,16 @@ def help_folder() -> Path:
 def notices_path() -> Path:
     """Third-party notices: the generated file in the package, the template in the repository."""
     return app_folder() / "THIRD_PARTY_NOTICES.txt" if is_packaged() else _REPOSITORY / "packaging" / "THIRD_PARTY_NOTICES.md"
+
+
+PLUGIN_PATH_VARIABLE = "BICTOOL_PLUGIN_PATH"
+
+
+def plugin_folders() -> list[Path]:
+    """Where plug-in files are looked for: `plugins/` next to BICTool.exe in the
+    packaged app, `~/.bictool/plugins` when run from source, plus every folder in
+    the environment variable BICTOOL_PLUGIN_PATH (separated like PATH)."""
+    folders = [app_folder() / "plugins" if is_packaged() else Path.home() / ".bictool" / "plugins"]
+    extra = os.environ.get(PLUGIN_PATH_VARIABLE, "")
+    folders += [Path(part) for part in extra.split(os.pathsep) if part.strip()]
+    return folders

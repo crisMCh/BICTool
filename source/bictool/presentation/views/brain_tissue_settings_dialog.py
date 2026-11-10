@@ -7,8 +7,6 @@ scanner data doesn't require a code change.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -19,6 +17,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from bictool.application.qa_settings import BrainTissueSettings
 from bictool.presentation.views.text_scale import px
 
 # Same palette as `main_window.stylesheet()` - duplicated rather than imported
@@ -47,25 +46,6 @@ QPushButton {{
 QPushButton:hover {{ border-color: {TEXT_MUTED}; }}
 QPushButton#settingsAcceptBtn {{ background: {ACCENT}; color: #08181c; font-weight: 600; border: none; }}
 """
-
-
-@dataclass
-class BrainTissueSettings:
-    """Every tunable parameter `brain_tissue.extract_brain_mask`/
-    `classify_brain_tissue` accept, bundled together so `main_window.py` can
-    pass one object around instead of six loose fields.
-    """
-
-    air_hu_cutoff: float
-    bone_hu_cutoff: float
-    csf_low: float
-    csf_high: float
-    white_matter_low: float
-    white_matter_high: float
-    gray_matter_low: float
-    gray_matter_high: float
-    smoothing_size: int
-    min_component_size: int
 
 
 class BrainTissueSettingsDialog(QDialog):

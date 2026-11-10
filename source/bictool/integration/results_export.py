@@ -22,6 +22,7 @@ through this (Qt-free, testable) module.
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -194,6 +195,48 @@ class StudyExportContext:
     headline: str = ""
     headline_tone: str = ""
     summary_lines: tuple[str, ...] = ()
+    # Plug-in values (`plugin_rows`), each row matching PLUGIN_HEADER; empty without plug-ins.
+    plugin_rows: tuple[tuple, ...] = ()
+
+
+# --- plug-in values (descriptive; never part of the verdict) ---
+
+PLUGIN_HEADER = ["Slice", "ROI pair", "Plug-in", "Value", "Result", "Unit", "Problem"]
+
+
+def plugin_rows(pair_values, study_values=(), pair_labels=None) -> list[list]:
+    """Rows for PLUGIN_HEADER: `pair_values` = {(0-based slice, pair): [PluginValues]},
+    `study_values` = [PluginValues] for the whole series (slice and pair left empty).
+    A plug-in's problem gets its own row when it reported no value."""
+    pair_labels = pair_labels or {}
+
+    def rows_of(slice_cell, pair_cell, plugin_values):
+        rows = []
+        for entry in plugin_values:
+            for value in entry.values:
+                rows.append([slice_cell, pair_cell, entry.plugin, value.name, value.value, value.unit, ""])
+            if entry.error:
+                if rows and rows[-1][2] == entry.plugin:
+                    rows[-1][6] = entry.error
+                else:
+                    rows.append([slice_cell, pair_cell, entry.plugin, "", "", "", entry.error])
+        return rows
+
+    out = []
+    for (index, pair), values in sorted(pair_values.items()):
+        out += rows_of(index + 1, pair_labels.get(pair, pair), values)
+    out += rows_of("", "whole series", study_values)
+    return out
+
+
+def _write_plugin_sheet(workbook, header: list[str], rows) -> None:
+    sheet = workbook.create_sheet("Plug-ins")
+    sheet.append(["Values from plug-ins - descriptive, not part of the study verdict"])
+    sheet.append(header)
+    for row in rows:
+        sheet.append(["" if isinstance(cell, float) and not math.isfinite(cell) else cell for cell in row])
+    for column, title in enumerate(header, start=1):
+        sheet.column_dimensions[sheet.cell(2, column).column_letter].width = max(len(title) + 4, 12)
 
 
 def _is_physical(results) -> bool:
@@ -409,14 +452,19 @@ def export_study_csv(
     context: StudyExportContext,
     summary_path: str | Path,
     slices_path: str | Path,
+    plugins_path: str | Path | None = None,
 ) -> None:
     """Two CSV files (CSV has no sheets): the study summary and the per-slice
-    table. `results`: structure name -> {0-based slice index: result}.
+    table - and a third with the plug-in values when there are any and
+    `plugins_path` is given. `results`: structure name -> {0-based slice index: result}.
     """
-    for path, rows in (
+    files = [
         (summary_path, _study_summary_rows(results, context)),
         (slices_path, _study_slice_rows(results, context.head_ct_verdict, context.artefacts, context.basal_ganglia)),
-    ):
+    ]
+    if plugins_path is not None and context.plugin_rows:
+        files.append((plugins_path, [PLUGIN_HEADER, *context.plugin_rows]))
+    for path, rows in files:
         with open(path, "w", newline="", encoding="ascii", errors="replace") as f:
             csv.writer(f).writerows(rows)
 
@@ -429,6 +477,8 @@ def export_study_excel(results: StudyResults, context: StudyExportContext, path:
     workbook = Workbook()
     _write_study_report(_Report(workbook.active, "Summary"), results, context)
     _write_slice_table(workbook.create_sheet("Per slice"), results, context)
+    if context.plugin_rows:
+        _write_plugin_sheet(workbook, PLUGIN_HEADER, context.plugin_rows)
     workbook.save(str(path))
 
 
@@ -969,14 +1019,27 @@ def export_dataset_excel(volumes, path: str | Path) -> None:
             for row in _dataset_slice_rows(qa, getattr(volume, "head_ct_verdict", None)):
                 sheet.append(row)
         sheet.column_dimensions["A"].width = 26
+    rows = _dataset_plugin_rows(volumes)
+    if rows:
+        _write_plugin_sheet(workbook, ["Dataset", "Volume", *PLUGIN_HEADER], rows)
     workbook.save(str(path))
 
 
-def export_dataset_csv(volumes, summary_path: str | Path, slices_path: str | Path) -> None:
+def _dataset_plugin_rows(volumes) -> list[list]:
+    return [[v.group, v.name, *row] for v in volumes for row in getattr(v, "plugin_rows", ())]
+
+
+def export_dataset_csv(
+    volumes, summary_path: str | Path, slices_path: str | Path, plugins_path: str | Path | None = None
+) -> None:
     """Two CSV files: the Summary sheet's table, and every analysed slice of
     every volume and structure in one long table (Dataset/Volume/Structure
-    columns first).
+    columns first) - and the plug-in values when there are any and `plugins_path` is given.
     """
+    rows = _dataset_plugin_rows(volumes)
+    if plugins_path is not None and rows:
+        with open(plugins_path, "w", newline="", encoding="ascii", errors="replace") as f:
+            csv.writer(f).writerows([["Dataset", "Volume", *PLUGIN_HEADER], *rows])
     sheet_names = _sheet_names(volumes)
     with open(summary_path, "w", newline="", encoding="ascii", errors="replace") as f:
         writer = csv.writer(f)

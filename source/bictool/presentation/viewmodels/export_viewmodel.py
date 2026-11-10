@@ -24,6 +24,7 @@ from bictool.integration.results_export import (
     export_metrics_excel,
     export_study_csv,
     export_study_excel,
+    plugin_rows,
     iso_date,
 )
 from bictool.presentation.viewmodels.display_text import safe_file_name
@@ -158,6 +159,9 @@ class ExportViewModel(QObject):
             headline=headline,
             headline_tone=tone,
             summary_lines=tuple(lines),
+            plugin_rows=tuple(
+                tuple(row) for row in plugin_rows(self._qa.plugin_values, self._qa.study_plugin_values, PAIR_LABELS)
+            ),
         )
         by_pair = {PAIR_LABELS[pair]: self._qa.results_by_pair(pair) for pair in PAIRS if self._qa.results_by_pair(pair)}
         folder, name = _folder_and_name(Path(path))
@@ -169,8 +173,9 @@ class ExportViewModel(QObject):
                 export_study_excel(by_pair, context, written[-1])
             if "csv" in items:
                 summary_path, slices_path = folder / f"{name} - summary.csv", folder / f"{name} - per slice.csv"
-                export_study_csv(by_pair, context, summary_path, slices_path)
-                written += [summary_path, slices_path]
+                plugins_path = folder / f"{name} - plug-ins.csv"
+                export_study_csv(by_pair, context, summary_path, slices_path, plugins_path)
+                written += [summary_path, slices_path] + ([plugins_path] if context.plugin_rows else [])
         except OSError as exc:
             logger.exception("Study export failed")
             self.message.emit("critical", "Export failed", str(exc))

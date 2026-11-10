@@ -317,13 +317,13 @@ class SegmentationViewModel(QObject):
         volume = self._volume()
         if volume is None or not self.cache:
             return
+        from bictool.application import pipeline
         from bictool.application.segmentation_plausibility_worker import SegmentationPlausibilityWorker
-        from bictool.domain.segmentation.segmentation_plausibility import assess_plausibility
 
         masks = {index: result.masks for index, result in self.cache.items()}
         spacing = volume.pixel_spacing_mm
         self._drop_plausibility(emit=False)
-        worker = SegmentationPlausibilityWorker(lambda: assess_plausibility(masks, spacing))
+        worker = SegmentationPlausibilityWorker(lambda: pipeline.segmentation_check(masks, spacing))
         worker.signals.finished.connect(self._on_plausibility_finished)
         worker.signals.error.connect(lambda message: logger.warning("Segmentation check failed: %s", message))
         self.active_plausibility_worker = worker

@@ -33,7 +33,7 @@ segmentation, once per study, not why and not slice by slice.
 | acute SDH | 38.0 | may be unreliable |
 | stroke (unrated) | 35.0 | may be unreliable |
 | implants | 34.0 | may be unreliable |
-| normal AS+ "19 yrs" | 25.0 | consistent |
+| one normal AS+ study | 25.0 | consistent |
 | other AS+ and Canon studies | 20–21 | consistent |
 | photon-counting studies | 9–21 | consistent |
 
@@ -76,5 +76,5 @@ They were too specific, leaned towards diagnosis, and a reason per slice can con
 - **Small evidence base:** 16 studies, and "unreliable" was judged by eye.
 - **Missed failure mode:** a segmentation that is wrong but compact. For example, the cavity in the
   thalamic-bleed study is labelled as one large brain region; fragmentation is 20 there, so it is not flagged.
-- **Scanner tendency:** AS+ studies tend to be more fragmented; normal 19 yrs reaches 25. More studies per
+- **Scanner tendency:** AS+ studies tend to be more fragmented; one normal study reaches 25. More studies per
   scanner would allow a check of whether the limit should depend on the scanner or kernel.

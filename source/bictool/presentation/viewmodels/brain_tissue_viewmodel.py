@@ -1,7 +1,7 @@
 """BrainTissueViewModel: WM/GM/CSF separation of the shown series.
 
-Owns the chosen method (Adaptive Thresholding by default, Fuzzy C-Means,
-HU Thresholding, and the "Anchored (prototype)"), each method's settings, the
+Owns the chosen method (`qa_settings` ids: Adaptive Thresholding by default,
+Fuzzy C-Means, HU Thresholding, and the "Anchored (prototype)"), each method's settings, the
 study's tissue references (from the basal ganglia - used by Adaptive's study
 range and by the prototype), and the per-slice results. The
 brain mask a method works inside comes from the anatomy segmentation when
@@ -19,28 +19,27 @@ from collections.abc import Callable
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from bictool.domain.segmentation.brain_tissue import classify_brain_tissue, extract_brain_mask
-from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
-from bictool.domain.segmentation.brain_tissue_anchored import (
-    AnchoredModel,
-    classify_brain_tissue_anchored,
-    fit_anchored_model,
+from bictool.application import pipeline
+from bictool.application import plugin_manager
+from bictool.application.qa_settings import (  # noqa: F401 (METHODS, DEFAULT_METHOD re-exported)
+    DEFAULT_METHOD,
+    METHOD_LABELS,
+    METHOD_ANCHORED,
+    METHOD_ADAPTIVE,
+    METHOD_FCM,
+    METHOD_THRESHOLD,
+    METHODS,
+    TissueSettings,
+    is_plugin_method,
 )
-from bictool.domain.segmentation.brain_tissue_fcm import classify_brain_tissue_fcm
-from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.segmentation.brain_tissue import extract_brain_mask
+from bictool.domain.segmentation.brain_tissue_anchored import AnchoredModel
 from bictool.domain.segmentation.tissue_references import (
     SliceSamples,
     TissueReferences,
     combine,
     slice_samples,
 )
-
-METHOD_FCM = "Fuzzy C-Means"
-METHOD_THRESHOLD = "HU Thresholding"
-METHOD_ADAPTIVE = "Adaptive Thresholding"
-METHOD_ANCHORED = "Anchored (prototype)"
-METHODS = [METHOD_FCM, METHOD_THRESHOLD, METHOD_ADAPTIVE, METHOD_ANCHORED]
-DEFAULT_METHOD = METHOD_ADAPTIVE  # no method wins on every scan; this one works on most
 
 
 class BrainTissueViewModel(QObject):
@@ -62,8 +61,15 @@ class BrainTissueViewModel(QObject):
         self._volume = volume
         self._segmentation_cache = segmentation_cache
         self.method = DEFAULT_METHOD
+        # The built-in methods, then those the active plug-ins add ("<plug-in>.<id>").
+        plugin_methods = plugin_manager.current().tissue_methods
+        self.methods = list(METHODS) + sorted(plugin_methods)
+        self.method_labels = {
+            **METHOD_LABELS, **{method_id: f"{m.label} (plug-in)" for method_id, m in plugin_methods.items()}
+        }
         self.default_settings = {
             METHOD_THRESHOLD: threshold_settings, METHOD_FCM: fcm_settings, METHOD_ADAPTIVE: adaptive_settings,
+            **{method_id: m.settings for method_id, m in plugin_methods.items() if m.settings is not None},
         }
         self.settings = dict(self.default_settings)
         self.cache: dict[int, object] = {}  # slice index -> BrainTissueResult (+ "Brain Mask")
@@ -107,10 +113,15 @@ class BrainTissueViewModel(QObject):
                 self._samples[index] = slice_samples(volume.get_slice_hu(index), result.masks)
         return combine(self._samples[index] for index in cache)
 
-    def _uses_references(self) -> bool:
-        return self.method == METHOD_ANCHORED or (
-            self.method == METHOD_ADAPTIVE and self.settings[METHOD_ADAPTIVE].use_study_range
+    def tissue_settings(self) -> TissueSettings:
+        """The method and every method's settings, as the pipeline takes them."""
+        return TissueSettings(
+            self.method, self.settings[METHOD_THRESHOLD], self.settings[METHOD_FCM], self.settings[METHOD_ADAPTIVE],
+            plugin=self.settings.get(self.method) if is_plugin_method(self.method) else None,
         )
+
+    def _uses_references(self) -> bool:
+        return pipeline.uses_references(self.tissue_settings())
 
     def _current_references(self) -> TissueReferences | None:
         """The references - and, if they changed since the cached results were
@@ -128,9 +139,7 @@ class BrainTissueViewModel(QObject):
         key = frozenset(cache)
         if self._anchored is None or self._anchored[0] != key:
             masks = {i: result.masks for i, result in cache.items()}
-            brains = brain_mask_from_segmentation(masks, volume.num_slices)
-            model = fit_anchored_model(masks, volume.get_slice_hu, brains, volume.pixel_spacing_mm, references)
-            self._anchored = (key, model)
+            self._anchored = (key, pipeline.fit_anchored(masks, volume, references))
             self.cache = {}
         return self._anchored[1]
 
@@ -143,7 +152,7 @@ class BrainTissueViewModel(QObject):
         cache = self._segmentation_cache()
         if cache:
             masks = {i: result.masks for i, result in cache.items()}
-            by_slice = brain_mask_from_segmentation(masks, self._volume().num_slices)
+            by_slice = pipeline.brain_masks(masks, self._volume().num_slices)
             if index in by_slice:
                 return by_slice[index]
         threshold = self.settings[METHOD_THRESHOLD]
@@ -167,45 +176,12 @@ class BrainTissueViewModel(QObject):
         the prototype's drift model) - safe to run on a worker thread while the
         user keeps changing things. The prototype needs the slice index; without
         it, or before the basal ganglia are segmented, it falls back to Adaptive."""
-        method = self.method
-        threshold, fcm, adaptive = (self.settings[m] for m in (METHOD_THRESHOLD, METHOD_FCM, METHOD_ADAPTIVE))
         references = self._current_references()
-        model = self._anchored_model(references) if method == METHOD_ANCHORED else None
+        model = self._anchored_model(references) if self.method == METHOD_ANCHORED else None
         volume = self._volume()
-        spacing = volume.pixel_spacing_mm if volume is not None and adaptive.smoothing_mm > 0 else None
-        sigma_px = adaptive.smoothing_mm / spacing if spacing else 0.0
-        study_range = references.plausible_range() if references is not None and adaptive.use_study_range else None
-
-        def classify(slice_hu: np.ndarray, brain_mask: np.ndarray, slice_index: int | None = None):
-            if method == METHOD_ANCHORED and model is not None and slice_index is not None:
-                result = classify_brain_tissue_anchored(slice_hu, brain_mask, model, slice_index)
-            elif method == METHOD_FCM:
-                result = classify_brain_tissue_fcm(
-                    slice_hu, brain_mask, fuzziness=fcm.fuzziness, max_iter=fcm.max_iter,
-                    spatial_weight=fcm.spatial_weight, min_component_size=fcm.min_component_size,
-                )
-            elif method in (METHOD_ADAPTIVE, METHOD_ANCHORED):
-                result = classify_brain_tissue_adaptive(
-                    slice_hu, brain_mask, block_size=adaptive.block_size,
-                    plausible_range=study_range or (adaptive.plausible_low, adaptive.plausible_high),
-                    min_component_size=adaptive.min_component_size,
-                    smoothing_sigma_px=sigma_px,
-                )
-            else:
-                result = classify_brain_tissue(
-                    slice_hu, brain_mask,
-                    csf_range=(threshold.csf_low, threshold.csf_high),
-                    white_matter_range=(threshold.white_matter_low, threshold.white_matter_high),
-                    gray_matter_range=(threshold.gray_matter_low, threshold.gray_matter_high),
-                    smoothing_size=threshold.smoothing_size,
-                    min_component_size=threshold.min_component_size,
-                )
-            # Not a tissue class, but the same `masks` dict carries it for the
-            # "Brain Mask" overlay.
-            result.masks["Brain Mask"] = brain_mask
-            return result
-
-        return classify
+        smoothing = self.settings[METHOD_ADAPTIVE].smoothing_mm > 0  # only then the spacing matters
+        spacing = volume.pixel_spacing_mm if volume is not None and smoothing else None
+        return pipeline.make_tissue_classifier(self.tissue_settings(), spacing, references, model)
 
     def _changed(self) -> None:
         self.cache = {}

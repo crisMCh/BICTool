@@ -67,6 +67,25 @@ interface: `start /wait "" BICTool.exe --self-test "<DICOM series folder>"` (res
 program's `manual` folder as PDFs; their sources are `docs/manual/en.md`, `de.md` and
 `technical_reference_en.md`.
 
+## Python API (provisional)
+
+Scripts, plug-ins and integration adapters run the same pipeline through `bictool.api`:
+
+```python
+from bictool import api
+
+result = api.analyse_study("D:/studies/case1", label="case 1")
+print(result.verdict.verdict if result.verdict else "no verdict")
+```
+
+Or in steps (`open_study` → `segment` → `place_rois` → change ROIs → `measure`), or from the command line
+(`python -m bictool analyse <folder> --out result.json`). The API is at version 0.x and may still change.
+Details, the result format and the errors: [docs/api.md](docs/api.md).
+
+**Plug-ins** add metrics or WM/GM methods without changing BICTool: copy one into the `plugins` folder next to
+`BICTool.exe` (Settings > Plug-ins shows them). Writing one: [docs/plugins.md](docs/plugins.md); examples in
+[examples/plugins](examples/plugins).
+
 ## Development setup
 
 ```bash
@@ -111,7 +130,7 @@ python packaging/build_portable.py --skip-pyinstaller   # only refresh manuals, 
 
 ## Project layout
 
-- `source/bictool/` — application source, organized by architectural layer (presentation, application, domain, integration, infrastructure)
+- `source/bictool/` — application source, organized by architectural layer (presentation, application, domain, integration, infrastructure); `source/bictool/api/` is the public Python API
 - `tests/` — automated tests, mirroring the source layout
 - `architecture/` — architecture description and diagram
 - `docs/` — method documentation (`docs/qa_method/`: physical QA recipe, head-CT quality classifier, model card) and the user manuals (`docs/manual/`)

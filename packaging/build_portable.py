@@ -117,6 +117,12 @@ def build(weights: Path, *, skip_pyinstaller: bool = False) -> Path:
     table = "\n".join(f"| {name} | {version} | {license_name} |" for name, version, license_name in rows)
     (APP / "THIRD_PARTY_NOTICES.txt").write_text(notices.replace("{{PYTHON_PACKAGES}}", table), encoding="utf-8")
     shutil.copy2(PACKAGING / "README.txt", APP / "README.txt")
+    # Plug-ins: the folder BICTool loads them from, with how-to and the two examples in a
+    # subfolder (not loaded - copy one up a level to try it). A user's own plug-ins stay.
+    (APP / "plugins" / "examples").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(PACKAGING / "PLUGINS_README.txt", APP / "plugins" / "README.txt")
+    for example in sorted((ROOT / "examples" / "plugins").glob("*.py")):
+        shutil.copy2(example, APP / "plugins" / "examples" / example.name)
     manuals = ROOT / "docs" / "manual" / "build"
     for pdf in sorted(manuals.glob("*.pdf")) if manuals.is_dir() else []:
         (APP / "manual").mkdir(exist_ok=True)

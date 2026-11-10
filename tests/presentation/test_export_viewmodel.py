@@ -18,7 +18,9 @@ def _result():
 def _vm():
     volume = SimpleNamespace(num_slices=40, pixel_spacing_mm=0.45, acquisition_date="20260101",
                              series_description="CCT nativ 4,00 Hr44")
-    qa = SimpleNamespace(results={(3, "falx"): _result()}, errors={(4, "falx"): "no edges"})
+    qa = SimpleNamespace(
+        results={(3, "falx"): _result()}, errors={(4, "falx"): "no edges"}, plugin_values={}, study_plugin_values=(),
+    )
     qa.results_by_pair = lambda pair: {i: r for (i, p), r in qa.results.items() if p == pair}
     results = SimpleNamespace(
         verdict=None, artefacts=None, basal_ganglia=None, plausibility=None,

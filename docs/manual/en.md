@@ -355,6 +355,13 @@ Technical details: *Technical Reference*, [chapter 6](tr:tr-wmgm).
 </figure>
 
 - **Settings > Show Trace Log**: a technical log at the bottom of the window, for troubleshooting.
+- **Settings > Plug-ins…**: the plug-ins BICTool found, their status (active, switched off, not compatible,
+  error) and tick boxes to switch them on or off; changes apply after a restart. A plug-in adds values or a
+  WM/GM method. To add one, copy it into the `plugins` folder next to `BICTool.exe` (the dialog shows the folder)
+  and restart. Plug-in values appear in the slice notes, under *Details* on the Study summary and on an extra
+  *Plug-ins* sheet or CSV file of the export - they never change the study verdict. A plug-in's WM/GM method
+  appears in the Method drop-down marked *(plug-in)*. Only use plug-ins from people you trust: they run with
+  BICTool's access to the images.
 - Window layout, opened sections, text size and the last export folder are remembered per Windows user
   (file `%APPDATA%\BfS\BICTool.ini`).
 - *Tools > Advanced > QA Recipe* contains a legacy calculation that only reproduces results of the earlier

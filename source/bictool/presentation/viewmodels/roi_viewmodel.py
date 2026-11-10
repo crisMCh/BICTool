@@ -17,25 +17,16 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Signal
 
+from bictool.application import pipeline
 from bictool.application.brain_tissue_volume_worker import BrainTissueVolumeWorker
-from bictool.domain.roi_selection.homogeneous_roi import FALLBACK, VENTRICLE, WHITE_MATTER, find_roi2_candidate
-from bictool.domain.roi_selection.slice_eligibility import MIN_BRAIN_FRACTION, eligible_slices
-from bictool.domain.roi_selection.structured_roi import (
-    DURAL_FOLDS,
-    SEPTUM_PELLUCIDUM,
-    RoiCandidate,
-    estimate_midline_direction,
-    find_roi1_candidate,
-)
-from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
+from bictool.domain.roi_selection.homogeneous_roi import FALLBACK, VENTRICLE, WHITE_MATTER
+from bictool.domain.roi_selection.slice_eligibility import MIN_BRAIN_FRACTION
 from bictool.presentation.viewmodels.display_text import format_slice_ranges
-from bictool.presentation.viewmodels.roi_pairs import FALX, PAIR_LABELS, PAIRS, ROLE_LABELS, SEPTUM, RoiPairStore, roi_key, split_key
-from bictool.presentation.viewmodels.roi_selection import RoiRect, candidate_to_rect
+from bictool.presentation.viewmodels.roi_pairs import PAIR_LABELS, PAIRS, ROLE_LABELS, RoiPairStore, roi_key, split_key
+from bictool.presentation.viewmodels.roi_selection import RoiRect
 
 logger = logging.getLogger(__name__)
 
-# ROI pair -> the segmentation structure its ROI1 sits on.
-PAIR_STRUCTURES = {FALX: DURAL_FOLDS, SEPTUM: SEPTUM_PELLUCIDUM}
 ROI2_REGION_LABELS = {
     VENTRICLE: "ventricle",
     WHITE_MATTER: "white matter",
@@ -111,7 +102,7 @@ class RoiViewModel(QObject):
         self._stop_tissue_worker()
         self.store.clear_auto()
         self.roi2_regions = {pair: {} for pair in PAIRS}
-        self.midline = estimate_midline_direction(self._masks_by_slice())
+        self.midline = pipeline.midline_direction(self._masks_by_slice())
         self._refresh_eligible()
         for pair in PAIRS:
             for index in self._segmentation_cache():
@@ -129,7 +120,7 @@ class RoiViewModel(QObject):
         (and others may change eligibility - a larger slice can make them too small)."""
         if not self.auto_on:
             return
-        self.midline = estimate_midline_direction(self._masks_by_slice())
+        self.midline = pipeline.midline_direction(self._masks_by_slice())
         changed = self._refresh_eligible() | {index}
         for slice_index in sorted(changed & set(self._segmentation_cache())):
             for pair in PAIRS:
@@ -265,7 +256,7 @@ class RoiViewModel(QObject):
 
     def _refresh_eligible(self) -> set[int]:
         """Recomputes the eligible slices; returns those whose eligibility changed."""
-        eligible = eligible_slices(self._masks_by_slice())
+        eligible = pipeline.eligible_for_auto_rois(self._masks_by_slice())
         changed = eligible ^ self.eligible
         self.eligible = eligible
         return changed
@@ -274,17 +265,11 @@ class RoiViewModel(QObject):
         result = self._segmentation_cache().get(index)
         if result is None:
             return
-        candidate = None
+        rect = None
         if index in self.eligible:  # too little brain: no automatic ROI (manual ones allowed)
             volume = self._volume()
-            candidate = find_roi1_candidate(
-                result.masks,
-                PAIR_STRUCTURES[pair],
-                volume.pixel_spacing_mm,
-                midline_direction=self.midline,
-                image=volume.get_slice_hu(index),
-            )
-        self.store.set_auto(index, roi_key(pair, "roi1"), None if candidate is None else candidate_to_rect(candidate))
+            rect = pipeline.auto_roi1(result.masks, pair, volume.pixel_spacing_mm, self.midline, volume.get_slice_hu(index))
+        self.store.set_auto(index, roi_key(pair, "roi1"), rect)
         self._compute_roi2(index, pair)
 
     def _compute_roi2(self, index: int, pair: str) -> None:
@@ -296,21 +281,19 @@ class RoiViewModel(QObject):
         if not self.auto_on or index not in segmentation or self.store.is_manual(index, key2):
             return
         roi1 = self.store.effective(index).get(roi_key(pair, "roi1"))
-        candidate = None
+        found = None
         if roi1 is not None:
             tissue = self._tissue_cache().get(index)
-            candidate = find_roi2_candidate(
-                RoiCandidate(roi1.y0, roi1.x0, roi1.width, PAIR_STRUCTURES[pair]),
-                segmentation[index].masks,
-                self._volume().pixel_spacing_mm,
+            found = pipeline.auto_roi2(
+                roi1, pair, segmentation[index].masks, self._volume().pixel_spacing_mm,
                 None if tissue is None else tissue.masks,
             )
-        if candidate is None:
+        if found is None:
             self.store.set_auto(index, key2, None)
             self.roi2_regions[pair].pop(index, None)
         else:
-            self.store.set_auto(index, key2, candidate_to_rect(candidate))
-            self.roi2_regions[pair][index] = candidate.structure
+            self.store.set_auto(index, key2, found[0])
+            self.roi2_regions[pair][index] = found[1]
 
     def _waiting_for_tissue(self, index: int) -> bool:
         """Some pair on this slice has its ROI1 but its automatic ROI2 is still pending."""
@@ -338,7 +321,7 @@ class RoiViewModel(QObject):
         self._tissue_done, self._tissue_total = 0, len(pending)
         self.tissue_progress_changed.emit(f"Placing ROIs (WM/GM) 0/{len(pending)}")
         classify = self._tissue_classifier()
-        brain_masks = brain_mask_from_segmentation(self._masks_by_slice(), volume.num_slices)
+        brain_masks = pipeline.brain_masks(self._masks_by_slice(), volume.num_slices)
         get_slice_hu = volume.get_slice_hu
         worker = BrainTissueVolumeWorker(lambda i: classify(get_slice_hu(i), brain_masks[i], i), pending)
         worker.signals.slice_finished.connect(self._on_tissue_slice_finished)

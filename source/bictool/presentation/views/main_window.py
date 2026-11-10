@@ -92,7 +92,7 @@ Wired to real functionality for a first end-to-end test:
   weights are bundled with BICTool - both are user-supplied external files
   configured via `infrastructure.config` (env vars or a small JSON file).
 - **Run Metrics**: dispatches a real `bictool.application.worker.Worker`
-  (i.e. `domain.core_api.evaluate_slice_quality`) via `Scheduler`, and
+  (running `api.steps.measure_pair`) via `Scheduler`, and
   renders the real `SliceQualityResult` - not example values, including
   real MTF/NPS curves via `PySide6.QtCharts` (`_update_line_chart`).
 - **Viewing**: clinical windowing presets (dropdown - Brain/Subdural/Bone/
@@ -160,7 +160,6 @@ from PySide6.QtWidgets import (
 
 from bictool.application.dicom_load_worker import DicomLoadWorker
 from bictool.application.scheduler import Scheduler
-from bictool.application.worker import Worker
 from bictool.domain.results.study_quality import (
     RECIPE_OCTAVE,
     RECIPE_PHYSICAL,
@@ -176,38 +175,10 @@ from bictool.domain.roi_selection.structured_roi import (
     DURAL_FOLDS,
     SEPTUM_PELLUCIDUM,
 )
-from bictool.domain.segmentation.brain_tissue import (
-    DEFAULT_AIR_HU_CUTOFF,
-    DEFAULT_BONE_HU_CUTOFF,
-    DEFAULT_CSF_RANGE,
-    DEFAULT_GRAY_MATTER_RANGE,
-    DEFAULT_MIN_COMPONENT_SIZE,
-    DEFAULT_SMOOTHING_SIZE,
-    DEFAULT_WHITE_MATTER_RANGE,
-)
-from bictool.domain.segmentation.brain_tissue_adaptive import (
-    DEFAULT_BLOCK_SIZE,
-    DEFAULT_PLAUSIBLE_RANGE,
-)
-from bictool.domain.segmentation.brain_tissue_adaptive import (
-    DEFAULT_MIN_COMPONENT_SIZE as ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
-)
-from bictool.domain.segmentation.brain_tissue_adaptive import (
-    DEFAULT_SMOOTHING_MM as ADAPTIVE_DEFAULT_SMOOTHING_MM,
-)
-from bictool.domain.segmentation.brain_tissue_adaptive import (
-    DEFAULT_USE_STUDY_RANGE as ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
-)
-from bictool.domain.segmentation.brain_tissue_fcm import (
-    DEFAULT_FUZZINESS,
-    DEFAULT_MAX_ITER,
-    DEFAULT_SPATIAL_WEIGHT,
-)
-from bictool.domain.segmentation.brain_tissue_fcm import (
-    DEFAULT_MIN_COMPONENT_SIZE as FCM_DEFAULT_MIN_COMPONENT_SIZE,
-)
+from bictool.application.qa_settings import default_adaptive_settings, default_fcm_settings, default_threshold_settings
 from bictool.infrastructure.app_paths import (
     HELP_INDEX_FILE,
+    plugin_folders,
     help_folder,
     manual_path,
     notices_path,
@@ -219,6 +190,7 @@ from bictool.infrastructure.ui_settings import (
     EXPORT_FOLDER,
     HELP_LANGUAGE,
     MAIN_SPLITTER,
+    PLUGINS_DISABLED,
     ROI_DETAILS_OPEN,
     SHOW_TRACE_LOG,
     TRACE_SPLITTER,
@@ -256,8 +228,9 @@ from bictool.presentation.viewmodels.brain_tissue_viewmodel import (
     METHOD_ADAPTIVE as _BRAIN_TISSUE_METHOD_ADAPTIVE,
     METHOD_FCM as _BRAIN_TISSUE_METHOD_FCM,
     METHOD_THRESHOLD as _BRAIN_TISSUE_METHOD_THRESHOLD,
-    METHODS as _BRAIN_TISSUE_METHODS,
 )
+from bictool.application import plugin_manager
+from bictool.application.qa_settings import is_plugin_method
 from bictool.presentation.viewmodels.roi_selection import RoiRect
 from bictool.presentation.viewmodels.segmentation_overlay import decode_masks_for_checkboxes
 from bictool.presentation.viewmodels.windowing import DEFAULT_WINDOW_PRESET, WINDOW_PRESETS
@@ -270,6 +243,9 @@ from bictool.presentation.views.brain_tissue_settings_dialog import BrainTissueS
 from bictool.presentation.views.custom_window_dialog import CustomWindowDialog
 from bictool.presentation.views.dicom_tags_dialog import DicomTagsDialog
 from bictool.presentation.views.fcm_settings_dialog import FcmSettings, FcmSettingsDialog
+from bictool.presentation.views.plugin_settings_dialog import PluginSettingsDialog
+from bictool.presentation.views.plugins_dialog import PluginsDialog
+from bictool.presentation.viewmodels.plugins_viewmodel import PluginsViewModel, format_disabled, parse_disabled
 from bictool.presentation.views.help_window import HelpWindow
 from bictool.presentation.views.export_dialog import SCOPE_STUDY, ExportDialog
 from bictool.presentation.views.roi_viewport import RoiViewport
@@ -480,33 +456,7 @@ _ROI_TABLE_COLORS = {
 
 def _default_tissue_settings() -> tuple[BrainTissueSettings, FcmSettings, AdaptiveSettings]:
     """The HU threshold, FCM and adaptive methods' default settings."""
-    threshold = BrainTissueSettings(
-        air_hu_cutoff=DEFAULT_AIR_HU_CUTOFF,
-        bone_hu_cutoff=DEFAULT_BONE_HU_CUTOFF,
-        csf_low=DEFAULT_CSF_RANGE[0],
-        csf_high=DEFAULT_CSF_RANGE[1],
-        white_matter_low=DEFAULT_WHITE_MATTER_RANGE[0],
-        white_matter_high=DEFAULT_WHITE_MATTER_RANGE[1],
-        gray_matter_low=DEFAULT_GRAY_MATTER_RANGE[0],
-        gray_matter_high=DEFAULT_GRAY_MATTER_RANGE[1],
-        smoothing_size=DEFAULT_SMOOTHING_SIZE,
-        min_component_size=DEFAULT_MIN_COMPONENT_SIZE,
-    )
-    fcm = FcmSettings(
-        fuzziness=DEFAULT_FUZZINESS,
-        max_iter=DEFAULT_MAX_ITER,
-        spatial_weight=DEFAULT_SPATIAL_WEIGHT,
-        min_component_size=FCM_DEFAULT_MIN_COMPONENT_SIZE,
-    )
-    adaptive = AdaptiveSettings(
-        block_size=DEFAULT_BLOCK_SIZE,
-        plausible_low=DEFAULT_PLAUSIBLE_RANGE[0],
-        plausible_high=DEFAULT_PLAUSIBLE_RANGE[1],
-        min_component_size=ADAPTIVE_DEFAULT_MIN_COMPONENT_SIZE,
-        smoothing_mm=ADAPTIVE_DEFAULT_SMOOTHING_MM,
-        use_study_range=ADAPTIVE_DEFAULT_USE_STUDY_RANGE,
-    )
-    return threshold, fcm, adaptive
+    return default_threshold_settings(), default_fcm_settings(), default_adaptive_settings()
 
 
 class MainWindowView(QMainWindow):
@@ -895,6 +845,8 @@ class MainWindowView(QMainWindow):
         self._show_trace_action.toggled.connect(self._set_trace_visible)
         text_size_action = settings_menu.addAction("Text Size…", self._on_text_size_clicked)
         text_size_action.setToolTip("Size of all text in BICTool (applies after a restart)")
+        self._plugins_action = settings_menu.addAction("Plug-ins…", self._on_plugins_clicked)
+        self._plugins_action.setToolTip("Plug-ins found, their status, switch them on or off (applies after a restart)")
 
         export_menu = menu_bar.addMenu("&Export")
         self._export_action = export_menu.addAction("Export Results…", self._open_export_dialog)
@@ -2344,8 +2296,9 @@ class MainWindowView(QMainWindow):
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method"))
         self._brain_tissue_method_combo = QComboBox()
-        self._brain_tissue_method_combo.addItems(_BRAIN_TISSUE_METHODS)
-        self._brain_tissue_method_combo.setCurrentText(self._brain_tissue.method)
+        labels = self._brain_tissue.method_labels
+        self._brain_tissue_method_combo.addItems([labels[m] for m in self._brain_tissue.methods])
+        self._brain_tissue_method_combo.setCurrentText(labels[self._brain_tissue.method])
         self._brain_tissue_method_combo.currentTextChanged.connect(self._on_brain_tissue_method_selected)
         method_row.addWidget(self._brain_tissue_method_combo, 1)
         self._brain_tissue_settings_btn = QPushButton("⚙")
@@ -2403,17 +2356,34 @@ class MainWindowView(QMainWindow):
     def _ensure_brain_tissue_result_for_current_slice(self):
         return self._brain_tissue.result(self._study.current_slice)
 
-    def _on_brain_tissue_method_selected(self, method: str) -> None:
+    def _on_brain_tissue_method_selected(self, label: str) -> None:
+        """`label` = the drop-down's text (`BrainTissueViewModel.method_labels`)."""
+        method = next(m for m, text in self._brain_tissue.method_labels.items() if text == label)
         self._brain_tissue.set_method(method)
         self._update_brain_tissue_settings_button()
 
     def _brain_tissue_settings_handlers(self) -> dict:
-        # The anchored prototype has no settings yet.
+        # The anchored prototype has no settings yet; a plug-in's method gets a
+        # dialog built from its settings dataclass.
+        plugin_methods = {
+            method: (lambda m=method: self._on_plugin_tissue_settings_clicked(m))
+            for method in self._brain_tissue.methods
+            if is_plugin_method(method) and method in self._brain_tissue.default_settings
+        }
         return {
             _BRAIN_TISSUE_METHOD_FCM: self._on_fcm_settings_clicked,
             _BRAIN_TISSUE_METHOD_ADAPTIVE: self._on_adaptive_settings_clicked,
             _BRAIN_TISSUE_METHOD_THRESHOLD: self._on_brain_tissue_settings_clicked,
+            **plugin_methods,
         }
+
+    def _on_plugin_tissue_settings_clicked(self, method: str) -> None:
+        dialog = PluginSettingsDialog(
+            self._brain_tissue.method_labels[method], self._brain_tissue.settings[method],
+            self._brain_tissue.default_settings[method], parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._brain_tissue.set_settings(method, dialog.settings())
 
     def _on_brain_tissue_method_settings_clicked(self) -> None:
         handler = self._brain_tissue_settings_handlers().get(self._brain_tissue.method)
@@ -2423,7 +2393,17 @@ class MainWindowView(QMainWindow):
     def _update_brain_tissue_settings_button(self) -> None:
         has_settings = self._brain_tissue.method in self._brain_tissue_settings_handlers()
         self._brain_tissue_settings_btn.setEnabled(has_settings)
-        self._set_tip(self._brain_tissue_settings_btn, "" if has_settings else "The prototype has no settings yet")
+        self._set_tip(self._brain_tissue_settings_btn, "" if has_settings else "This method has no settings")
+
+    def _on_plugins_clicked(self) -> None:
+        view_model = PluginsViewModel(
+            plugin_manager.current().plugins, parse_disabled(self._ui_settings.get_str(PLUGINS_DISABLED)),
+            plugin_folders(),
+        )
+        if PluginsDialog(view_model, parent=self).exec() != QDialog.DialogCode.Accepted or not view_model.changed:
+            return
+        self._ui_settings.set_str(PLUGINS_DISABLED, format_disabled(view_model.disabled))
+        QMessageBox.information(self, "Plug-ins", "The plug-in changes apply when BICTool is restarted.")
 
     def _on_text_size_clicked(self) -> None:
         dialog = TextSizeDialog(saved_text_scale(self._ui_settings), parent=self)
@@ -3066,7 +3046,11 @@ def main() -> None:
     font.setPixelSize(px(12))  # widgets without a stylesheet size (menus, chart axes) follow the app font
     app.setFont(font)
     app.setWindowIcon(app_icon())
+    # Plug-ins are loaded once, before any window (their WM/GM methods fill the Method drop-down).
+    disabled = parse_disabled(UiSettings().get_str(PLUGINS_DISABLED))
+    plugin_manager.use(plugin_manager.load_plugins(disabled=disabled))
     window = MainWindowView()
+    plugin_manager.current().log_status()  # the log is set up with the window
     window.show()
     sys.exit(app.exec())
 

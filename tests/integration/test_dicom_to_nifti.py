@@ -11,6 +11,7 @@ against the real scan this module was designed and verified against
 on the machine running the tests.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +22,9 @@ from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 from bictool.domain.segmentation._nifti_alignment import AxisTransform, SliceNotSegmentableError
 from bictool.integration.dicom_to_nifti import _convert_via_dicom2nifti, _deduplicate
 
-_REAL_SCAN_DIR = Path(
-    r"E:\Datasets\Siemens PhontonCounting\Siemens PhontonCounting\20250911_144228_435458 - bad\IMAGE\DCM\15704294"
-)
+# Folder of the real Siemens NAEOTOM Alpha series this module was validated against (not in the repo):
+# set BICTOOL_TEST_REAL_SERIES to run the regression test below.
+_REAL_SCAN_DIR = Path(os.environ.get("BICTOOL_TEST_REAL_SERIES") or "/nonexistent")
 
 
 def _make_position_only_dicom(directory: Path, filename: str, image_position_patient) -> Path:

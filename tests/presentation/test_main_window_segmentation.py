@@ -26,7 +26,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 
 import bictool.domain.segmentation as segmentation_pkg
-import bictool.presentation.viewmodels.roi_viewmodel as roi_viewmodel_module
+import bictool.application.pipeline as api_steps
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
 from bictool.presentation.viewmodels.roi_selection import RoiRect
@@ -1614,7 +1614,7 @@ def _fake_result(label=1, recipe="physical", features=None):
 
 
 def _fake_qa(monkeypatch, label_by_call=None, recipe="physical"):
-    import bictool.application.worker as worker_module
+    import bictool.application.pipeline as worker_module  # measure_pair calls evaluate_slice_quality
 
     calls = iter(label_by_call or [])
 
@@ -1719,7 +1719,7 @@ def test_study_export_lists_both_pairs(monkeypatch, tmp_path):
 
 def test_auto_rois_skip_slices_with_too_little_brain(monkeypatch):
     # Two identical slices; the eligibility rule (patched) says only slice 0 has enough brain.
-    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: {0} & set(masks))
+    monkeypatch.setattr(api_steps, "eligible_slices", lambda masks: {0} & set(masks))
     window = _both_pairs_window(monkeypatch, {0: _both_result(), 1: _both_result()}, num_slices=2)
 
     assert window._auto_roi1_slices("falx") == [0]
@@ -1731,7 +1731,7 @@ def test_auto_rois_skip_slices_with_too_little_brain(monkeypatch):
 
 def test_a_newly_segmented_larger_slice_can_make_earlier_slices_ineligible(monkeypatch):
     # Patched rule: only the highest segmented slice is "large enough".
-    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: {max(masks)} if masks else set())
+    monkeypatch.setattr(api_steps, "eligible_slices", lambda masks: {max(masks)} if masks else set())
     window = _both_pairs_window(monkeypatch, {0: _both_result()}, num_slices=2)
     assert window._auto_roi1_slices("falx") == [0]
 
@@ -1744,7 +1744,7 @@ def test_a_newly_segmented_larger_slice_can_make_earlier_slices_ineligible(monke
 
 
 def test_manual_rois_are_allowed_on_ineligible_slices(monkeypatch):
-    monkeypatch.setattr(roi_viewmodel_module, "eligible_slices", lambda masks: set())
+    monkeypatch.setattr(api_steps, "eligible_slices", lambda masks: set())
     window = _both_pairs_window(monkeypatch)
 
     window.view_model.roi.store.set_manual(0, "falx.roi1", RoiRect(10, 10, 30, 30))

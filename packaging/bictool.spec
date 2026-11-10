@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
 sys.path.insert(0, str(ROOT / "source"))
@@ -22,6 +22,8 @@ a = Analysis(
     pathex=[str(ROOT / "source")],
     binaries=binaries,
     datas=datas,
+    # The program itself never imports the public API, but plug-ins do (`from bictool.api import plugins`).
+    hiddenimports=collect_submodules("bictool.api"),
     # Not used by the app: training, tests, plotting, other DICOM stacks.
     excludes=["sklearn", "matplotlib", "pytest", "IPython", "tkinter", "SimpleITK", "pynetdicom", "skimage"],
     noarchive=False,

@@ -376,6 +376,14 @@ Technische Einzelheiten: *Technical Reference*, [Kapitel 6](tr:tr-wmgm).
 </figure>
 
 - **Settings > Show Trace Log**: ein technisches Protokoll unten im Fenster, zur Fehlersuche.
+- **Settings > Plug-ins…**: die Plug-ins, die BICTool gefunden hat, ihr Status (aktiv, ausgeschaltet, nicht
+  kompatibel, Fehler) und Häkchen zum Ein- und Ausschalten; Änderungen wirken nach einem Neustart. Ein Plug-in
+  ergänzt Werte oder eine WM/GM-Methode. Zum Hinzufügen kopieren Sie es in den Ordner `plugins` neben
+  `BICTool.exe` (der Dialog zeigt den Ordner) und starten BICTool neu. Plug-in-Werte erscheinen in den
+  Schichthinweisen, unter *Details* der Studienzusammenfassung und auf einem zusätzlichen Blatt bzw. einer
+  CSV-Datei *Plug-ins* des Exports - sie ändern das Studienergebnis nie. Die WM/GM-Methode eines Plug-ins
+  erscheint in der Methodenauswahl mit dem Zusatz *(plug-in)*. Verwenden Sie nur Plug-ins aus
+  vertrauenswürdiger Quelle: Sie laufen mit BICTools Zugriff auf die Bilder.
 - Fensteraufteilung, geöffnete Abschnitte, Textgröße und der letzte Exportordner werden je Windows-Benutzer
   gespeichert (Datei `%APPDATA%\BfS\BICTool.ini`).
 - *Tools > Advanced > QA Recipe* enthält eine alte Berechnung, die nur Ergebnisse der früheren Octave-Version

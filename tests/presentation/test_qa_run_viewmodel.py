@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-import bictool.application.worker as worker_module
+import bictool.application.pipeline as worker_module  # measure_pair calls evaluate_slice_quality
 from bictool.presentation.viewmodels.qa_run_viewmodel import QaRunViewModel
 from bictool.presentation.viewmodels.roi_selection import RoiRect
 
