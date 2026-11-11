@@ -214,7 +214,7 @@ def test_without_weights_the_model_is_not_available(monkeypatch):
 _TOP_KEYS = {
     "label", "series", "settings", "rois_reviewed", "rois_edited", "measurements", "failed", "skipped",
     "segmented_slices", "verdict", "artefacts", "basal_ganglia", "segmentation_check", "api_version",
-    "schema_version", "units", "plugins", "plugin_values",
+    "schema_version", "units", "plugins", "plugin_values", "slice_plugin_values", "plugin_hints",
 }
 _MEASUREMENT_KEYS = {
     "slice", "pair", "roi1", "roi2", "roi1_manual", "roi2_manual", "roi2_region", "recipe", "mtf_area", "nps_homo",
@@ -228,10 +228,10 @@ _SERIES_KEYS = {
 
 
 def test_the_result_layout_is_pinned(fake_measurement):
-    """Schema 1.x: changing these keys needs a SCHEMA_VERSION bump and a docs/api.md entry."""
+    """Schema 1.x: changing these keys needs a SCHEMA_VERSION bump and a changelog entry (docs/developer/reference/changelog.md)."""
     data = _study({0: septum_slice()}, num_slices=1).measure(head_ct_model=None).to_dict()
 
-    assert api.SCHEMA_VERSION == "1.1"
+    assert api.SCHEMA_VERSION == "1.2"
     assert set(data) == _TOP_KEYS
     assert set(data["measurements"][0]) == _MEASUREMENT_KEYS
     assert set(data["series"]) == _SERIES_KEYS

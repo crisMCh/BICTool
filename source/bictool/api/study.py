@@ -26,6 +26,7 @@ from bictool.api.errors import (
     InvalidSegmentation,
     ModelNotAvailable,
     NotSegmented,
+    PluginFailed,
     SeriesError,
 )
 from bictool.application import pipeline, plugin_manager
@@ -283,7 +284,7 @@ class Study:
             by_pair = {pair: {m.slice.index: m._quality for m in measurements if m.pair == pair} for pair in PAIRS}
             verdict = pipeline.study_verdict(model, by_pair[FALX], by_pair[SEPTUM], hints.artefacts)
         check = pipeline.segmentation_check(self.masks_by_slice, volume.pixel_spacing_mm)
-        study_values = pipeline.plugin_study_metrics(pipeline.study_context(volume, self.masks_by_slice, tuple(contexts)))
+        plugins = pipeline.plugin_study_phase(volume, self.masks_by_slice, tuple(contexts), self.settings.tissue)
         return R.StudyResult(
             label=self.label,
             series=self.series,
@@ -299,8 +300,10 @@ class Study:
             basal_ganglia=R.make_basal_ganglia(hints.basal_ganglia),
             segmentation_check=R.make_segmentation_check(check),
             plugins=dict(plugin_manager.current().versions),
-            plugin_values=study_values,
-            _raw=R._Raw(verdict, hints.artefacts, hints.basal_ganglia, check),
+            plugin_values=plugins.study_values,
+            slice_plugin_values=plugins.slice_values,
+            plugin_hints=plugins.hints,
+            _raw=R._Raw(verdict, hints.artefacts, hints.basal_ganglia, check, plugins.tissue_method),
         )
 
     def _check_rois(self, rois: RoiPairStore) -> None:
@@ -330,13 +333,7 @@ class Study:
             raise InvalidRois("; ".join(problems[:5]) + (f" (and {len(problems) - 5} more)" if len(problems) > 5 else ""))
 
     def _slice_ref(self, index: int) -> R.SliceRef:
-        locations = getattr(self.volume, "slice_locations_mm", None) or []
-        uids = getattr(self.volume, "sop_instance_uids", None) or []
-        return R.SliceRef(
-            index,
-            locations[index] if index < len(locations) else None,
-            (uids[index] or None) if index < len(uids) else None,
-        )
+        return R.make_slice_ref(self.volume, index)
 
 
 def load_plugins(folders=None, *, installed: bool = True, disabled=()) -> list:
@@ -353,6 +350,29 @@ def load_plugins(folders=None, *, installed: bool = True, disabled=()) -> list:
 def loaded_plugins() -> list:
     """The plug-ins in use (loaded on first use if `load_plugins` was not called)."""
     return list(plugin_manager.current().plugins)
+
+
+def export_formats() -> dict[str, str]:
+    """The file formats plug-ins add: {"<plug-in>.<id>": label} (see `write_export`)."""
+    return {format_id: fmt.label for format_id, fmt in sorted(plugin_manager.current().export_formats.items())}
+
+
+def write_export(result: R.StudyResult, path: str | Path, format_id: str) -> Path:
+    """Writes `result` in a plug-in's file format (`export_formats()`) to `path` -
+    the format's extension is added if missing. Raises `PluginFailed` if the
+    format is not available or the plug-in fails."""
+    manager = plugin_manager.current()
+    fmt = manager.export_formats.get(format_id)
+    if fmt is None:
+        raise PluginFailed(f"Export format {format_id!r} is not available - see api.export_formats()")
+    path = Path(path)
+    if path.suffix.lower() != fmt.extension.lower():
+        path = path.with_name(path.name + fmt.extension)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    problem = manager.write_export(format_id, result, path)
+    if problem:
+        raise PluginFailed(f"Export format {format_id!r} failed: {problem}")
+    return path
 
 
 def open_study(

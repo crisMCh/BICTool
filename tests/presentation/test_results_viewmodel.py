@@ -24,6 +24,7 @@ def _qa(results, errors=None):
     qa = _FakeQa()
     qa.results, qa.errors = results, errors or {}
     qa.plugin_values, qa.study_plugin_values = {}, ()
+    qa.slice_plugin_values, qa.plugin_hints, qa.plugin_tissue_method = {}, (), None
     qa.results_by_pair = lambda pair: {i: r for (i, p), r in qa.results.items() if p == pair}
     qa.is_physical = lambda: bool(qa.results) and all(r.recipe == "physical" for r in qa.results.values())
     return qa

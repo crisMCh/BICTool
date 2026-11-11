@@ -1,4 +1,4 @@
-"""Example BICTool plug-in: a WM/GM method (see docs/plugins.md).
+"""Example BICTool plug-in: a WM/GM method (see docs/developer, how-to/wmgm-method.md).
 
 Splits the brain into CSF, white and grey matter with two Otsu thresholds on
 the HU histogram inside a plausible range. It appears in the Brain Tissue

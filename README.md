@@ -80,10 +80,11 @@ print(result.verdict.verdict if result.verdict else "no verdict")
 
 Or in steps (`open_study` → `segment` → `place_rois` → change ROIs → `measure`), or from the command line
 (`python -m bictool analyse <folder> --out result.json`). The API is at version 0.x and may still change.
-Details, the result format and the errors: [docs/api.md](docs/api.md).
+Details, the result format and the errors: the [Developer Guide](docs/developer/README.md).
 
-**Plug-ins** add metrics or WM/GM methods without changing BICTool: copy one into the `plugins` folder next to
-`BICTool.exe` (Settings > Plug-ins shows them). Writing one: [docs/plugins.md](docs/plugins.md); examples in
+**Plug-ins** add metrics (also from ROIs of their own), possible-artefact hints, WM/GM methods or export file
+formats without changing BICTool: copy one into the `plugins` folder next to
+`BICTool.exe` (Settings > Plug-ins shows them). Writing one: the [Developer Guide](docs/developer/README.md); examples in
 [examples/plugins](examples/plugins).
 
 ## Development setup

@@ -1,5 +1,5 @@
 """The help window's state: which documents are shown (the user manual in the
-chosen language, the technical reference in English), which manual section
+chosen language, the technical reference and the developer guide in English), which manual section
 belongs to which control (F1), and the full-text search.
 
 The documents come from `integration.help_files` (built by
@@ -18,6 +18,7 @@ from bictool.integration.help_files import HelpDocument, HelpSection
 
 USER_GUIDE = "user_guide"
 TECHNICAL_REFERENCE = "technical_reference"
+DEVELOPER_GUIDE = "developer_guide"
 LANGUAGES = {"en": "English", "de": "Deutsch"}
 DEFAULT_LANGUAGE = "en"
 START_TOPIC = "main-window"
@@ -115,9 +116,9 @@ class HelpViewModel(QObject):
 
     def documents(self) -> list[HelpDocument]:
         """What the window shows: the user manual in the chosen language (English if missing), then the
-        technical reference."""
+        technical reference and the developer guide (English)."""
         shown = []
-        for key in (USER_GUIDE, TECHNICAL_REFERENCE):
+        for key in (USER_GUIDE, TECHNICAL_REFERENCE, DEVELOPER_GUIDE):
             matches = [d for d in self._documents if d.key == key]
             preferred = [d for d in matches if d.language == self._language] or \
                 [d for d in matches if d.language == DEFAULT_LANGUAGE] or matches

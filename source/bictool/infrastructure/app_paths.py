@@ -12,6 +12,7 @@ from pathlib import Path
 _REPOSITORY = Path(__file__).resolve().parents[3]
 MANUAL_FILES = {"en": "BICTool_User_Manual_EN.pdf", "de": "BICTool_Benutzerhandbuch_DE.pdf"}
 TECHNICAL_REFERENCE_FILE = "BICTool_Technical_Reference_EN.pdf"
+DEVELOPER_GUIDE_FILE = "BICTool_Developer_Guide_EN.pdf"
 HELP_INDEX_FILE = "help_index.json"
 
 
@@ -36,6 +37,11 @@ def manual_path(language: str) -> Path:
 def technical_reference_path() -> Path:
     """The technical reference PDF (English) - it may not exist in a source checkout."""
     return _manual_folder() / TECHNICAL_REFERENCE_FILE
+
+
+def developer_guide_path() -> Path:
+    """The developer guide PDF (Python API and plug-ins, English) - it may not exist in a source checkout."""
+    return _manual_folder() / DEVELOPER_GUIDE_FILE
 
 
 def help_folder() -> Path:

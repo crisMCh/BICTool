@@ -92,8 +92,9 @@ Hover over any control to see what it does. A disabled control tells you in its 
 (for example *"Open a study first"*).
 
 **Help window.** Press **F1** to open the help for the control under the mouse pointer, or click the
-**? Help** button at the top of the window. The help window contains this manual (English or German) and the
-*Technical Reference*, which explains every algorithm and parameter. It has a table of contents, a full-text
+**? Help** button at the top of the window. The help window contains this manual (English or German), the
+*Technical Reference*, which explains every algorithm and parameter, and the *Developer Guide* (Python API
+and plug-ins). It has a table of contents, a full-text
 search and *Back* / *Forward* buttons, and it can stay open next to BICTool. *Help > Help Contents* opens it
 as well; the PDF versions are in the *Help* menu and in the folder `manual`.
 
@@ -356,12 +357,17 @@ Technical details: *Technical Reference*, [chapter 6](tr:tr-wmgm).
 
 - **Settings > Show Trace Log**: a technical log at the bottom of the window, for troubleshooting.
 - **Settings > Plug-ins…**: the plug-ins BICTool found, their status (active, switched off, not compatible,
-  error) and tick boxes to switch them on or off; changes apply after a restart. A plug-in adds values or a
-  WM/GM method. To add one, copy it into the `plugins` folder next to `BICTool.exe` (the dialog shows the folder)
-  and restart. Plug-in values appear in the slice notes, under *Details* on the Study summary and on an extra
-  *Plug-ins* sheet or CSV file of the export - they never change the study verdict. A plug-in's WM/GM method
-  appears in the Method drop-down marked *(plug-in)*. Only use plug-ins from people you trust: they run with
-  BICTool's access to the images.
+  error) and tick boxes to switch them on or off; changes apply after a restart. A plug-in adds values (also
+  from ROIs of its own), possible-artefact hints, a WM/GM method or a file format for the export. To add one, copy it into the `plugins` folder
+  next to `BICTool.exe` (the dialog shows the folder) and restart. Plug-in values appear in the slice notes,
+  under *Details* on the Study summary and on an extra *Plug-ins* sheet or CSV file of the export - they never
+  change the study verdict. A plug-in's possible-artefact hints are listed with BICTool's own on the Study
+  summary, marked *(plug-in ...)*. When a plug-in measured in ROIs of its own, the tick box *Plug-in ROIs* in the
+  Run QA box shows them in yellow on the image. A plug-in's WM/GM method appears in the Method drop-down marked
+  *(plug-in)*; if it needs more than half a second per slice, a warning below the drop-down says so (the window
+  waits for it on every new slice). A plug-in's file format appears in the Export dialog marked *plug-in* (scope
+  *Whole study*). Only use plug-ins from people you trust: they run with BICTool's access to
+  the images.
 - Window layout, opened sections, text size and the last export folder are remembered per Windows user
   (file `%APPDATA%\BfS\BICTool.ini`).
 - *Tools > Advanced > QA Recipe* contains a legacy calculation that only reproduces results of the earlier

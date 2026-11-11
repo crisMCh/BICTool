@@ -9,11 +9,15 @@ the slice has one (more robust on irregular anatomy), else from the
 HU-threshold skull-strip. Results are computed on demand (milliseconds per
 slice) and cached; any method/settings change drops them and emits
 `settings_changed` (the view redraws overlays and re-places white-matter
-ROI2s). QtCore only - no widgets.
+ROI2s). A plug-in's method runs on the UI thread like the built-in ones; when
+it needs more than `SLOW_SECONDS` for a slice, `slow_text` says so (the window
+waits for it). QtCore only - no widgets.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -42,8 +46,14 @@ from bictool.domain.segmentation.tissue_references import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+SLOW_SECONDS = 0.5  # a plug-in method slower than this per slice gets a warning
+
+
 class BrainTissueViewModel(QObject):
     settings_changed = Signal()  # method or settings changed - every result was dropped
+    slow_text_changed = Signal(str)  # "" or a warning that the plug-in method is slow
 
     def __init__(
         self,
@@ -76,6 +86,7 @@ class BrainTissueViewModel(QObject):
         self._samples: dict[int, SliceSamples] = {}  # per segmented slice, for the tissue references
         self._references_used: TissueReferences | None = None  # what the cached results were computed with
         self._anchored: tuple[frozenset, AnchoredModel | None] | None = None  # (segmented slices, model)
+        self.slow_text = ""
 
     # ---- commands ----
 
@@ -167,8 +178,21 @@ class BrainTissueViewModel(QObject):
         classify = self.classifier()  # may drop stale results (references changed)
         if index not in self.cache:
             slice_hu = volume.get_slice_hu(index)
-            self.cache[index] = classify(slice_hu, self.brain_mask(index, slice_hu), index)
+            brain = self.brain_mask(index, slice_hu)
+            start = time.perf_counter()
+            self.cache[index] = classify(slice_hu, brain, index)
+            self._check_speed(time.perf_counter() - start)
         return self.cache[index]
+
+    def _check_speed(self, seconds: float) -> None:
+        if self.slow_text or seconds <= SLOW_SECONDS or not is_plugin_method(self.method):
+            return
+        label = self.method_labels.get(self.method, self.method)
+        self.slow_text = (
+            f"⚠ {label} needs {seconds:.1f} s per slice - the window waits for it on every new slice."
+        )
+        logger.warning("WM/GM method %s needs %.1f s per slice", self.method, seconds)
+        self.slow_text_changed.emit(self.slow_text)
 
     def classifier(self) -> Callable[..., object]:
         """`(slice_hu, brain_mask, slice_index=None) -> BrainTissueResult` for the
@@ -176,13 +200,20 @@ class BrainTissueViewModel(QObject):
         the prototype's drift model) - safe to run on a worker thread while the
         user keeps changing things. The prototype needs the slice index; without
         it, or before the basal ganglia are segmented, it falls back to Adaptive."""
+        volume = self._volume()
+        if is_plugin_method(self.method):  # the plug-in sees what the API gives it: spacing and CNN masks
+            masks = {i: result.masks for i, result in self._segmentation_cache().items()}
+            spacing = volume.pixel_spacing_mm if volume is not None else None
+            return pipeline.make_tissue_classifier(self.tissue_settings(), spacing, masks_by_slice=masks)
         references = self._current_references()
         model = self._anchored_model(references) if self.method == METHOD_ANCHORED else None
-        volume = self._volume()
         smoothing = self.settings[METHOD_ADAPTIVE].smoothing_mm > 0  # only then the spacing matters
         spacing = volume.pixel_spacing_mm if volume is not None and smoothing else None
         return pipeline.make_tissue_classifier(self.tissue_settings(), spacing, references, model)
 
     def _changed(self) -> None:
         self.cache = {}
+        if self.slow_text:
+            self.slow_text = ""
+            self.slow_text_changed.emit("")
         self.settings_changed.emit()

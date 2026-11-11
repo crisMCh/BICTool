@@ -1,5 +1,6 @@
-"""Builds the manuals from Markdown: the user manual (en.md, de.md) and the
-technical reference (technical_reference_en.md), each as
+"""Builds the manuals from Markdown: the user manual (en.md, de.md), the
+technical reference (technical_reference_en.md) and the developer guide
+(docs/developer/*.md, joined into one document), each as
 
 * a PDF (print stylesheet, A4, via Microsoft Edge in headless mode), and
 * an HTML page for BICTool's help window, plus `help_index.json` (contents
@@ -14,6 +15,12 @@ study and are not in git either (default folder: debugs/manual_shots).
 Links between the documents are written `[text](tr:anchor)` (technical
 reference) or `[text](ug:anchor)` (user manual, same language): in the help
 pages they become links, in the PDFs plain text.
+
+The developer guide stays readable on GitHub as separate pages with ordinary
+relative links. Here each page is rendered on its own - headings one level
+down, heading ids prefixed with the page's id, links between its pages turned
+into links inside the one document, other relative links into plain text -
+and the pages are joined in `DEVELOPER_PAGES` order.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import markdown
+from markdown.extensions.toc import slugify
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -39,8 +47,13 @@ BUILD = HERE / "build"
 HELP = BUILD / "help"
 sys.path.insert(0, str(ROOT / "source"))
 
-from bictool import __version__  # noqa: E402
-from bictool.infrastructure.app_paths import HELP_INDEX_FILE, MANUAL_FILES, TECHNICAL_REFERENCE_FILE  # noqa: E402
+from bictool import API_VERSION, __version__  # noqa: E402
+from bictool.infrastructure.app_paths import (  # noqa: E402
+    DEVELOPER_GUIDE_FILE,
+    HELP_INDEX_FILE,
+    MANUAL_FILES,
+    TECHNICAL_REFERENCE_FILE,
+)
 
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 CONTENTS = {"en": "Contents", "de": "Inhalt"}
@@ -49,7 +62,7 @@ HELP_IMAGE_WIDTH = 640  # px; screenshots are scaled down to this in the help wi
 
 @dataclass(frozen=True)
 class Document:
-    key: str        # "user_guide" | "technical_reference"
+    key: str        # "user_guide" | "technical_reference" | "developer_guide"
     language: str
     source: str     # Markdown file in this folder
     title: str
@@ -65,6 +78,38 @@ DOCUMENTS = (
     Document("user_guide", "de", "de.md", "BICTool Benutzerhandbuch", MANUAL_FILES["de"]),
     Document("technical_reference", "en", "technical_reference_en.md", "BICTool Technical Reference",
              TECHNICAL_REFERENCE_FILE),
+)
+DEVELOPER_GUIDE = Document("developer_guide", "en", "", "BICTool Developer Guide", DEVELOPER_GUIDE_FILE)
+DEVELOPER = ROOT / "docs" / "developer"
+# The developer guide's pages in reading order (all pages; a test checks that none is missing).
+DEVELOPER_PAGES = (
+    "README.md",
+    "tutorials/first-analysis.md",
+    "tutorials/first-plugin.md",
+    "how-to/check-rois-before-measuring.md",
+    "how-to/choose-settings.md",
+    "how-to/run-many-studies.md",
+    "how-to/save-and-read-results.md",
+    "how-to/metric-with-own-roi.md",
+    "how-to/artefact-hints.md",
+    "how-to/wmgm-method.md",
+    "how-to/export-format.md",
+    "how-to/test-a-plugin.md",
+    "how-to/install-and-share-a-plugin.md",
+    "how-to/troubleshooting.md",
+    "reference/api-functions.md",
+    "reference/rois.md",
+    "reference/settings.md",
+    "reference/results.md",
+    "reference/errors.md",
+    "reference/json-format.md",
+    "reference/command-line.md",
+    "reference/hooks.md",
+    "reference/plugin-types.md",
+    "reference/changelog.md",
+    "explanation/how-a-study-is-run.md",
+    "explanation/plugin-system.md",
+    "explanation/data-protection.md",
 )
 
 CSS = """
@@ -83,6 +128,11 @@ table { border-collapse: collapse; margin: 6pt 0; width: 100%; break-inside: avo
 th, td { border: 1px solid #c9d3d8; padding: 3pt 6pt; text-align: left; vertical-align: top; }
 th { background: #eef3f5; }
 code { font-family: Consolas, monospace; font-size: 9.5pt; background: #f1f4f6; padding: 0 2pt; }
+pre { background: #f1f4f6; padding: 5pt 7pt; white-space: pre-wrap; font-size: 9pt; break-inside: avoid; }
+pre code { background: none; padding: 0; }
+h4 { font-size: 11pt; margin: 14pt 0 3pt 0; padding-top: 5pt; border-top: 1px solid #dde4e8; break-after: avoid; }
+h4 code { font-size: 11pt; background: none; padding: 0; }
+.dev-page { margin-top: 26pt; }
 blockquote { border-left: 3px solid #0f5560; margin: 8pt 0; padding: 2pt 10pt; background: #eef3f5; }
 .note { border-left: 3px solid #d9a400; background: #fff8e1; padding: 5pt 8pt; margin: 8pt 0; }
 .title-page { height: 200mm; display: flex; flex-direction: column; justify-content: center; }
@@ -101,6 +151,9 @@ h2 { font-size: 14pt; color: #0f5560; margin-top: 18px; }
 h3 { font-size: 11.5pt; margin-top: 12px; }
 th { background-color: #eef3f5; }
 code { font-family: Consolas, monospace; background-color: #f1f4f6; }
+pre { background-color: #f1f4f6; }
+h4 { font-size: 11pt; margin-top: 10px; }
+h4 code { font-size: 11pt; background-color: #ffffff; }
 .note { background-color: #fff8e1; }
 blockquote { background-color: #eef3f5; }
 figcaption, .caption { color: #5b6670; font-size: 9pt; }
@@ -121,6 +174,120 @@ def _converter(document: Document) -> markdown.Markdown:
         extensions=["tables", "attr_list", "md_in_html", "toc"],
         extension_configs={"toc": {"toc_depth": "2-3", "title": CONTENTS[document.language]}},
     )
+
+
+# ---- the developer guide (many pages, one document) ----
+
+_FENCE = re.compile(r"^(```|~~~)")
+_MD_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+
+
+def _page_id(page: str) -> str:
+    return "dev-" + re.sub(r"[^a-z0-9]+", "-", page.removesuffix(".md").lower()).strip("-")
+
+
+def _outside_code(text: str, change) -> str:
+    """`change(line)` for every line outside fenced code blocks."""
+    out, fenced = [], False
+    for line in text.split("\n"):
+        if _FENCE.match(line.strip()):
+            fenced = not fenced
+            out.append(line)
+        else:
+            out.append(line if fenced else change(line))
+    return "\n".join(out)
+
+
+def _page_link(page: str, match: re.Match) -> str:
+    label, target = match.groups()
+    if re.match(r"[a-z][a-z0-9+.-]*:", target):  # http(s), mailto, ...
+        return match.group(0)
+    file, _, anchor = target.partition("#")
+    destination = page if not file else (Path(page).parent / file).as_posix()
+    parts: list[str] = []
+    for part in destination.split("/"):
+        if part == "..":
+            parts.pop()
+        elif part not in ("", "."):
+            parts.append(part)
+    destination = "/".join(parts)
+    if destination not in DEVELOPER_PAGES:
+        return label  # e.g. a file of the repository: plain text in the built guide
+    return f"[{label}](#{_page_id(destination)}{'-' + anchor if anchor else ''})"
+
+
+def developer_guide() -> tuple[str, list[dict]]:
+    """The developer guide's body (HTML) and its headings (toc tokens: page = level 2)."""
+    bodies, tokens = [], []
+    for page in DEVELOPER_PAGES:
+        page_id = _page_id(page)
+        text = (DEVELOPER / page).read_text(encoding="utf-8")
+
+        def change(line: str, page=page) -> str:
+            line = "#" + line if line.startswith("#") else line  # one level down: a page is a chapter
+            return _MD_LINK.sub(lambda m: _page_link(page, m), line)
+
+        converter = markdown.Markdown(
+            extensions=["tables", "fenced_code", "toc"],
+            extension_configs={"toc": {"slugify": lambda value, separator, prefix=page_id:
+                                       f"{prefix}-{slugify(value, separator)}"}},
+        )
+        body = converter.convert(_outside_code(text, change))
+        bodies.append(f'<section class="dev-page"><a id="{page_id}"></a>{body}</section>')
+        tokens += converter.toc_tokens
+    return "\n".join(bodies), tokens
+
+
+def _toc_html(tokens: list[dict], title: str) -> str:
+    def items(level_tokens) -> str:
+        rows = []
+        for token in level_tokens:
+            children = [t for t in token["children"] if t["level"] <= 3]
+            inner = f"<ul>{items(children)}</ul>" if children else ""
+            rows.append(f'<li><a href="#{token["id"]}">{token["name"]}</a>{inner}</li>')
+        return "".join(rows)
+
+    return f'<div class="contents"><span class="toctitle">{title}</span><ul>{items(tokens)}</ul></div>'
+
+
+def _developer_title() -> str:
+    return (
+        '<div class="title-page"><h1>BICTool Developer Guide</h1>'
+        f'<p class="sub">The Python API and plug-ins<br>BICTool {__version__} · API {API_VERSION}</p>'
+        '<p class="sub">Developed for the German Federal Office for Radiation Protection (BfS)</p>'
+        '<div class="note"><p><strong>For developers and medical physicists who script BICTool or extend it.'
+        "</strong> How to use the program is described in the <em>User Manual</em>, how BICTool computes its "
+        "results in the <em>Technical Reference</em>. BICTool is decision support only; it is not a medical "
+        "device.</p></div></div>"
+    )
+
+
+def developer_pdf_html() -> Path:
+    body, tokens = developer_guide()
+    page = (
+        f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{DEVELOPER_GUIDE.title}</title>'
+        f"<style>{CSS}</style></head><body>{_developer_title()}{_toc_html(tokens, CONTENTS['en'])}{body}"
+        "</body></html>"
+    )
+    path = BUILD / "developer_guide_en_print.html"
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+def developer_help(images: Path) -> dict:
+    body, tokens = developer_guide()
+    page = (
+        f"<html><head><meta charset=\"utf-8\"><title>{DEVELOPER_GUIDE.title}</title><style>{HELP_CSS}</style>"
+        f"</head><body>{_help_body(_developer_title() + body, images)}</body></html>"
+    )
+    (HELP / DEVELOPER_GUIDE.help_file).write_text(page, encoding="utf-8")
+    return {
+        "key": DEVELOPER_GUIDE.key,
+        "language": DEVELOPER_GUIDE.language,
+        "title": DEVELOPER_GUIDE.title,
+        "file": DEVELOPER_GUIDE.help_file,
+        "sections": _sections(body, tokens),
+    }
 
 
 # ---- PDF ----
@@ -254,7 +421,7 @@ def main() -> None:
     shutil.copytree(args.images, BUILD / "images")
     shutil.copytree(args.images, HELP / "images")
 
-    entries = [to_help(document, args.images) for document in DOCUMENTS]
+    entries = [to_help(document, args.images) for document in DOCUMENTS] + [developer_help(args.images)]
     (HELP / HELP_INDEX_FILE).write_text(
         json.dumps({"version": __version__, "documents": entries}, ensure_ascii=False, indent=1), encoding="utf-8"
     )
@@ -265,6 +432,9 @@ def main() -> None:
         pdf = BUILD / document.pdf
         to_pdf(to_pdf_html(document), pdf)
         print(f"Built {pdf}")
+    pdf = BUILD / DEVELOPER_GUIDE.pdf
+    to_pdf(developer_pdf_html(), pdf)
+    print(f"Built {pdf}")
 
 
 if __name__ == "__main__":

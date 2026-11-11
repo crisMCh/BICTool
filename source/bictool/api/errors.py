@@ -28,5 +28,9 @@ class InvalidRois(BictoolError, ValueError):
     """ROIs that can't be measured: unknown slice, outside the image, not square, or placed on another series."""
 
 
+class PluginFailed(BictoolError, RuntimeError):
+    """A plug-in could not do what was asked (e.g. write its export format); the message says why."""
+
+
 class Cancelled(BictoolError):
     """`cancel()` returned True - the step stopped between two slices; finished slices are kept."""

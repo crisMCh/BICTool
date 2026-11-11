@@ -12,8 +12,10 @@ are in DICOM pixel space. No Qt, no threads; only `list_series`,
 
 from __future__ import annotations
 
+import dataclasses
+import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
@@ -21,11 +23,22 @@ import numpy as np
 
 from bictool.application.roi_store import PAIR_STRUCTURES, RoiRect, candidate_to_rect, crop_roi
 from bictool.application import plugin_manager
-from bictool.application.plugin_types import PairContext, PluginValues, StudyContext, TissueContext
+from bictool.application.plugin_types import (
+    CSF,
+    GRAY_MATTER,
+    WHITE_MATTER,
+    PairContext,
+    PluginHints,
+    PluginValues,
+    SliceContext,
+    StudyContext,
+    TissueContext,
+)
 from bictool.application.qa_settings import (
     METHOD_ADAPTIVE,
     METHOD_ANCHORED,
     METHOD_FCM,
+    METHOD_LABELS,
     TissueSettings,
     is_plugin_method,
 )
@@ -48,7 +61,7 @@ from bictool.domain.roi_selection.structured_roi import (
     estimate_midline_direction,
     find_roi1_candidate,
 )
-from bictool.domain.segmentation.brain_tissue import BrainTissueResult, classify_brain_tissue
+from bictool.domain.segmentation.brain_tissue import BrainTissueResult, classify_brain_tissue, extract_brain_mask
 from bictool.domain.segmentation.brain_tissue_adaptive import classify_brain_tissue_adaptive
 from bictool.domain.segmentation.brain_tissue_anchored import (
     AnchoredModel,
@@ -161,13 +174,15 @@ def make_tissue_classifier(
     pixel_spacing_mm: float | None,
     references: TissueReferences | None = None,
     anchored_model: AnchoredModel | None = None,
+    masks_by_slice: Mapping[int, Masks] | None = None,
 ) -> TissueClassifier:
     """`(slice_hu, brain_mask, slice_index=None) -> BrainTissueResult` for the
     method and settings, snapshotted - safe to run on another thread. The
     prototype needs the slice index and its model; without them it falls back to Adaptive.
-    A plug-in's method comes from the plug-ins in use (`plugin_manager.current()`)."""
+    A plug-in's method comes from the plug-ins in use (`plugin_manager.current()`) and
+    sees the CNN masks of `masks_by_slice` (`TissueContext.labels`)."""
     if is_plugin_method(tissue.method):
-        return _plugin_tissue_classifier(tissue, pixel_spacing_mm)
+        return _plugin_tissue_classifier(tissue, pixel_spacing_mm, masks_by_slice)
     method, threshold, fcm, adaptive = tissue.method, tissue.threshold, tissue.fcm, tissue.adaptive
     spacing = pixel_spacing_mm if adaptive.smoothing_mm > 0 else None
     sigma_px = adaptive.smoothing_mm / spacing if spacing else 0.0
@@ -210,6 +225,12 @@ def _plugin_tissue_classifier(tissue: TissueSettings, pixel_spacing_mm: float | 
     if method is None:
         raise ValueError(f"WM/GM method {tissue.method!r} is not available (plug-in missing or switched off)")
     settings = tissue.plugin if tissue.plugin is not None else method.settings
+    if isinstance(settings, Mapping) and dataclasses.is_dataclass(method.settings):
+        # A dict (e.g. read back from a JSON result) = fields changed from the plug-in's defaults.
+        try:
+            settings = dataclasses.replace(method.settings, **settings)
+        except TypeError as exc:
+            raise ValueError(f"WM/GM method {tissue.method!r}: settings {dict(settings)} do not fit - {exc}") from exc
 
     def classify(slice_hu: np.ndarray, brain_mask: np.ndarray, slice_index: int | None = None):
         labels = None
@@ -231,6 +252,14 @@ def _plugin_tissue_classifier(tissue: TissueSettings, pixel_spacing_mm: float | 
         return BrainTissueResult(masks=result)
 
     return classify
+
+
+def tissue_method_label(method: str) -> str:
+    """The WM/GM method's name as the program shows it ("Adaptive Thresholding", "Otsu (plug-in)")."""
+    if is_plugin_method(method):
+        found = plugin_manager.current().tissue_method(method)
+        return f"{found.label} (plug-in)" if found is not None else method
+    return METHOD_LABELS.get(method, method)
 
 
 def study_tissue_classifier(tissue: TissueSettings, masks_by_slice: Mapping[int, Masks], volume) -> TissueClassifier:
@@ -391,17 +420,84 @@ def plugin_pair_metrics(context: PairContext) -> tuple[PluginValues, ...]:
     return manager.pair_metrics(context) if manager.has_pair_metrics else ()
 
 
-def study_context(volume, masks_by_slice: Mapping[int, Masks], pairs: tuple[PairContext, ...]) -> StudyContext:
+class PluginInputs:
+    """What the slice and study contexts compute on first use and share: BICTool's
+    brain mask of a slice (from the segmentation, else the HU skull-strip - as the
+    program's Brain Mask overlay) and its WM/GM/CSF masks from the chosen method
+    (with the study's references - as `study_tissue_classifier`). Nothing is
+    computed unless a plug-in asks."""
+
+    def __init__(self, volume, masks_by_slice: Mapping[int, Masks], tissue: TissueSettings) -> None:
+        self._volume = volume
+        self._masks = dict(masks_by_slice)
+        self.tissue_settings = tissue
+        self._lock = threading.RLock()  # a plug-in may call from its own threads
+        self._brains: dict[int, np.ndarray] | None = None
+        self._brain: dict[int, np.ndarray] = {}
+        self._classify: TissueClassifier | None = None
+        self._tissue: dict[int, Mapping[str, np.ndarray]] = {}
+        self.tissue_used = False  # a plug-in asked for WM/GM masks (the method is then recorded)
+
+    def labels(self, index: int):
+        return read_only_masks(self._masks.get(index))
+
+    def brain_mask(self, index: int) -> np.ndarray:
+        with self._lock:
+            if index not in self._brain:
+                if self._brains is None:
+                    self._brains = brain_masks(self._masks, self._volume.num_slices) if self._masks else {}
+                mask = self._brains.get(index)
+                if mask is None:
+                    threshold = self.tissue_settings.threshold
+                    image = self._volume.get_slice_hu(index)
+                    mask = extract_brain_mask(image, threshold.air_hu_cutoff, threshold.bone_hu_cutoff)
+                self._brain[index] = read_only(mask)
+            return self._brain[index]
+
+    def tissue(self, index: int) -> Mapping[str, np.ndarray]:
+        with self._lock:
+            if index not in self._tissue:
+                if self._classify is None:
+                    self._classify = study_tissue_classifier(self.tissue_settings, self._masks, self._volume)
+                result = self._classify(self._volume.get_slice_hu(index), np.asarray(self.brain_mask(index)), index)
+                self._tissue[index] = read_only_masks(
+                    {name: result.masks[name] for name in (WHITE_MATTER, GRAY_MATTER, CSF) if name in result.masks}
+                )
+                self.tissue_used = True
+            return self._tissue[index]
+
+
+def slice_context(volume, index: int, pairs: tuple[PairContext, ...], inputs: PluginInputs) -> SliceContext:
+    """What a plug-in sees of one measured slice."""
+    return SliceContext(
+        slice_index=index,
+        image=read_only(volume.get_slice_hu(index)),
+        pixel_spacing_mm=volume.pixel_spacing_mm,
+        labels=inputs.labels(index),
+        pairs=tuple(pairs),
+        brain_mask=lambda: inputs.brain_mask(index),
+        tissue=lambda: inputs.tissue(index),
+        tissue_method=inputs.tissue_settings.method,
+    )
+
+
+def study_context(
+    volume, masks_by_slice: Mapping[int, Masks], pairs: tuple[PairContext, ...], inputs: PluginInputs | None = None
+) -> StudyContext:
     """What a plug-in sees of the whole series."""
-    masks = dict(masks_by_slice)
+    inputs = inputs or PluginInputs(volume, masks_by_slice, TissueSettings())
     return StudyContext(
         num_slices=volume.num_slices,
         pixel_spacing_mm=volume.pixel_spacing_mm,
         slice_thickness_mm=getattr(volume, "slice_thickness_mm", None),
-        segmented_slices=tuple(sorted(masks)),
+        segmented_slices=tuple(sorted(masks_by_slice)),
         pairs=tuple(pairs),
         image=lambda index: read_only(volume.get_slice_hu(index)),
-        labels=lambda index: read_only_masks(masks.get(index)),
+        labels=inputs.labels,
+        brain_mask=inputs.brain_mask,
+        tissue=inputs.tissue,
+        tissue_method=inputs.tissue_settings.method,
+        measured_slices=tuple(sorted({pair.slice_index for pair in pairs})),
     )
 
 
@@ -409,3 +505,38 @@ def plugin_study_metrics(context: StudyContext) -> tuple[PluginValues, ...]:
     """Every active plug-in's values for the whole series (() without plug-ins)."""
     manager = plugin_manager.current()
     return manager.study_metrics(context) if manager.has_study_metrics else ()
+
+
+@dataclass(frozen=True)
+class PluginStudyOutputs:
+    """What the plug-ins reported after the ROI pairs were measured."""
+
+    slice_values: dict[int, tuple[PluginValues, ...]] = field(default_factory=dict)  # slice -> each plug-in's values
+    study_values: tuple[PluginValues, ...] = ()
+    hints: tuple[PluginHints, ...] = ()
+    tissue_method: str | None = None  # the WM/GM method whose masks plug-ins used (None: none asked)
+
+
+def plugin_study_phase(
+    volume, masks_by_slice: Mapping[int, Masks], pairs: tuple[PairContext, ...], tissue: TissueSettings
+) -> PluginStudyOutputs:
+    """The plug-ins' slice values (each slice with a measured pair, after its pairs),
+    series values and artefact hints - in that order. Empty without such plug-ins
+    (nothing is computed then). `pairs` = the contexts of the measured pairs."""
+    manager = plugin_manager.current()
+    if not (manager.has_slice_metrics or manager.has_study_metrics or manager.has_artefact_hints):
+        return PluginStudyOutputs()
+    inputs = PluginInputs(volume, masks_by_slice, tissue)
+    slice_values: dict[int, tuple[PluginValues, ...]] = {}
+    if manager.has_slice_metrics:
+        by_slice: dict[int, list[PairContext]] = {}
+        for pair in pairs:
+            by_slice.setdefault(pair.slice_index, []).append(pair)
+        for index in sorted(by_slice):
+            values = manager.slice_metrics(slice_context(volume, index, tuple(by_slice[index]), inputs))
+            if values:
+                slice_values[index] = values
+    context = study_context(volume, masks_by_slice, pairs, inputs)
+    study_values = manager.study_metrics(context) if manager.has_study_metrics else ()
+    hints = manager.artefact_hints(context) if manager.has_artefact_hints else ()
+    return PluginStudyOutputs(slice_values, study_values, hints, tissue.method if inputs.tissue_used else None)

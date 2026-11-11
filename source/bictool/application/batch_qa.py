@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from bictool.application import pipeline
+from bictool.application import pipeline, plugin_manager
 from bictool.application.qa_settings import METHOD_ADAPTIVE, METHOD_ANCHORED, Settings, TissueSettings
 from bictool.api.study import Study
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPES
@@ -62,8 +62,11 @@ def run_study(
     cache_dir: Path,
     recipe: str = DEFAULT_RECIPE,
     tissue_method: str = TISSUE_ADAPTIVE,
+    exports: tuple[str, ...] = (),
+    export_dir: Path | None = None,
 ) -> VolumeQa:
-    """One study end to end; any failure is recorded on the returned `VolumeQa`."""
+    """One study end to end; any failure is recorded on the returned `VolumeQa`.
+    `exports` = plug-in file formats written per study into `export_dir`."""
     qa = VolumeQa(group=group, name=study_dir.name)
     try:
         settings = Settings(recipe=recipe, tissue=TissueSettings(method=_TISSUE_SETTINGS[tissue_method]))
@@ -76,12 +79,28 @@ def run_study(
 
         cache = cache_path(cache_dir, group, study_dir.name, study.volume.slice_paths)
         study.segment(None if cache.is_file() else get_model(), cache_file=cache)
-        qa = study.measure().to_volume_qa(group)
+        result = study.measure()
+        qa = result.to_volume_qa(group)
         qa.segmentation_confidence = study.confidence_by_slice
+        _write_exports(result, exports, export_dir, f"{group} - {study_dir.name}")
     except Exception as exc:  # one broken study must not stop the dataset
         logger.exception("Study %s / %s failed", group, study_dir.name)
         qa.error = f"{type(exc).__name__}: {exc}"
     return qa
+
+
+def _write_exports(result, exports: tuple[str, ...], export_dir: Path | None, name: str) -> None:
+    """The plug-in file formats of one study (a failing plug-in is logged, the batch goes on)."""
+    manager = plugin_manager.current()
+    for format_id in exports:
+        fmt = manager.export_formats.get(format_id)
+        if fmt is None or export_dir is None:
+            logger.warning("Export format %s is not available", format_id)
+            continue
+        export_dir.mkdir(parents=True, exist_ok=True)
+        problem = manager.write_export(format_id, result, export_dir / f"{name}{fmt.extension}")
+        if problem:
+            logger.warning("Export format %s failed for %s: %s", format_id, name, problem)
 
 
 def run_batch(
@@ -91,6 +110,7 @@ def run_batch(
     exclude: list[str] | None = None,
     recipe: str = DEFAULT_RECIPE,
     tissue_method: str = TISSUE_ADAPTIVE,
+    exports: tuple[str, ...] = (),
 ) -> list[VolumeQa]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +131,9 @@ def run_batch(
                 continue
             start = time.time()
             logger.info("=== %s / %s", group, study_dir.name)
-            qa = run_study(study_dir, group, get_model, out_dir / "cache", recipe, tissue_method)
+            qa = run_study(
+                study_dir, group, get_model, out_dir / "cache", recipe, tissue_method, exports, out_dir / "plugin_exports"
+            )
             volumes.append(qa)
             logger.info("    done in %.0f s%s", time.time() - start, f" - ERROR {qa.error}" if qa.error else "")
 
@@ -142,9 +164,13 @@ def main(argv: list[str] | None = None) -> None:
         default=TISSUE_ADAPTIVE,
         help="WM/GM method for the white-matter ROI2: adaptive (app default) or anchored (prototype)",
     )
+    parser.add_argument(
+        "--plugin-export", action="append", default=[], metavar="ID",
+        help="also write each study in a plug-in file format (\"<plug-in>.<id>\") into OUT/plugin_exports",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe, args.tissue)
+    run_batch(args.datasets, args.out, args.weights, args.exclude, args.recipe, args.tissue, tuple(args.plugin_export))
 
 
 if __name__ == "__main__":

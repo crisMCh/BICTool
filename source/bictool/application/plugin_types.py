@@ -1,6 +1,6 @@
 """Plug-in types and extension points (hook specifications) - internal home;
 plug-in authors import them from `bictool.api.plugins` (see its docstring and
-docs/plugins.md). Pure Python, no Qt."""
+docs/developer/reference/plugin-types.md). Pure Python, no Qt."""
 
 from __future__ import annotations
 
@@ -52,6 +52,47 @@ class MetricValue:
 
 
 @dataclass(frozen=True)
+class RoiMarker:
+    """Where a plug-in measured - BICTool draws it on the image (Run QA > "Plug-in ROIs").
+    A metric hook returns markers next to its `MetricValue`s. `mask` is a bool array
+    of the slice's shape (any shape of ROI); `slice_index` is needed only in
+    `bictool_study_metrics` (the other hooks use their slice)."""
+
+    name: str
+    mask: np.ndarray
+    slice_index: int | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class PluginMarker:
+    """A checked `RoiMarker` as BICTool keeps it: the mask cropped to `box`."""
+
+    plugin: str
+    name: str
+    slice_index: int
+    box: RoiRect                         # x0, y0, x1, y1 of the cropped mask
+    mask: np.ndarray                     # bool, (box rows, box columns)
+    description: str = ""
+
+    def full_mask(self, shape: tuple[int, int]) -> np.ndarray:
+        """The marker as a bool array of the slice's `shape`."""
+        out = np.zeros(shape, dtype=bool)
+        out[self.box.y0 : self.box.y1, self.box.x0 : self.box.x1] = self.mask
+        return out
+
+
+@dataclass(frozen=True)
+class ArtefactHint:
+    """A possible artefact a plug-in noticed (`bictool_artefact_hints`): one neutral
+    line of text and the slices (0-based) it concerns. Descriptive - never a score,
+    never part of the verdict."""
+
+    text: str
+    slices: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class PairContext:
     """One measured ROI pair (input of `bictool_pair_metrics`). Arrays are read-only."""
 
@@ -74,9 +115,28 @@ class PairContext:
 
 
 @dataclass(frozen=True)
+class SliceContext:
+    """One measured slice (input of `bictool_slice_metrics`), after its ROI pairs.
+    Arrays are read-only. `brain_mask()` and `tissue()` are computed on first use:
+    BICTool's brain mask of the slice, and its WM/GM/CSF masks
+    ({WHITE_MATTER: mask, GRAY_MATTER: mask, CSF: mask}) from the WM/GM method
+    `tissue_method` - the one chosen in the program or in `api.Settings`."""
+
+    slice_index: int                     # 0-based
+    image: np.ndarray                    # the slice in HU (rows, columns)
+    pixel_spacing_mm: float
+    labels: Mapping[str, np.ndarray] | None   # the CNN's masks (`LABELS`); None if the slice is not segmented
+    pairs: tuple[PairContext, ...]       # BICTool's ROI pairs measured on this slice
+    brain_mask: Callable[[], np.ndarray]
+    tissue: Callable[[], Mapping[str, np.ndarray]]
+    tissue_method: str
+
+
+@dataclass(frozen=True)
 class StudyContext:
-    """The whole series after the measurement (input of `bictool_study_metrics`).
-    `image(i)` / `labels(i)` decode on demand; arrays are read-only."""
+    """The whole series after the measurement (input of `bictool_study_metrics` and
+    `bictool_artefact_hints`). `image(i)`, `labels(i)`, `brain_mask(i)` and
+    `tissue(i)` compute on demand (as in `SliceContext`); arrays are read-only."""
 
     num_slices: int
     pixel_spacing_mm: float
@@ -85,6 +145,10 @@ class StudyContext:
     pairs: tuple[PairContext, ...]       # every measured ROI pair
     image: Callable[[int], np.ndarray]
     labels: Callable[[int], Mapping[str, np.ndarray] | None]
+    brain_mask: Callable[[int], np.ndarray]
+    tissue: Callable[[int], Mapping[str, np.ndarray]]
+    tissue_method: str
+    measured_slices: tuple[int, ...] = ()   # slices with at least one measured ROI pair
 
 
 @dataclass(frozen=True)
@@ -116,11 +180,37 @@ class TissueMethod:
 
 
 @dataclass(frozen=True)
+class ExportFormat:
+    """A file format a plug-in writes a study result in (`bictool_export_formats`).
+    The program offers it in the Export dialog (whole study) as `label`; the API
+    calls it with `api.write_export`. `write(result, path)` writes `result` (an
+    `api.StudyResult`) to `path` (a `pathlib.Path` ending with `extension`, e.g.
+    ".json", chosen by the user). `id` is unique within the plug-in; BICTool
+    prefixes it with the plug-in's name ("<plug-in>.<id>")."""
+
+    id: str
+    label: str
+    extension: str
+    write: Callable[..., None]
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class PluginValues:
-    """What one plug-in reported for one measurement or study."""
+    """What one plug-in reported for one ROI pair, slice or study."""
 
     plugin: str
     values: tuple[MetricValue, ...] = ()
+    error: str | None = None
+    markers: tuple[PluginMarker, ...] = ()
+
+
+@dataclass(frozen=True)
+class PluginHints:
+    """The possible artefacts one plug-in noticed in a study."""
+
+    plugin: str
+    hints: tuple[ArtefactHint, ...] = ()
     error: str | None = None
 
 
@@ -140,19 +230,33 @@ class LoadedPlugin:
 
 class HookSpecs:
     """The extension points. A plug-in implements any of them as a module-level
-    function with the same name (it may omit arguments it does not need)."""
+    function with the same name (it may omit arguments it does not need).
+    The metric hooks may return `RoiMarker`s among their values."""
 
     @hookspec
-    def bictool_pair_metrics(self, pair: PairContext) -> list[MetricValue] | None:
+    def bictool_pair_metrics(self, pair: PairContext) -> list[MetricValue | RoiMarker] | None:
         """Extra values for one measured ROI pair (called once per slice and pair)."""
 
     @hookspec
-    def bictool_study_metrics(self, study: StudyContext) -> list[MetricValue] | None:
-        """Extra values for the whole series (called once, after all pairs are measured)."""
+    def bictool_slice_metrics(self, ct_slice: SliceContext) -> list[MetricValue | RoiMarker] | None:
+        """Extra values for one measured slice, e.g. from the plug-in's own ROIs
+        (called once per slice with a measured ROI pair, after its pairs)."""
+
+    @hookspec
+    def bictool_study_metrics(self, study: StudyContext) -> list[MetricValue | RoiMarker] | None:
+        """Extra values for the whole series (called once, after all pairs and slices)."""
+
+    @hookspec
+    def bictool_artefact_hints(self, study: StudyContext) -> list[ArtefactHint] | None:
+        """Possible artefacts the plug-in noticed (called once, with the study metrics)."""
 
     @hookspec
     def bictool_tissue_methods(self) -> list[TissueMethod] | None:
         """WM/GM methods this plug-in adds (called once when the plug-in is loaded)."""
+
+    @hookspec
+    def bictool_export_formats(self) -> list[ExportFormat] | None:
+        """File formats this plug-in writes study results in (called once when the plug-in is loaded)."""
 
 
 HOOKS = tuple(name for name in vars(HookSpecs) if name.startswith("bictool_"))

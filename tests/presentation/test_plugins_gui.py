@@ -125,6 +125,41 @@ def test_a_plugin_method_is_in_the_drop_down_with_a_generated_settings_dialog(tm
     assert result.masks["White Matter"][:, :16].all() and not result.masks["CSF"].any()
 
 
+SLOW_WMGM = """
+import time
+SEEN = []
+
+def classify(slice_hu, brain_mask, settings, context):
+    SEEN.append((context.pixel_spacing_mm, None if context.labels is None else sorted(context.labels)))
+    time.sleep(0.6)
+    return {plugins.WHITE_MATTER: brain_mask}
+
+@plugins.hookimpl
+def bictool_tissue_methods():
+    return [plugins.TissueMethod("slow", "Slow split", classify)]
+"""
+
+
+def test_a_slow_plugin_method_is_flagged_and_sees_the_cnn_labels(tmp_path):
+    import sys
+
+    from bictool.presentation.viewmodels.brain_tissue_viewmodel import BrainTissueViewModel
+
+    _load(tmp_path, **{"slow-wmgm": SLOW_WMGM})
+    labels = {"Brain Parenchyma": np.ones((16, 16), bool)}
+    volume = SimpleNamespace(num_slices=1, pixel_spacing_mm=0.5, get_slice_hu=lambda i: np.full((16, 16), 30.0))
+    vm = BrainTissueViewModel(lambda: volume, lambda: {0: SimpleNamespace(masks=labels)}, None, None, SimpleNamespace(smoothing_mm=0.0))
+    texts = []
+    vm.slow_text_changed.connect(texts.append)
+
+    vm.set_method("slow-wmgm.slow")
+    vm.result(0)
+    vm.set_method("slow-wmgm.slow")  # a change clears the warning
+
+    assert sys.modules["bictool_plugins.slow_wmgm"].SEEN == [(0.5, ["Brain Parenchyma"])]
+    assert texts[0].startswith("⚠ Slow split (plug-in) needs") and texts[1] == "" and vm.slow_text == ""
+
+
 # ---- plug-in values from a QA run ----
 
 
@@ -160,6 +195,82 @@ def test_plugin_values_reach_the_results_page_and_the_export_rows(tmp_path, monk
     assert [4, "Falx", "metric-a", "roi2_mean", 33.0, "HU", ""] in rows
     assert [1, "Falx", "fails", "", "", "", "KeyError: 'x'"] in rows
     assert ["", "whole series", "metric-a", "pairs", 2.0, "", ""] in rows
+
+
+SLICE_PLUGIN = """
+import numpy as np
+
+@plugins.hookimpl
+def bictool_slice_metrics(ct_slice):
+    roi = np.zeros(ct_slice.image.shape, bool)
+    roi[10:20, 10:20] = True
+    return [plugins.MetricValue("box_mean", float(ct_slice.image[roi].mean()), "HU"), plugins.RoiMarker("box", roi)]
+
+@plugins.hookimpl
+def bictool_artefact_hints(study):
+    return [plugins.ArtefactHint("Ring-like pattern", (3,))]
+"""
+
+
+def _fake_study(num_slices=4):
+    return SimpleNamespace(
+        num_slices=num_slices, pixel_spacing_mm=0.5, slice_thickness_mm=4.0,
+        get_slice_hu=lambda i: np.full((64, 64), 30.0 + i),
+    )
+
+
+def test_slice_values_hints_and_markers_reach_the_results_and_export(tmp_path, monkeypatch):
+    _load(tmp_path, **{"slice-a": SLICE_PLUGIN})
+    monkeypatch.setattr(pipeline, "evaluate_slice_quality", _quality)
+    volume = _fake_study()
+    rois = {"falx.roi1": RoiRect(5, 5, 25, 25), "falx.roi2": RoiRect(30, 30, 50, 50)}
+    qa = QaRunViewModel(lambda job: job.run(), lambda: volume, lambda i: rois, lambda: {})
+    results = ResultsViewModel(qa, lambda: None)
+
+    qa.run([(0, "falx"), (3, "falx")])
+
+    assert qa.slice_plugin_values[3][0].values == (plugins.MetricValue("box_mean", 33.0, "HU"),)
+    assert [m.name for m in qa.plugin_markers(3)] == ["box"] and qa.has_plugin_markers()
+    assert "slice-a: box_mean 33 HU" in results.plugin_note(3, "falx")
+    assert "Possible artefact (plug-in slice-a): Ring-like pattern" in results.plugin_note(3, "falx")
+    assert "Possible artefact" not in results.plugin_note(0, "falx")
+    assert results.plugin_hint_lines() == ["Possible artefact (plug-in slice-a): Ring-like pattern (slice 4)"]
+    assert qa.plugin_tissue_method is None  # the plug-in never asked for WM/GM masks
+
+    rows = plugin_rows(
+        qa.plugin_values, qa.study_plugin_values, PAIR_LABELS, slice_values=qa.slice_plugin_values, hints=qa.plugin_hints,
+    )
+    assert [4, "slice", "slice-a", "box_mean", 33.0, "HU", ""] in rows
+    assert ["4", "possible artefact", "slice-a", "Ring-like pattern", "", "", ""] in rows
+
+    qa.reset()
+    assert qa.slice_plugin_values == {} and qa.plugin_hints == () and not qa.has_plugin_markers()
+
+
+def test_the_window_draws_plugin_rois_on_request(tmp_path):
+    from bictool.presentation.views.main_window import PLUGIN_MARKER_PREFIX, MainWindowView
+
+    _load(tmp_path, **{"slice-a": SLICE_PLUGIN})
+    window = MainWindowView()
+    volume = _fake_study()
+    qa = window.view_model.qa
+    window.view_model.study.volume = volume
+    window.view_model.study.current_slice = 3
+    window._roi_viewport.set_image(volume.get_slice_hu(3))
+    context = pipeline.slice_context(volume, 3, (), pipeline.PluginInputs(volume, {}, pipeline.TissueSettings()))
+    qa.slice_plugin_values = {3: plugin_manager.current().slice_metrics(context)}
+
+    window._refresh_plugin_markers()
+    assert not window._plugin_markers_cb.isHidden() and window._plugin_marker_keys == []  # offered, not ticked
+    window._plugin_markers_cb.setChecked(True)
+
+    key = f"{PLUGIN_MARKER_PREFIX}0"
+    assert window._plugin_marker_keys == [key]
+    assert window._roi_viewport._overlay_masks[key][10:20, 10:20].all()
+    assert window._roi_viewport._overlay_display_names[key] == "slice-a: box"
+    qa.reset()  # a new run or study: the markers go
+    assert window._plugin_marker_keys == [] and window._plugin_markers_cb.isHidden()
+    window.view_model.study.volume = None
 
 
 def test_without_plugins_no_plugin_job_runs(monkeypatch):

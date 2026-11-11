@@ -100,8 +100,9 @@ Fahren Sie mit der Maus über ein Bedienelement, um zu sehen, was es tut. Ein au
 Tooltip den Grund (z. B. *„Open a study first“* - zuerst eine Studie öffnen).
 
 **Hilfefenster.** Drücken Sie **F1**, um die Hilfe zu dem Bedienelement unter dem Mauszeiger zu öffnen, oder
-klicken Sie oben im Fenster auf **? Help**. Das Hilfefenster enthält dieses Handbuch (Deutsch oder Englisch)
-und die *Technical Reference* (englisch), die jeden Algorithmus und Parameter erklärt. Es hat ein
+klicken Sie oben im Fenster auf **? Help**. Das Hilfefenster enthält dieses Handbuch (Deutsch oder Englisch),
+die *Technical Reference* (englisch), die jeden Algorithmus und Parameter erklärt, und den *Developer Guide*
+(englisch; Python-API und Plug-ins). Es hat ein
 Inhaltsverzeichnis, eine Volltextsuche und die Schaltflächen *Zurück* / *Vor* und kann neben BICTool geöffnet
 bleiben. Auch *Help > Help Contents* öffnet es; die PDF-Fassungen stehen im Menü *Help* und im Ordner `manual`.
 
@@ -378,12 +379,18 @@ Technische Einzelheiten: *Technical Reference*, [Kapitel 6](tr:tr-wmgm).
 - **Settings > Show Trace Log**: ein technisches Protokoll unten im Fenster, zur Fehlersuche.
 - **Settings > Plug-ins…**: die Plug-ins, die BICTool gefunden hat, ihr Status (aktiv, ausgeschaltet, nicht
   kompatibel, Fehler) und Häkchen zum Ein- und Ausschalten; Änderungen wirken nach einem Neustart. Ein Plug-in
-  ergänzt Werte oder eine WM/GM-Methode. Zum Hinzufügen kopieren Sie es in den Ordner `plugins` neben
-  `BICTool.exe` (der Dialog zeigt den Ordner) und starten BICTool neu. Plug-in-Werte erscheinen in den
-  Schichthinweisen, unter *Details* der Studienzusammenfassung und auf einem zusätzlichen Blatt bzw. einer
-  CSV-Datei *Plug-ins* des Exports - sie ändern das Studienergebnis nie. Die WM/GM-Methode eines Plug-ins
-  erscheint in der Methodenauswahl mit dem Zusatz *(plug-in)*. Verwenden Sie nur Plug-ins aus
-  vertrauenswürdiger Quelle: Sie laufen mit BICTools Zugriff auf die Bilder.
+  ergänzt Werte (auch aus eigenen ROIs), Hinweise auf mögliche Artefakte, eine WM/GM-Methode oder ein
+  Dateiformat für den Export. Zum
+  Hinzufügen kopieren Sie es in den Ordner `plugins` neben `BICTool.exe` (der Dialog zeigt den Ordner) und
+  starten BICTool neu. Plug-in-Werte erscheinen in den Schichthinweisen, unter *Details* der
+  Studienzusammenfassung und auf einem zusätzlichen Blatt bzw. einer CSV-Datei *Plug-ins* des Exports - sie
+  ändern das Studienergebnis nie. Hinweise eines Plug-ins auf mögliche Artefakte stehen bei BICTools eigenen in
+  der Studienzusammenfassung, gekennzeichnet mit *(plug-in ...)*. Hat ein Plug-in in eigenen ROIs gemessen,
+  zeigt das Häkchen *Plug-in ROIs* im Bereich Run QA sie gelb im Bild. Die WM/GM-Methode eines Plug-ins
+  erscheint in der Methodenauswahl mit dem Zusatz *(plug-in)*; braucht sie mehr als eine halbe Sekunde je
+  Schicht, warnt ein Hinweis unter der Auswahl (das Fenster wartet bei jeder neuen Schicht auf sie). Das
+  Dateiformat eines Plug-ins erscheint im Export-Dialog mit dem Zusatz *plug-in* (Umfang *Whole study*). Verwenden
+  Sie nur Plug-ins aus vertrauenswürdiger Quelle: Sie laufen mit BICTools Zugriff auf die Bilder.
 - Fensteraufteilung, geöffnete Abschnitte, Textgröße und der letzte Exportordner werden je Windows-Benutzer
   gespeichert (Datei `%APPDATA%\BfS\BICTool.ini`).
 - *Tools > Advanced > QA Recipe* enthält eine alte Berechnung, die nur Ergebnisse der früheren Octave-Version

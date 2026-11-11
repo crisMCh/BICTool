@@ -96,15 +96,16 @@ def test_recipe_option_reaches_the_volume_qa(monkeypatch, tmp_path):
     (dataset / "study a").mkdir(parents=True)  # two studies - a lone subfolder counts as a wrapper
     (dataset / "study b").mkdir()
     seen = []
-    monkeypatch.setattr(batch_qa, "run_study", lambda study_dir, group, get_model, cache, recipe, tissue: seen.append((recipe, tissue))
+    monkeypatch.setattr(batch_qa, "run_study", lambda study_dir, group, get_model, cache, recipe, tissue, exports, export_dir:
+                        seen.append((recipe, tissue, exports, export_dir.name))
                         or SimpleNamespace(error=None, name=study_dir.name, group=group, structures={}))
     monkeypatch.setattr(batch_qa, "export_dataset_excel", lambda *a: None)
     monkeypatch.setattr(batch_qa, "export_dataset_csv", lambda *a: None)
 
     batch_qa.main([str(dataset), "--out", str(tmp_path / "out"), "--weights", "unused", "--recipe", "octave",
-                   "--tissue", "anchored"])
+                   "--tissue", "anchored", "--plugin-export", "my-plugin.json"])
 
-    assert seen == [("octave", "anchored"), ("octave", "anchored")]
+    assert seen == [("octave", "anchored", ("my-plugin.json",), "plugin_exports")] * 2
 
 
 def test_the_recipe_and_wmgm_method_reach_the_study(monkeypatch, tmp_path):

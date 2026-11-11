@@ -1284,8 +1284,8 @@ def test_help_menu_has_the_help_window_the_pdfs_and_the_about_box(monkeypatch, t
     window = MainWindowView()
     help_menu = _menu_path(window, "Help")
     assert [a.text() for a in help_menu.actions() if a.text()] == [
-        "Help Contents", "Technical Reference", "User Manual (PDF, English)", "Benutzerhandbuch (PDF, Deutsch)",
-        "Technical Reference (PDF)", "About BICTool",
+        "Help Contents", "Technical Reference", "Developer Guide (API and Plug-ins)", "User Manual (PDF, English)",
+        "Benutzerhandbuch (PDF, Deutsch)", "Technical Reference (PDF)", "Developer Guide (PDF)", "About BICTool",
     ]
     assert window._help_action.shortcut().toString() == "F1"
     manual = tmp_path / "manual.pdf"

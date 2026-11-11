@@ -20,6 +20,7 @@ def _vm():
                              series_description="CCT nativ 4,00 Hr44")
     qa = SimpleNamespace(
         results={(3, "falx"): _result()}, errors={(4, "falx"): "no edges"}, plugin_values={}, study_plugin_values=(),
+        slice_plugin_values={}, plugin_hints=(), plugin_tissue_method=None,
     )
     qa.results_by_pair = lambda pair: {i: r for (i, p), r in qa.results.items() if p == pair}
     results = SimpleNamespace(
@@ -81,3 +82,46 @@ def test_a_failed_export_is_reported(tmp_path):
 
     assert vm.export_slice({"csv"}, blocker / "sub" / "name") == []
     assert messages == [("critical", "Export failed")]
+
+
+EXPORT_PLUGIN = '''
+from bictool.api import plugins
+
+BICTOOL_PLUGIN = plugins.PluginInfo(name="fmt", version="1.0", requires_api=">=0.3,<1")
+
+def write_json(result, path):
+    path.write_text(f'{{"label": "{result.label}"}}', encoding="utf-8")
+
+def write_xlsx(result, path):
+    path.write_text("not really excel", encoding="utf-8")
+
+def fail(result, path):
+    raise OSError("disk says no")
+
+@plugins.hookimpl
+def bictool_export_formats():
+    return [plugins.ExportFormat("json", "Study JSON", ".json", write_json),
+            plugins.ExportFormat("xlsx", "Other workbook", ".xlsx", write_xlsx),
+            plugins.ExportFormat("broken", "Broken", ".txt", fail)]
+'''
+
+
+def test_plugin_formats_are_written_with_the_chosen_name(tmp_path):
+    from bictool.application import plugin_manager
+
+    folder = tmp_path / "plugins"
+    folder.mkdir()
+    (folder / "fmt.py").write_text(EXPORT_PLUGIN, encoding="utf-8")
+    plugin_manager.use(plugin_manager.load_plugins([folder], entry_points=False))
+    vm, messages = _vm()
+    assert vm.plugin_formats() == []  # no StudyResult source: nothing offered
+    vm._study_result = lambda: SimpleNamespace(label="study - Head")
+
+    assert [format_id for format_id, _label in vm.plugin_formats()] == ["fmt.broken", "fmt.json", "fmt.xlsx"]
+    assert ExportViewModel.file_type({"fmt.json"}) == (".json", "Study JSON (*.json)")
+    written = vm.export_study({"excel", "fmt.json", "fmt.xlsx", "fmt.broken"}, tmp_path / "out" / "Run.json", "CT")
+
+    assert sorted(p.name for p in written) == ["Run - fmt.xlsx.xlsx", "Run.json", "Run.xlsx"]
+    assert (tmp_path / "out" / "Run.json").read_text(encoding="utf-8") == '{"label": "study - Head"}'
+    assert openpyxl.load_workbook(tmp_path / "out" / "Run.xlsx")  # BICTool's report was not overwritten
+    assert messages == [("warning", "Export: plug-in problem")]

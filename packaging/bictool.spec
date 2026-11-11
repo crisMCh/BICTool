@@ -23,7 +23,9 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     # The program itself never imports the public API, but plug-ins do (`from bictool.api import plugins`).
-    hiddenimports=collect_submodules("bictool.api"),
+    # All of SciPy (not only the parts BICTool imports), so plug-ins can rely on it (docs/developer).
+    hiddenimports=collect_submodules("bictool.api")
+    + collect_submodules("scipy", filter=lambda name: ".tests" not in name and "._test" not in name),
     # Not used by the app: training, tests, plotting, other DICOM stacks.
     excludes=["sklearn", "matplotlib", "pytest", "IPython", "tkinter", "SimpleITK", "pynetdicom", "skimage"],
     noarchive=False,

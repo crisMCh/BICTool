@@ -288,12 +288,16 @@ class RoiViewModel(QObject):
                 roi1, pair, segmentation[index].masks, self._volume().pixel_spacing_mm,
                 None if tissue is None else tissue.masks,
             )
+        # The store also keeps the region and "no ROI2 found" - for `MainViewModel.study_result` (as the API's).
         if found is None:
             self.store.set_auto(index, key2, None)
             self.roi2_regions[pair].pop(index, None)
+            if roi1 is not None:
+                self.store.unplaced.add((index, pair))
         else:
-            self.store.set_auto(index, key2, found[0])
+            self.store.set_auto(index, key2, *found)
             self.roi2_regions[pair][index] = found[1]
+            self.store.unplaced.discard((index, pair))
 
     def _waiting_for_tissue(self, index: int) -> bool:
         """Some pair on this slice has its ROI1 but its automatic ROI2 is still pending."""

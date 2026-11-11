@@ -204,11 +204,17 @@ class StudyExportContext:
 PLUGIN_HEADER = ["Slice", "ROI pair", "Plug-in", "Value", "Result", "Unit", "Problem"]
 
 
-def plugin_rows(pair_values, study_values=(), pair_labels=None) -> list[list]:
+def plugin_rows(
+    pair_values, study_values=(), pair_labels=None, *, slice_values=None, hints=(), tissue_method=None
+) -> list[list]:
     """Rows for PLUGIN_HEADER: `pair_values` = {(0-based slice, pair): [PluginValues]},
-    `study_values` = [PluginValues] for the whole series (slice and pair left empty).
-    A plug-in's problem gets its own row when it reported no value."""
+    `slice_values` = {0-based slice: [PluginValues]} (ROI pair "slice"), `study_values` =
+    [PluginValues] for the whole series (slice left empty), `hints` = [PluginHints]
+    (ROI pair "possible artefact", the text as the value), `tissue_method` = the WM/GM
+    method whose masks plug-ins used (a row of its own). A plug-in's problem gets its
+    own row when it reported no value."""
     pair_labels = pair_labels or {}
+    slice_values = slice_values or {}
 
     def rows_of(slice_cell, pair_cell, plugin_values):
         rows = []
@@ -223,9 +229,20 @@ def plugin_rows(pair_values, study_values=(), pair_labels=None) -> list[list]:
         return rows
 
     out = []
-    for (index, pair), values in sorted(pair_values.items()):
-        out += rows_of(index + 1, pair_labels.get(pair, pair), values)
+    for index in sorted({index for index, _pair in pair_values} | set(slice_values)):
+        for (i, pair), values in sorted(pair_values.items()):
+            if i == index:
+                out += rows_of(index + 1, pair_labels.get(pair, pair), values)
+        out += rows_of(index + 1, "slice", slice_values.get(index, ()))
     out += rows_of("", "whole series", study_values)
+    for entry in hints:
+        for hint in entry.hints:
+            slices = ", ".join(str(i + 1) for i in hint.slices)
+            out.append([slices, "possible artefact", entry.plugin, hint.text, "", "", ""])
+        if entry.error:
+            out.append(["", "possible artefact", entry.plugin, "", "", "", entry.error])
+    if tissue_method and out:
+        out.append(["", "plug-in input", "", "WM/GM method", tissue_method, "", ""])
     return out
 
 

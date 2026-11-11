@@ -21,7 +21,7 @@ Plug-ins (extra metrics, WM/GM methods, ...) are written against
 
 Provisional (`API_VERSION` 0.x): the names in `__all__` are the API; they may
 still change between minor versions, and every change is listed in
-docs/api.md. Everything outside `bictool.api` is internal.
+docs/developer. Everything outside `bictool.api` is internal.
 """
 
 from bictool.api._version import API_VERSION
@@ -32,6 +32,7 @@ from bictool.api.errors import (
     InvalidSegmentation,
     ModelNotAvailable,
     NotSegmented,
+    PluginFailed,
     SeriesError,
 )
 from bictool.api.results import (
@@ -63,11 +64,13 @@ from bictool.api import plugins
 from bictool.api.study import (
     Study,
     analyse_study,
+    export_formats,
     list_series,
     load_anatomy_model,
     load_plugins,
     loaded_plugins,
     open_study,
+    write_export,
 )
 from bictool.application.qa_settings import (
     METHOD_ADAPTIVE,
@@ -98,6 +101,8 @@ __all__ = [
     "plugins",
     "load_plugins",
     "loaded_plugins",
+    "export_formats",
+    "write_export",
     # settings
     "Settings",
     "TissueSettings",
@@ -148,5 +153,6 @@ __all__ = [
     "NotSegmented",
     "InvalidSegmentation",
     "InvalidRois",
+    "PluginFailed",
     "Cancelled",
 ]

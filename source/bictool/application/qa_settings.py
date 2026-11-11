@@ -143,8 +143,9 @@ def default_adaptive_settings() -> AdaptiveSettings:
 @dataclass(frozen=True)
 class TissueSettings:
     """The WM/GM method and every method's parameters (only the chosen method's are
-    used). A plug-in's method ("<plug-in>.<id>") takes its settings from `plugin`
-    (None: the plug-in's defaults)."""
+    used). A plug-in's method ("<plug-in>.<id>") takes its settings from `plugin`:
+    an instance of the plug-in's settings dataclass, a dict of the fields that differ
+    from its defaults, or None for the defaults."""
 
     method: str = DEFAULT_METHOD
     threshold: BrainTissueSettings = field(default_factory=default_threshold_settings)

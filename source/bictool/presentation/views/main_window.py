@@ -183,6 +183,7 @@ from bictool.infrastructure.app_paths import (
     manual_path,
     notices_path,
     technical_reference_path,
+    developer_guide_path,
 )
 from bictool.infrastructure.config import load_config
 from bictool.infrastructure.logging_config import QtLogHandler, configure_logging
@@ -412,6 +413,10 @@ _BRAIN_TISSUE_COLORS: dict[str, str] = {
     "Gray Matter": "#e0a24c",
     "Brain Mask": "#8d96a0",  # neutral gray - the skull-strip result itself, not a tissue class
 }
+# Plug-in ROIs ("Plug-in ROIs" in the Run QA box): one yellow for all, apart from
+# ROI1/ROI2, the segmentation palette's neighbours and the tissue colors above.
+PLUGIN_MARKER_PREFIX = "plugin_marker_"
+PLUGIN_MARKER_COLOR = "#e8d44c"
 
 # The three WM/GM classification methods, selected in the Brain Tissue box's
 # Method dropdown (no single method works best on every scan, so it's
@@ -566,6 +571,7 @@ class MainWindowView(QMainWindow):
         self._bind_study_viewmodel()
         self._bind_segmentation_viewmodel()
         self._brain_tissue.settings_changed.connect(self._on_brain_tissue_settings_changed)
+        self._brain_tissue.slow_text_changed.connect(self._on_brain_tissue_slow)
         self._bind_roi_viewmodel()
         self._bind_qa_viewmodel()
         self._bind_stroke_viewmodel()
@@ -614,6 +620,7 @@ class MainWindowView(QMainWindow):
         qa.progress_changed.connect(self._qa_progress_label.setText)
         qa.job_done.connect(lambda _job: self._refresh_metrics_box())
         qa.finished.connect(self._on_qa_finished)
+        qa.reset_done.connect(self._refresh_plugin_markers)
         self._results.changed.connect(self._refresh_results_page)
 
     def _bind_roi_viewmodel(self) -> None:
@@ -626,6 +633,10 @@ class MainWindowView(QMainWindow):
         """Method or settings changed (results were dropped, the MainViewModel
         re-places the white-matter ROI2s): redraw this slice's overlays."""
         self._refresh_brain_tissue_for_current_slice()
+
+    def _on_brain_tissue_slow(self, text: str) -> None:
+        self._brain_tissue_slow_label.setText(text)
+        self._brain_tissue_slow_label.setVisible(bool(text))
 
     def _bind_main_viewmodel(self) -> None:
         vm = self.view_model
@@ -864,10 +875,12 @@ class MainWindowView(QMainWindow):
         self._help_action.setShortcut(QKeySequence(Qt.Key.Key_F1))
         self._help_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         help_menu.addAction("Technical Reference", lambda: self._show_help("", "technical_reference"))
+        help_menu.addAction("Developer Guide (API and Plug-ins)", lambda: self._show_help("", "developer_guide"))
         help_menu.addSeparator()
         help_menu.addAction("User Manual (PDF, English)", lambda: self._open_pdf(manual_path("en")))
         help_menu.addAction("Benutzerhandbuch (PDF, Deutsch)", lambda: self._open_pdf(manual_path("de")))
         help_menu.addAction("Technical Reference (PDF)", lambda: self._open_pdf(technical_reference_path()))
+        help_menu.addAction("Developer Guide (PDF)", lambda: self._open_pdf(developer_guide_path()))
         help_menu.addSeparator()
         help_menu.addAction("About BICTool", self._on_about_clicked)
 
@@ -996,6 +1009,7 @@ class MainWindowView(QMainWindow):
         dialog = ExportDialog(
             study_available=bool(self._qa.results),
             default_scope=SCOPE_STUDY if self._showing_study_summary() else "slice",
+            plugin_formats=self._export.plugin_formats(),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1121,6 +1135,7 @@ class MainWindowView(QMainWindow):
         self._refresh_segmentation_for_current_slice()
         self._refresh_stroke_for_current_slice()
         self._refresh_brain_tissue_for_current_slice()
+        self._refresh_plugin_markers()
         self._show_auto_rois_for_current_slice()
         self._refresh_metrics_box()
         if index in self._results.slices:
@@ -2317,6 +2332,12 @@ class MainWindowView(QMainWindow):
         self._brain_tissue_method_hint.setProperty("role", "muted")
         self._brain_tissue_method_hint.setWordWrap(True)
         layout.addWidget(self._brain_tissue_method_hint)
+        # A slow plug-in method blocks the window on every new slice - say so.
+        self._brain_tissue_slow_label = QLabel()
+        self._brain_tissue_slow_label.setStyleSheet(f"color: {WARNING};")
+        self._brain_tissue_slow_label.setWordWrap(True)
+        self._brain_tissue_slow_label.setVisible(False)
+        layout.addWidget(self._brain_tissue_slow_label)
 
         # Overlays in a 2x2 grid - half the height of a single column. The
         # two tissue classes share the left column, CSF and the skull-strip
@@ -2817,6 +2838,13 @@ class MainWindowView(QMainWindow):
         self._qa_recipe_label.setVisible(self._qa.recipe == RECIPE_OCTAVE)
         header.addWidget(self._qa_recipe_label)
         header.addStretch(1)
+        # Where plug-ins measured (their own ROIs) - only offered when a plug-in returned some.
+        self._plugin_marker_keys: list[str] = []  # overlays currently drawn
+        self._plugin_markers_cb = QCheckBox("Plug-in ROIs")
+        self._set_tip(self._plugin_markers_cb, "Show where plug-ins measured on this slice")
+        self._plugin_markers_cb.setVisible(False)
+        self._plugin_markers_cb.toggled.connect(lambda _on: self._refresh_plugin_markers())
+        header.addWidget(self._plugin_markers_cb)
         layout.addLayout(header)
 
         # Table (Metric/Status/Value), not per-row QLabels: rows keep their
@@ -2920,6 +2948,7 @@ class MainWindowView(QMainWindow):
         self._run_all_btn.setEnabled(self._confirm_rois_cb.isChecked())
         self._update_confirm_availability()
         self._refresh_metrics_box()
+        self._refresh_plugin_markers()
         if not self._qa.results:
             return
         self._results_tab_btn.setEnabled(True)
@@ -2929,6 +2958,24 @@ class MainWindowView(QMainWindow):
         shown = self._study.current_slice if self._study.current_slice in self._results.slices else self._results.slices[0]
         self._show_result_for_slice(shown)
         self._show_view_page(1)
+
+    def _refresh_plugin_markers(self) -> None:
+        """The plug-in ROIs of the shown slice, while "Plug-in ROIs" is ticked
+        (the switch is offered only when a plug-in returned markers)."""
+        self._plugin_markers_cb.setVisible(self._qa.has_plugin_markers())
+        for key in self._plugin_marker_keys:
+            self._roi_viewport.clear_overlay(key)
+        self._plugin_marker_keys = []
+        volume = self._study.volume
+        if volume is None or self._plugin_markers_cb.isHidden() or not self._plugin_markers_cb.isChecked():
+            return
+        shape = volume.get_slice_hu(self._study.current_slice).shape
+        for number, marker in enumerate(self._qa.plugin_markers(self._study.current_slice)):
+            key = f"{PLUGIN_MARKER_PREFIX}{number}"
+            self._roi_viewport.set_overlay(
+                key, marker.full_mask(shape), PLUGIN_MARKER_COLOR, opacity=0.45, label=f"{marker.plugin}: {marker.name}",
+            )
+            self._plugin_marker_keys.append(key)
 
     def _on_results_tab_changed(self, _tab_index: int) -> None:
         self._update_metrics_box_title()

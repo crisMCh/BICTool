@@ -15,6 +15,7 @@ DICOM UIDs (study, series, image) are kept for integration but left out of
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import math
@@ -25,13 +26,20 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from bictool.api._version import API_VERSION
-from bictool.application.plugin_types import MetricValue, PluginValues  # noqa: F401 - type hints
+from bictool.application.plugin_types import (  # noqa: F401 - type hints
+    ArtefactHint,
+    MetricValue,
+    PluginHints,
+    PluginMarker,
+    PluginValues,
+)
 from bictool.application.qa_settings import (
     AdaptiveSettings,
     BrainTissueSettings,
     FcmSettings,
     Settings,
     TissueSettings,
+    is_plugin_method,
 )
 from bictool.application.roi_store import PAIR_STRUCTURES, PAIRS, RoiRect
 from bictool.domain.results import head_ct_verdict as verdicts
@@ -40,8 +48,8 @@ from bictool.domain.roi_selection import homogeneous_roi
 from bictool.domain.roi_selection.structured_roi import STRUCTURES, RoiCandidate
 
 # The minor number grows when keys are added, the major number when a key is renamed or removed.
-# 1.1 (API 0.2): plug-in values.
-SCHEMA_VERSION = "1.1"
+# 1.1 (API 0.2): plug-in values. 1.2 (API 0.3): plug-in slice values, ROI markers, artefact hints.
+SCHEMA_VERSION = "1.2"
 
 ACCEPTABLE, NOT_ACCEPTABLE, UNCERTAIN, NOT_ASSESSABLE = "acceptable", "not_acceptable", "uncertain", "not_assessable"
 _VERDICT_IDS = {
@@ -280,6 +288,7 @@ class _Raw:
     artefacts: object = None
     basal_ganglia: object = None
     segmentation_check: object = None
+    plugin_tissue_method: str | None = None   # the WM/GM method whose masks plug-ins used
 
 
 @dataclass(frozen=True)
@@ -301,6 +310,8 @@ class StudyResult:
     segmentation_check: SegmentationCheck | None = None
     plugins: dict[str, str] = field(default_factory=dict)        # the active plug-ins: name -> version
     plugin_values: tuple[PluginValues, ...] = ()                 # each plug-in's values for the whole series
+    slice_plugin_values: dict[int, tuple[PluginValues, ...]] = field(default_factory=dict)  # slice -> values
+    plugin_hints: tuple[PluginHints, ...] = ()                   # possible artefacts plug-ins noticed
     api_version: str = API_VERSION
     schema_version: str = SCHEMA_VERSION
     _raw: _Raw = field(default_factory=_Raw, repr=False, compare=False)
@@ -375,8 +386,16 @@ class StudyResult:
         qa.plugin_rows = plugin_rows(
             {(m.slice.index, m.pair): m.plugin_values for m in self.measurements if m.plugin_values},
             self.plugin_values, {"falx": "Falx", "septum": "Septum"},
+            slice_values=self.slice_plugin_values, hints=self.plugin_hints, tissue_method=raw.plugin_tissue_method,
         )
         return qa
+
+    def plugin_markers(self, slice_index: int | None = None) -> tuple[PluginMarker, ...]:
+        """Every ROI marker the plug-ins returned (of one slice, if given)."""
+        groups = [m.plugin_values for m in self.measurements] + list(self.slice_plugin_values.values())
+        groups.append(self.plugin_values)
+        markers = (marker for group in groups for values in group for marker in values.markers)
+        return tuple(m for m in markers if slice_index is None or m.slice_index == slice_index)
 
 
 def _candidate(rect: RoiRect, structure: str) -> RoiCandidate:
@@ -405,6 +424,17 @@ def make_curves(quality) -> Curves:
         nps_roi2=_floats(quality.nps_roi2.nps_measured_radagv),
         ratio_frequency=_floats(quality.ratio.f_int),
         ps_mtf_ratio=_floats(quality.ratio.ratio_nps_mtf),
+    )
+
+
+def make_slice_ref(volume, index: int) -> SliceRef:
+    """Slice `index` of `volume` with its location and image UID (if known)."""
+    locations = getattr(volume, "slice_locations_mm", None) or []
+    uids = getattr(volume, "sop_instance_uids", None) or []
+    return SliceRef(
+        index,
+        locations[index] if index < len(locations) else None,
+        (uids[index] or None) if index < len(uids) else None,
     )
 
 
@@ -488,6 +518,8 @@ def make_segmentation_check(check) -> SegmentationCheck | None:
 def _settings_from_plain(data: dict) -> Settings:
     method = data["tissue_method"]
     params = data.get("tissue_parameters") or {}
+    if is_plugin_method(method):  # the plug-in's settings class is not known here: a plain dict
+        return Settings(recipe=data["recipe"], tissue=TissueSettings(method=method, plugin=dict(params) or None))
     slot, kind = {"threshold": ("threshold", BrainTissueSettings), "fcm": ("fcm", FcmSettings)}.get(
         method, ("adaptive", AdaptiveSettings)
     )
@@ -495,9 +527,32 @@ def _settings_from_plain(data: dict) -> Settings:
     return Settings(recipe=data["recipe"], tissue=tissue)
 
 
+def _marker_to_plain(marker: PluginMarker) -> dict:
+    """A marker with its mask as base64 of the packed bits (row by row, within `box`)."""
+    return {
+        "plugin": marker.plugin,
+        "name": marker.name,
+        "slice_index": int(marker.slice_index),
+        "box": _to_plain(marker.box),
+        "mask": base64.b64encode(np.packbits(np.asarray(marker.mask, dtype=bool)).tobytes()).decode("ascii"),
+        "description": marker.description,
+    }
+
+
+def _marker_from_plain(value: dict) -> PluginMarker:
+    box = RoiRect(*value["box"])
+    shape = (box.y1 - box.y0, box.x1 - box.x0)
+    bits = np.frombuffer(base64.b64decode(value["mask"]), dtype=np.uint8)
+    mask = np.unpackbits(bits, count=shape[0] * shape[1]).astype(bool).reshape(shape)
+    mask.flags.writeable = False
+    return PluginMarker(value["plugin"], value["name"], int(value["slice_index"]), box, mask, value.get("description", ""))
+
+
 def _to_plain(value):
     if isinstance(value, Settings):
         return value.to_dict()
+    if isinstance(value, PluginMarker):
+        return _marker_to_plain(value)
     if isinstance(value, RoiRect):
         return [int(value.x0), int(value.y0), int(value.x1), int(value.y1)]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -538,6 +593,8 @@ def _from_plain(kind, value):
         return _settings_from_plain(value)
     if kind is RoiRect:
         return RoiRect(*value)
+    if kind is PluginMarker:
+        return _marker_from_plain(value)
     if dataclasses.is_dataclass(kind):
         hints = typing.get_type_hints(kind)
         return kind(**{

@@ -6,7 +6,9 @@ name, writes Excel/CSV through the integration layer and reports the
 outcome as a `message` the view shows. The user picks the name and folder
 (a save dialog in the view); every file of one export shares that name.
 Chart images need the widgets, so the view passes a function that saves them.
-QtCore only - no widgets.
+Plug-ins may add study file formats (`plugin_formats`); they get the run as the
+API's `StudyResult` and write it themselves - a failing one is reported, the
+other files are written. QtCore only - no widgets.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+from bictool.application import pipeline, plugin_manager
 from bictool.integration.results_export import (
     ExportContext,
     StudyExportContext,
@@ -45,8 +48,10 @@ _FILE_TYPES = (
 def _folder_and_name(path: Path) -> tuple[Path, str]:
     """The chosen save path without the extension the save dialog may add."""
     name = path.name
-    for _item, extension, _filter in _FILE_TYPES:
-        if name.lower().endswith(extension):
+    extensions = [extension for _item, extension, _filter in _FILE_TYPES]
+    extensions += [fmt.extension for fmt in plugin_manager.current().export_formats.values()]
+    for extension in extensions:
+        if name.lower().endswith(extension.lower()):
             name = name[: -len(extension)]
     return path.parent, safe_file_name(name)
 
@@ -54,13 +59,18 @@ def _folder_and_name(path: Path) -> tuple[Path, str]:
 class ExportViewModel(QObject):
     message = Signal(str, str, str)  # (level "information"/"critical", title, text) for a dialog
 
-    def __init__(self, qa, results, volume: Callable[[], object], parent: QObject | None = None) -> None:
+    def __init__(
+        self, qa, results, volume: Callable[[], object], parent: QObject | None = None,
+        study_result: Callable[[], object] | None = None,
+    ) -> None:
         """`qa` = QaRunViewModel, `results` = ResultsViewModel (study verdict),
-        `volume()` = the shown DICOM volume."""
+        `volume()` = the shown DICOM volume, `study_result()` = the run as an
+        `api.StudyResult` (for plug-in formats)."""
         super().__init__(parent)
         self._qa = qa
         self._results = results
         self._volume = volume
+        self._study_result = study_result
         self.last_result = None
         self.last_context: ExportContext | None = None
 
@@ -107,7 +117,21 @@ class ExportViewModel(QObject):
     @staticmethod
     def file_type(items: set[str]) -> tuple[str, str]:
         """(extension, save-dialog filter) of the export's main file."""
-        return next((extension, name) for item, extension, name in _FILE_TYPES if item in items or item == "jpg")
+        for item, extension, name in _FILE_TYPES:
+            if item in items:
+                return extension, name
+        formats = plugin_manager.current().export_formats
+        for item in sorted(items):
+            if item in formats:
+                return formats[item].extension, f"{formats[item].label} (*{formats[item].extension})"
+        return _FILE_TYPES[-1][1], _FILE_TYPES[-1][2]
+
+    def plugin_formats(self) -> list[tuple[str, str]]:
+        """The study file formats plug-ins add: [(id, "label (.ext)")] (none without such plug-ins)."""
+        formats = plugin_manager.current().export_formats
+        if self._study_result is None:
+            return []
+        return [(format_id, f"{fmt.label} ({fmt.extension})") for format_id, fmt in sorted(formats.items())]
 
     # ---- exporting ----
 
@@ -160,7 +184,11 @@ class ExportViewModel(QObject):
             headline_tone=tone,
             summary_lines=tuple(lines),
             plugin_rows=tuple(
-                tuple(row) for row in plugin_rows(self._qa.plugin_values, self._qa.study_plugin_values, PAIR_LABELS)
+                tuple(row) for row in plugin_rows(
+                    self._qa.plugin_values, self._qa.study_plugin_values, PAIR_LABELS,
+                    slice_values=self._qa.slice_plugin_values, hints=self._qa.plugin_hints,
+                    tissue_method=self._qa.plugin_tissue_method and pipeline.tissue_method_label(self._qa.plugin_tissue_method),
+                )
             ),
         )
         by_pair = {PAIR_LABELS[pair]: self._qa.results_by_pair(pair) for pair in PAIRS if self._qa.results_by_pair(pair)}
@@ -180,12 +208,39 @@ class ExportViewModel(QObject):
             logger.exception("Study export failed")
             self.message.emit("critical", "Export failed", str(exc))
             return []
+        failures = self._write_plugin_formats(items, folder, name, written)
         logger.info(
             "Exported study (%d ROI pair result(s)) to %d file(s) in %s", len(self._qa.results), len(written), folder
         )
-        self._report_written(written, folder)
+        self._report_written(written, folder, failures)
         return written
 
-    def _report_written(self, written: list[Path], folder: Path) -> None:
+    def _write_plugin_formats(self, items: set[str], folder: Path, name: str, written: list[Path]) -> list[str]:
+        """The plug-in formats among `items` (appended to `written`); returns what failed."""
+        manager = plugin_manager.current()
+        chosen = [item for item in sorted(items) if item in manager.export_formats]
+        if not chosen or self._study_result is None:
+            return []
+        result = self._study_result()
+        failures = []
+        for format_id in chosen:
+            fmt = manager.export_formats[format_id]
+            target = folder / f"{name}{fmt.extension}"
+            if target in written:  # e.g. a plug-in's ".xlsx" next to the report
+                target = folder / f"{name} - {safe_file_name(format_id)}{fmt.extension}"
+            problem = manager.write_export(format_id, result, target)
+            if problem:
+                failures.append(f"{fmt.label}: {problem}")
+            else:
+                written.append(target)
+        return failures
+
+    def _report_written(self, written: list[Path], folder: Path, failures: list[str] = ()) -> None:
         names = "\n".join(f"  {path.name}" for path in written)
+        if failures:
+            problems = "\n".join(f"  {failure}" for failure in failures)
+            self.message.emit(
+                "warning", "Export: plug-in problem", f"Saved in {folder}:\n{names}\n\nNot written (plug-in):\n{problems}"
+            )
+            return
         self.message.emit("information", "Export complete", f"Saved in {folder}:\n{names}")

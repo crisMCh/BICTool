@@ -24,6 +24,7 @@ from bictool.domain.metrics.basal_ganglia import BasalGangliaSlice
 from bictool.domain.results.study_quality import RECIPE_PHYSICAL
 from bictool.domain.results.study_summary import ACCEPTABLE, UNACCEPTABLE, study_verdict
 from bictool.presentation.viewmodels.artefact_text import artefact_basics, artefact_details, slice_artefact_notes
+from bictool.presentation.viewmodels.display_text import format_slice_ranges
 from bictool.presentation.viewmodels.basal_ganglia_text import (
     basal_ganglia_basics,
     basal_ganglia_details,
@@ -156,19 +157,46 @@ class ResultsViewModel(QObject):
     def plugin_lines(self) -> list[str]:
         """The plug-ins' series values, and which plug-ins had problems."""
         lines = [f"Plug-in {v.plugin}: {_plugin_text(v)}" for v in self._qa.study_plugin_values if v.values or v.error]
-        failures: dict[str, list[str]] = {}
-        for values in self._qa.plugin_values.values():
-            for v in values:
-                if v.error:
-                    failures.setdefault(v.plugin, []).append(v.error)
-        for plugin, errors in sorted(failures.items()):
-            lines.append(f"Plug-in {plugin}: problem on {len(errors)} ROI pair(s) - {errors[0]}")
+        for what, groups in (
+            ("ROI pair(s)", self._qa.plugin_values.values()), ("slice(s)", self._qa.slice_plugin_values.values()),
+        ):
+            failures: dict[str, list[str]] = {}
+            for values in groups:
+                for v in values:
+                    if v.error:
+                        failures.setdefault(v.plugin, []).append(v.error)
+            for plugin, errors in sorted(failures.items()):
+                lines.append(f"Plug-in {plugin}: problem on {len(errors)} {what} - {errors[0]}")
+        lines += [f"Plug-in {h.plugin}: problem with its artefact hints - {h.error}" for h in self._qa.plugin_hints if h.error]
+        if self._qa.plugin_tissue_method:
+            lines.append(f"Plug-ins used the WM/GM masks of: {pipeline.tissue_method_label(self._qa.plugin_tissue_method)}")
         return lines
 
+    def plugin_hint_lines(self) -> list[str]:
+        """The possible artefacts plug-ins noticed (descriptive, like BICTool's own)."""
+        lines = []
+        for entry in self._qa.plugin_hints:
+            for hint in entry.hints:
+                where = f" (slice {format_slice_ranges(list(hint.slices))})" if hint.slices else ""
+                lines.append(f"Possible artefact (plug-in {entry.plugin}): {hint.text}{where}")
+        return lines
+
+    def plugin_slice_hints(self, index: int) -> list[str]:
+        """The plug-in artefact hints that name slice `index`."""
+        return [
+            f"possible artefact (plug-in {entry.plugin}): {hint.text}"
+            for entry in self._qa.plugin_hints for hint in entry.hints if index in hint.slices
+        ]
+
     def plugin_note(self, index: int, pair: str) -> str:
-        """One slice's plug-in values ("" without any)."""
-        values = self._qa.plugin_values.get((index, pair), ())
-        return " · ".join(f"{v.plugin}: {_plugin_text(v)}" for v in values if v.values or v.error)
+        """One slice's plug-in values - of the shown pair and of the slice - and hints ("" without any)."""
+        values = (*self._qa.plugin_values.get((index, pair), ()), *self._qa.slice_plugin_values.get(index, ()))
+        parts = [f"{v.plugin}: {_plugin_text(v)}" for v in values if v.values or v.error]
+        hints = self.plugin_slice_hints(index)
+        if hints:
+            text = "; ".join(hints)
+            parts.append(text[0].upper() + text[1:])
+        return " · ".join(parts)
 
     def select_pair(self, pair: str) -> None:
         self.pair = pair
@@ -253,6 +281,7 @@ class ResultsViewModel(QObject):
                 outlier = pair == FALX and is_outlier(self.verdict, index)
                 warnings = (["noise outlier"] if outlier else []) + slice_artefact_notes(self.artefacts, index)
                 notes = warnings + [note for note in (basal_ganglia_note(self.basal_ganglia, index),) if note]
+                notes += self.plugin_slice_hints(index)
                 cells += [resembles(score) or "—", "; ".join(notes)]
                 # Red only for warnings; the basal-ganglia visibility is descriptive.
                 tone = TONE_BAD if warnings else TONE_NEUTRAL
@@ -270,7 +299,8 @@ class ResultsViewModel(QObject):
         basics = list(text.basics)
         noise_line = next((i for i, line in enumerate(basics) if line.startswith("Artefacts (")), len(basics) - 1)
         basics[noise_line + 1:noise_line + 1] = (
-            artefact_basics(self.artefacts) + basal_ganglia_basics(self.basal_ganglia) + plausibility_basics(self.plausibility)
+            artefact_basics(self.artefacts) + self.plugin_hint_lines() + basal_ganglia_basics(self.basal_ganglia)
+            + plausibility_basics(self.plausibility)
         )
         text = replace(text, basics=tuple(basics))
         details = (
@@ -313,7 +343,7 @@ class ResultsViewModel(QObject):
         tone = tones[0] if len(set(tones)) == 1 else TONE_NEUTRAL
         return (
             "Study verdict (majority of slices, legacy chest-CT classifier)", tone,
-            lines + self.artefact_lines() + self.plugin_lines(),
+            lines + self.artefact_lines() + self.plugin_hint_lines() + self.plugin_lines(),
         )
 
 

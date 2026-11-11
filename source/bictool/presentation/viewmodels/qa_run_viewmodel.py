@@ -6,8 +6,10 @@ running in the background (`application.worker.Worker`, one at a time),
 the results and errors per job, and cancelling (the running job finishes,
 no further one starts). Each job is `pipeline.measure_pair` (the segmentation
 seeds the MTF contour on the structure) followed by the plug-ins' values for
-that pair; with plug-ins that report series values, one more job at the end
-runs them (`plugin_values`, `study_plugin_values` - descriptive only).
+that pair; with plug-ins that report slice or series values or artefact hints,
+one more job at the end runs them (`pipeline.plugin_study_phase`, as the API:
+`plugin_values`, `slice_plugin_values`, `study_plugin_values`, `plugin_hints` -
+descriptive only; `plugin_markers(slice)` = where plug-ins measured).
 QtCore only - no widgets.
 """
 
@@ -19,6 +21,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, Signal
 
 from bictool.application import pipeline, plugin_manager
+from bictool.application.qa_settings import TissueSettings
 from bictool.application.worker import Worker
 from bictool.domain.results.study_quality import DEFAULT_RECIPE, RECIPE_PHYSICAL
 from bictool.presentation.viewmodels.display_text import format_slice_ranges
@@ -43,14 +46,17 @@ class QaRunViewModel(QObject):
         rois: Callable[[int], dict],
         segmentation_cache: Callable[[], dict],
         parent: QObject | None = None,
+        tissue_settings: Callable[[], TissueSettings] | None = None,
     ) -> None:
         """`rois(slice)` = the slice's effective ROIs per slot; `segmentation_cache()`
-        = the anatomy results (MTF seed hint)."""
+        = the anatomy results (MTF seed hint); `tissue_settings()` = the WM/GM method
+        whose masks plug-ins get (default: the default method)."""
         super().__init__(parent)
         self._submit = submit
         self._volume = volume
         self._rois = rois
         self._segmentation_cache = segmentation_cache
+        self._tissue_settings = tissue_settings or TissueSettings
         self.recipe = DEFAULT_RECIPE
         self.jobs: list[Job] | None = None  # pending jobs while a batch runs, else None
         self.total = 0
@@ -61,6 +67,9 @@ class QaRunViewModel(QObject):
         self.errors: dict[Job, str] = {}
         self.plugin_values: dict[Job, tuple] = {}  # (slice, pair) -> PluginValues of each plug-in
         self.study_plugin_values: tuple = ()      # PluginValues for the whole series
+        self.slice_plugin_values: dict[int, tuple] = {}  # slice -> PluginValues of each plug-in
+        self.plugin_hints: tuple = ()             # PluginHints: possible artefacts plug-ins noticed
+        self.plugin_tissue_method: str | None = None  # the WM/GM method whose masks plug-ins used
         self._contexts: dict[Job, object] = {}     # what the plug-ins saw of each pair
         self._study_job_started = False
 
@@ -68,6 +77,16 @@ class QaRunViewModel(QObject):
 
     def is_running(self) -> bool:
         return self.jobs is not None
+
+    def plugin_markers(self, index: int) -> list:
+        """Where plug-ins measured on slice `index` (`PluginMarker`s)."""
+        groups = [values for (i, _pair), values in self.plugin_values.items() if i == index]
+        groups += [self.slice_plugin_values.get(index, ()), self.study_plugin_values]
+        return [m for group in groups for values in group for m in values.markers if m.slice_index == index]
+
+    def has_plugin_markers(self) -> bool:
+        groups = [*self.plugin_values.values(), *self.slice_plugin_values.values(), self.study_plugin_values]
+        return any(values.markers for group in groups for values in group)
 
     def results_by_pair(self, pair: str) -> dict[int, object]:
         return {index: result for (index, p), result in self.results.items() if p == pair}
@@ -141,6 +160,7 @@ class QaRunViewModel(QObject):
 
     def _drop_plugin_values(self) -> None:
         self.plugin_values, self.study_plugin_values, self._contexts = {}, (), {}
+        self.slice_plugin_values, self.plugin_hints, self.plugin_tissue_method = {}, (), None
         self._study_job_started = False
 
     # ---- the batch ----
@@ -164,8 +184,7 @@ class QaRunViewModel(QObject):
             "Run All: slice=%d (%s), roi1=%s, roi2=%s, pix_spc=%.4f",
             index, PAIR_LABELS[pair], roi1, roi2, spacing,
         )
-        plugins = plugin_manager.current()
-        with_plugins = plugins.has_pair_metrics or plugins.has_study_metrics
+        with_plugins = plugin_manager.current().has_measurement_hooks
 
         def job():
             # Intermediate steps kept for Results > Advanced (a few MB per study, no extra time).
@@ -211,24 +230,31 @@ class QaRunViewModel(QObject):
         self._run_next()
 
     def _needs_study_job(self) -> bool:
-        return not self._study_job_started and bool(self._contexts) and plugin_manager.current().has_study_metrics
+        if self._study_job_started or not self._contexts:
+            return False
+        plugins = plugin_manager.current()
+        return plugins.has_slice_metrics or plugins.has_study_metrics or plugins.has_artefact_hints
 
     def _run_study_job(self) -> None:
-        """The plug-ins' values for the whole series, in the background."""
+        """The plug-ins' slice and series values and artefact hints, in the background."""
         self._study_job_started = True
         volume = self._volume()
         masks = {index: result.masks for index, result in self._segmentation_cache().items()}
         contexts = tuple(self._contexts[job] for job in sorted(self._contexts))
-        worker = Worker(lambda: pipeline.plugin_study_metrics(pipeline.study_context(volume, masks, contexts)))
+        tissue = self._tissue_settings()  # snapshot: the user may change the method meanwhile
+        worker = Worker(lambda: pipeline.plugin_study_phase(volume, masks, contexts, tissue))
         worker.signals.finished.connect(self._on_study_job_finished)
         worker.signals.error.connect(self._on_study_job_error)
         self.active_worker = worker
         self.progress_changed.emit("Plug-ins…")
         self._submit(worker)
 
-    def _on_study_job_finished(self, values) -> None:
+    def _on_study_job_finished(self, outputs) -> None:
         self.active_worker = None
-        self.study_plugin_values = tuple(values)
+        self.slice_plugin_values = dict(outputs.slice_values)
+        self.study_plugin_values = tuple(outputs.study_values)
+        self.plugin_hints = tuple(outputs.hints)
+        self.plugin_tissue_method = outputs.tissue_method
         self._finish()
 
     def _on_study_job_error(self, message: str) -> None:

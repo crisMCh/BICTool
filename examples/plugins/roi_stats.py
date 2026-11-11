@@ -1,4 +1,4 @@
-"""Example BICTool plug-in: extra metrics (see docs/plugins.md).
+"""Example BICTool plug-in: extra metrics (see docs/developer, tutorials/first-plugin.md).
 
 Adds the mean and SD of both ROIs of every measured pair, and the median ROI2
 SD over the series. To try it, copy this file into the plug-in folder

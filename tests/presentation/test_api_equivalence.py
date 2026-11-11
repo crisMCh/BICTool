@@ -84,3 +84,105 @@ def test_the_gui_and_the_api_place_and_measure_the_same_rois(monkeypatch):
     study.measure(api_rois, head_ct_model=None)
 
     assert gui_calls and gui_calls == measured
+
+
+PLUGIN = '''
+import numpy as np
+from bictool.api import plugins
+
+BICTOOL_PLUGIN = plugins.PluginInfo(name="equal", version="1.0", requires_api=">=0.3,<1")
+
+@plugins.hookimpl
+def bictool_pair_metrics(pair):
+    return [plugins.MetricValue("roi2_mean", float(pair.roi2_pixels.mean()))]
+
+@plugins.hookimpl
+def bictool_slice_metrics(ct_slice):
+    wm = ct_slice.tissue()[plugins.WHITE_MATTER] & ct_slice.brain_mask()
+    return [plugins.MetricValue("wm_mean", float(ct_slice.image[wm].mean())), plugins.RoiMarker("wm", wm)]
+
+@plugins.hookimpl
+def bictool_study_metrics(study):
+    return [plugins.MetricValue("brain_px", float(sum(study.brain_mask(i).sum() for i in study.measured_slices)))]
+
+@plugins.hookimpl
+def bictool_artefact_hints(study):
+    return [plugins.ArtefactHint("checked", study.measured_slices)]
+'''
+
+
+def test_the_gui_and_the_api_give_plugins_the_same_inputs(tmp_path, monkeypatch):
+    """Plug-in values, markers and hints (incl. BICTool's brain and WM/GM masks) are the same in both."""
+    from bictool.application import plugin_manager
+
+    (tmp_path / "equal.py").write_text(PLUGIN, encoding="utf-8")
+    plugin_manager.use(plugin_manager.load_plugins([tmp_path], entry_points=False))
+    masks_by_slice = {i: _slice(shift) for i, shift in enumerate((-3, 0, 4))}
+    images = {i: _image(masks, i) for i, masks in masks_by_slice.items()}
+    volume = SimpleNamespace(
+        num_slices=3, pixel_spacing_mm=0.5, slice_thickness_mm=4.0, series_description="Head", slice_paths=[],
+        get_slice_hu=lambda i: images[i],
+    )
+    segmentation = {i: SimpleNamespace(masks=masks) for i, masks in masks_by_slice.items()}
+    run_now = lambda job: job.run()  # noqa: E731
+    fake = SimpleNamespace(
+        mtf_area=0.5, predicted_label=1, decision_value=0.0, recipe="physical", feature_vector=np.zeros(7),
+        nps_f_av=0.2, nps_f_peak=0.1, contrast_roi1=0.1, contrast_roi2=0.02,
+    )
+    monkeypatch.setattr(steps, "evaluate_slice_quality", lambda *a, **k: fake)
+    tissue = BrainTissueViewModel(
+        lambda: volume, lambda: segmentation, default_threshold_settings(), default_fcm_settings(),
+        default_adaptive_settings(),
+    )
+    gui = RoiViewModel(run_now, lambda: volume, lambda: 0, lambda: segmentation, lambda: tissue.cache, tissue.classifier)
+    gui.set_auto(True)
+    qa = QaRunViewModel(run_now, lambda: volume, gui.effective, lambda: segmentation, tissue_settings=tissue.tissue_settings)
+    qa.run(gui.ready_jobs())
+
+    study = Study(volume)
+    study.set_segmentation(masks_by_slice)
+    result = study.measure(study.place_rois(), head_ct_model=None)
+
+    assert qa.plugin_values == {(m.slice.index, m.pair): m.plugin_values for m in result.measurements}
+    assert set(qa.slice_plugin_values) == {0, 1, 2}
+    for index, values in qa.slice_plugin_values.items():
+        (gui_values,), (api_values,) = values, result.slice_plugin_values[index]
+        assert gui_values.values == api_values.values and gui_values.error is None
+        np.testing.assert_array_equal(gui_values.markers[0].mask, api_values.markers[0].mask)
+    assert qa.study_plugin_values == result.plugin_values and qa.plugin_hints == result.plugin_hints
+    assert qa.plugin_tissue_method == "adaptive"
+
+
+def test_the_programs_study_result_is_the_apis(monkeypatch):
+    """What export-format plug-ins get from the program (`MainViewModel.study_result`) is
+    what `api.Study.measure` returns for the same series."""
+    from bictool.presentation.viewmodels.main_viewmodel import MainViewModel
+
+    masks_by_slice = {i: _slice(shift) for i, shift in enumerate((-3, 0, 4))}
+    images = {i: _image(masks, i) for i, masks in masks_by_slice.items()}
+    volume = SimpleNamespace(
+        num_slices=3, pixel_spacing_mm=0.5, slice_thickness_mm=4.0, series_description="Head", slice_paths=[],
+        get_slice_hu=lambda i: images[i],
+    )
+    fake = SimpleNamespace(
+        mtf_area=0.5, predicted_label=1, decision_value=0.0, recipe="physical", feature_vector=np.arange(7.0),
+        nps_f_av=0.2, nps_f_peak=0.1, contrast_roi1=0.1, contrast_roi2=0.02,
+    )
+    monkeypatch.setattr(steps, "evaluate_slice_quality", lambda *a, **k: fake)
+    vm = MainViewModel(
+        lambda job: job.run(), {}, {"Brain": ["Brain Parenchyma"]}, lambda: None,
+        (default_threshold_settings(), default_fcm_settings(), default_adaptive_settings()),
+    )
+    vm.study.volume = volume
+    vm.segmentation.cache = {i: SimpleNamespace(masks=masks) for i, masks in masks_by_slice.items()}
+    vm.segmentation.plausibility = steps.segmentation_check(masks_by_slice, volume.pixel_spacing_mm)
+    assert vm.study_result() is None  # nothing measured yet
+    vm.roi.set_auto(True)
+    vm.qa.run(vm.roi.ready_jobs())
+
+    study = Study(volume)
+    study.set_segmentation(masks_by_slice)
+    expected = study.measure(study.place_rois(), reviewed=True, head_ct_model=None)
+
+    assert vm.study_result().to_dict() == expected.to_dict()
+    vm.study.volume = None
