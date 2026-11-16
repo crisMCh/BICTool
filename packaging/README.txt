@@ -1,4 +1,4 @@
-BICTool 1.0.0 - image-quality assessment of head CT
+BICTool 1.1.0 - image-quality assessment of head CT
 ===================================================
 
 Start
@@ -10,6 +10,12 @@ Start
 
 Manual
   English and German user manuals: folder "manual", or Help > User manual in the program.
+  The Technical Reference and the Developer Guide (Python API and plug-ins) are
+  there too.
+
+Plug-ins
+  Copy plug-ins into the folder "plugins" and restart (see plugins\README.txt);
+  Settings > Plug-ins lists them. Examples: plugins\examples.
 
 Requirements
   Windows 10 (1809 or newer) or Windows 11, 64-bit; 8 GB RAM recommended;
