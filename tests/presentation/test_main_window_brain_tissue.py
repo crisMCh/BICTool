@@ -14,9 +14,11 @@ case needs the fake-segmentation-module machinery, so it's covered in
 this file only covers the two disabled cases, which need no fake modules.
 """
 
+import dataclasses
+
 import numpy as np
 
-import bictool.presentation.viewmodels.brain_tissue_viewmodel as brain_tissue_vm_module
+import bictool.application.pipeline as brain_tissue_vm_module  # the WM/GM methods run in the pipeline
 import bictool.presentation.views.main_window as main_window_module
 from bictool.integration.dicom_file_loader import DicomVolume
 from bictool.presentation.views.main_window import MainWindowView
@@ -283,10 +285,11 @@ def test_ensure_result_passes_configured_settings_through(monkeypatch):
     window = MainWindowView()
     _load_fake_volume(window)
     window._on_brain_tissue_method_selected("HU Thresholding")
-    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].smoothing_size = 7
-    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].min_component_size = 99
-    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].white_matter_low = 15.0
-    window.view_model.brain_tissue.settings[METHOD_THRESHOLD].white_matter_high = 25.0
+    tissue = window.view_model.brain_tissue
+    tissue.set_settings(METHOD_THRESHOLD, dataclasses.replace(
+        tissue.settings[METHOD_THRESHOLD], smoothing_size=7, min_component_size=99,
+        white_matter_low=15.0, white_matter_high=25.0,
+    ))
 
     window._ensure_brain_tissue_result_for_current_slice()
 
@@ -302,7 +305,7 @@ def test_method_dropdown_offers_the_methods_and_the_prototype_and_defaults_to_ad
     assert [combo.itemText(i) for i in range(combo.count())] == [
         "Fuzzy C-Means", "HU Thresholding", "Adaptive Thresholding", "Anchored (prototype)"
     ]
-    assert window.view_model.brain_tissue.method == "Adaptive Thresholding"
+    assert window.view_model.brain_tissue.method == "adaptive"
     assert combo.currentText() == "Adaptive Thresholding"
 
 
@@ -319,7 +322,7 @@ def test_choosing_a_method_in_the_dropdown_switches_the_classifier():
 
     window._brain_tissue_method_combo.setCurrentText("Adaptive Thresholding")
 
-    assert window.view_model.brain_tissue.method == "Adaptive Thresholding"
+    assert window.view_model.brain_tissue.method == "adaptive"
 
 
 def test_settings_button_opens_the_selected_methods_dialog(monkeypatch):

@@ -206,7 +206,7 @@ def _dataset_volumes():
 
     good = VolumeQa(
         group="CanonPrime",
-        name="20250911_144757 - bad",
+        name="20000101_120000 - bad",
         series_label="Head 4mm (40 slices, 4.0 mm)",
         slice_count=40,
         segmented_slices=38,
@@ -255,7 +255,7 @@ def test_export_dataset_csv_writes_the_summary_and_one_long_per_slice_table(tmp_
     slices = _read_csv(slices_path)
     assert slices[0][:4] == ["Dataset", "Volume", "Structure", "Slice"]
     assert len(slices) == 1 + 5  # 3 septum + 2 dural fold slices, failed ones not listed
-    assert slices[1][:4] == ["CanonPrime", "20250911_144757 - bad", "Septum Pellucidum", "11"]
+    assert slices[1][:4] == ["CanonPrime", "20000101_120000 - bad", "Septum Pellucidum", "11"]
 
 
 # --- Physical recipe: study-level head-CT verdict ------------------------------
@@ -425,7 +425,7 @@ def test_dataset_summary_carries_the_head_ct_verdict_on_the_falx_row(tmp_path):
     assert falx[header.index("Noise outlier slices")] == "4"
     assert falx[header.index("Model")] == "head-ct-1"
     assert septum[col] == ""  # the verdict belongs to the falx
-    assert by_row[("20250911_144757 - bad", "Dural Folds")][col] == "not available (legacy recipe)"
+    assert by_row[("20000101_120000 - bad", "Dural Folds")][col] == "not available (legacy recipe)"
     assert "Verdict (legacy chest SVM, untrusted)" in header
 
 

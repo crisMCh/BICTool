@@ -1,37 +1,15 @@
-"""Automatic ROI selection + per-slice QA for one already-segmented volume -
-the same steps the GUI runs (Auto ROIs, then Run All), without the GUI, so a
-whole dataset can be processed in one go (`application.batch_qa`).
-
-Per ROI1 structure (septum pellucidum, dural folds), for every segmented
-slice with enough brain (`slice_eligibility`): ROI1 on the structure (`structured_roi`), ROI2 next to it
-(`homogeneous_roi`, white matter from `tissue_classify`), then
-`evaluate_slice_quality` with MTF seeds on the structure (`mtf_seed`). A
-slice whose QA raises is recorded as an error - it doesn't stop the volume.
-
-Pure NumPy/SciPy - no Qt, no file I/O.
+"""What one volume contributes to a dataset summary (`application.batch_qa`,
+the Excel/CSV exports): the automatic ROIs and per-slice QA per ROI1
+structure, the study verdict and hints. Filled from an `api.StudyResult`
+(`StudyResult.to_volume_qa`). Plain dataclasses - no Qt, no file I/O.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-import numpy as np
-
-from bictool.domain.metrics.mtf_seed import mtf_seed_candidates
-from bictool.domain.results.study_quality import DEFAULT_RECIPE, SliceQualityResult, evaluate_slice_quality
-from bictool.domain.roi_selection.homogeneous_roi import find_roi2_candidate
-from bictool.domain.roi_selection.slice_eligibility import eligible_slices
-from bictool.domain.roi_selection.structured_roi import STRUCTURES, RoiCandidate, find_roi1_candidates
-from bictool.domain.segmentation.segmentation_brain_mask import brain_mask_from_segmentation
-
-logger = logging.getLogger(__name__)
-
-# (slice_hu, brain_mask) -> object with `.masks` ("White Matter"/"Gray Matter"/...)
-# (slice_hu, brain_mask, slice_index) -> object with `.masks` (the index matters to
-# methods with a per-series model, e.g. `brain_tissue_anchored`)
-TissueClassifier = Callable[[np.ndarray, np.ndarray, int], object]
+from bictool.domain.results.study_quality import SliceQualityResult
+from bictool.domain.roi_selection.structured_roi import RoiCandidate
 
 
 @dataclass
@@ -73,69 +51,6 @@ class VolumeQa:
     segmentation_confidence: dict = field(default_factory=dict)
     # Study-level segmentation check (`segmentation_plausibility`, provisional).
     segmentation_plausibility: object | None = None
+    # Plug-in values as export rows (`results_export.plugin_rows`); empty without plug-ins.
+    plugin_rows: list = field(default_factory=list)
     error: str | None = None
-
-
-def evaluate_volume_qa(
-    masks_by_slice: Mapping[int, dict[str, np.ndarray]],
-    get_slice_hu: Callable[[int], np.ndarray],
-    num_slices: int,
-    pixel_spacing_mm: float,
-    tissue_classify: TissueClassifier,
-    structures: tuple[str, ...] = STRUCTURES,
-    recipe: str = DEFAULT_RECIPE,
-    *,
-    svm_model,
-) -> dict[str, StructureQa]:
-    """Auto ROIs + QA for every segmented slice, separately per structure.
-
-    `masks_by_slice` - the segmentation's masks per slice (DICOM pixel
-    space), only for segmented slices. `svm_model` - the legacy per-slice
-    classifier (`classification`), passed to `evaluate_slice_quality`. `tissue_classify` is only called for
-    slices that get an ROI1, at most once per slice.
-    """
-    images = {index: get_slice_hu(index) for index in masks_by_slice}
-    brain_masks = brain_mask_from_segmentation(dict(masks_by_slice), num_slices)
-    tissue_cache: dict[int, dict[str, np.ndarray]] = {}
-
-    def tissue_masks(index: int) -> dict[str, np.ndarray]:
-        if index not in tissue_cache:
-            brain = brain_masks.get(index)
-            if brain is None:
-                brain = np.zeros(images[index].shape, dtype=bool)
-            tissue_cache[index] = tissue_classify(images[index], brain, index).masks
-        return tissue_cache[index]
-
-    eligible = eligible_slices(masks_by_slice)
-    out: dict[str, StructureQa] = {}
-    for structure in structures:
-        qa = StructureQa(structure)
-        # Searched on all slices (the midline direction is volume-wide), kept
-        # only where there is enough brain.
-        roi1s = find_roi1_candidates(dict(masks_by_slice), structure, pixel_spacing_mm, images_by_slice=images)
-        qa.skipped = sorted(index for index in roi1s if index not in eligible)
-        roi1s = {index: roi1 for index, roi1 in roi1s.items() if index in eligible}
-        for index in sorted(roi1s):
-            roi1 = roi1s[index]
-            masks = masks_by_slice[index]
-            roi2 = find_roi2_candidate(roi1, masks, pixel_spacing_mm, tissue_masks(index))
-            if roi2 is None:
-                qa.errors[index] = "No ROI2 found"
-                continue
-            qa.rois[index] = (roi1, roi2)
-            image = images[index]
-            img_roi1 = image[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
-            img_roi2 = image[roi2.row0 : roi2.row1, roi2.col0 : roi2.col1]
-            hint = np.logical_or.reduce([masks[name] for name in STRUCTURES if name in masks])
-            structure_crop = hint[roi1.row0 : roi1.row1, roi1.col0 : roi1.col1]
-            seeds = mtf_seed_candidates(img_roi1, structure_crop)
-            try:
-                qa.results[index] = evaluate_slice_quality(
-                    img_roi1, img_roi2, pixel_spacing_mm, svm_model=svm_model, mtf_seeds=seeds, recipe=recipe,
-                    mtf_structure=structure_crop,
-                )
-            except Exception as exc:  # one bad slice must not stop the volume
-                logger.info("QA failed on slice %d (%s): %s", index + 1, structure, exc)
-                qa.errors[index] = str(exc)
-        out[structure] = qa
-    return out

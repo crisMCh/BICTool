@@ -182,6 +182,11 @@ class DicomVolume:
     dlp_mgy_cm: float | None
     reconstruction: str | None
     _slice_cache: dict[int, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
+    # DICOM references - where results point back to (PACS, structured reports);
+    # `sop_instance_uids` is indexed like `slice_paths` (empty when unknown).
+    study_instance_uid: str | None = None
+    series_instance_uid: str | None = None
+    sop_instance_uids: list[str] = field(default_factory=list)
 
     @property
     def num_slices(self) -> int:
@@ -224,6 +229,7 @@ class SeriesCandidate:
     # Whether the slices form an axial stack (see `_stack_is_axial`); None =
     # not determined, then the reference header's orientation decides.
     axial: bool | None = None
+    sop_instance_uids: list[str] = field(default_factory=list)  # same ordering as `sorted_paths`
 
     @property
     def num_slices(self) -> int:
@@ -315,6 +321,9 @@ def load_series(candidate: SeriesCandidate) -> DicomVolume:
         slice_thickness_mm=_as_float_or_none(getattr(ref, "SliceThickness", None)),
         slice_locations_mm=candidate.slice_locations_mm,
         **_extract_metadata(ref),
+        study_instance_uid=str(getattr(ref, "StudyInstanceUID", "")) or None,
+        series_instance_uid=str(getattr(ref, "SeriesInstanceUID", "")) or None,
+        sop_instance_uids=list(candidate.sop_instance_uids),
     )
 
 
@@ -341,6 +350,7 @@ def discover(path: str | Path, on_progress: Callable[[int], None] | None = None)
             sorted_paths=[p],
             slice_locations_mm=[_slice_location_mm(reference_ds)],
             _reference_header=reference_ds,
+            sop_instance_uids=[str(getattr(reference_ds, "SOPInstanceUID", ""))],
         )
     ]
 
@@ -456,6 +466,7 @@ def _build_candidate(group: list[pydicom.Dataset]) -> SeriesCandidate:
         slice_locations_mm=[_slice_location_mm(ds) for ds in sorted_group],
         _reference_header=reference,
         axial=axial,
+        sop_instance_uids=[str(getattr(ds, "SOPInstanceUID", "")) for ds in sorted_group],
     )
 
 
@@ -573,7 +584,7 @@ def _rescale_to_hu(ds: pydicom.Dataset) -> np.ndarray:
 def _pixel_spacing_mm(ds: pydicom.Dataset) -> float:
     """Row spacing from the DICOM `PixelSpacing` tag (row, column) - assumes
     square pixels, matching this project's metric functions, which take one
-    scalar `pix_spc` (see `domain.core_api`).
+    scalar `pix_spc` (see `domain.results.study_quality`).
     """
     pixel_spacing = getattr(ds, "PixelSpacing", None)
     return _parse_decimal(pixel_spacing[0]) if pixel_spacing else 1.0

@@ -3,113 +3,25 @@ synchronous: signal emission to a same-thread, directly-connected slot happens
 immediately, no event loop or waiting required.
 """
 
-import numpy as np
-
-import bictool.application.worker as worker_module
 from bictool.application.worker import Worker
 
-IMG_ROI1 = np.array(
-    [
-        [3, 1, 4, 1, 5, 9, 2],
-        [6, 5, 3, 5, 8, 9, 7],
-        [9, 3, 2, 3, 8, 4, 6],
-        [2, 6, 4, 3, 3, 8, 3],
-        [2, 7, 9, 5, 0, 2, 8],
-        [8, 4, 1, 9, 7, 1, 6],
-        [9, 3, 9, 9, 3, 7, 5],
-    ],
-    dtype=np.float64,
-)
-IMG_ROI2 = IMG_ROI1 + 100.0
-PIX_SPC = 0.5
 
-
-def test_run_emits_finished_with_the_core_api_result(monkeypatch):
-    sentinel_result = object()
-    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: sentinel_result)
-
-    worker = Worker(IMG_ROI1, IMG_ROI2, PIX_SPC)
-    finished_calls = []
-    error_calls = []
-    worker.signals.finished.connect(finished_calls.append)
-    worker.signals.error.connect(error_calls.append)
-
+def _run(job):
+    worker = Worker(job)
+    finished, errors = [], []
+    worker.signals.finished.connect(finished.append)
+    worker.signals.error.connect(errors.append)
     worker.run()
-
-    assert finished_calls == [sentinel_result]
-    assert error_calls == []
+    return finished, errors
 
 
-def test_run_emits_error_instead_of_raising(monkeypatch):
-    def _raise(*args, **kwargs):
+def test_run_emits_finished_with_the_jobs_result():
+    sentinel = object()
+    assert _run(lambda: sentinel) == ([sentinel], [])
+
+
+def test_run_emits_error_instead_of_raising():
+    def _raise():
         raise ValueError("boom")
 
-    monkeypatch.setattr(worker_module, "evaluate_slice_quality", _raise)
-
-    worker = Worker(IMG_ROI1, IMG_ROI2, PIX_SPC)
-    finished_calls = []
-    error_calls = []
-    worker.signals.finished.connect(finished_calls.append)
-    worker.signals.error.connect(error_calls.append)
-
-    worker.run()  # must not raise
-
-    assert finished_calls == []
-    assert error_calls == ["boom"]
-
-
-def test_run_passes_through_all_arguments(monkeypatch):
-    received_args = []
-    monkeypatch.setattr(
-        worker_module,
-        "evaluate_slice_quality",
-        lambda *a, **k: received_args.append(a) or object(),
-    )
-
-    worker = Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, act_cont_mask_x=5, act_cont_mask_y=7)
-    worker.run()
-
-    assert len(received_args) == 1
-    args = received_args[0]
-    np.testing.assert_array_equal(args[0], IMG_ROI1)
-    np.testing.assert_array_equal(args[1], IMG_ROI2)
-    assert args[2] == PIX_SPC
-    assert args[3] == 5
-    assert args[4] == 7
-
-
-def test_run_passes_mtf_seeds_through(monkeypatch):
-    received_kwargs = []
-    monkeypatch.setattr(
-        worker_module,
-        "evaluate_slice_quality",
-        lambda *a, **k: received_kwargs.append(k) or object(),
-    )
-
-    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, mtf_seeds=[(6, 7), (3, 3)]).run()
-
-    assert received_kwargs[0]["mtf_seeds"] == [(6, 7), (3, 3)]
-
-
-def test_run_passes_the_shipped_svm_unless_one_is_given(monkeypatch):
-    from bictool.integration.model_files import default_chest_svm_model
-
-    received_kwargs = []
-    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: received_kwargs.append(k) or object())
-    own_model = {"custom": np.zeros(1)}
-
-    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC).run()
-    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, svm_model=own_model).run()
-
-    assert received_kwargs[0]["svm_model"] is default_chest_svm_model()
-    assert received_kwargs[1]["svm_model"] is own_model
-
-
-def test_run_keeps_the_intermediate_steps_only_when_asked(monkeypatch):
-    seen = []
-    monkeypatch.setattr(worker_module, "evaluate_slice_quality", lambda *a, **k: seen.append(k["keep_steps"]))
-
-    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC).run()
-    Worker(IMG_ROI1, IMG_ROI2, PIX_SPC, keep_steps=True).run()
-
-    assert seen == [False, True]
+    assert _run(_raise) == ([], ["boom"])

@@ -5,8 +5,6 @@ tunable parameter that module exposes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -18,6 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+from bictool.application.qa_settings import AdaptiveSettings
 from bictool.presentation.views.text_scale import px
 
 # Same palette as `main_window.stylesheet()` - duplicated rather than imported
@@ -46,16 +45,6 @@ QPushButton {{
 QPushButton:hover {{ border-color: {TEXT_MUTED}; }}
 QPushButton#adaptiveAcceptBtn {{ background: {ACCENT}; color: #08181c; font-weight: 600; border: none; }}
 """
-
-
-@dataclass
-class AdaptiveSettings:
-    block_size: int
-    plausible_low: float           # fixed range - used when no study range is available (or it's off)
-    plausible_high: float
-    min_component_size: int
-    smoothing_mm: float = 0.0      # Gaussian sigma before classifying (app default 1 mm)
-    use_study_range: bool = False  # plausible range from the study's basal-ganglia references (app default on)
 
 
 class AdaptiveSettingsDialog(QDialog):

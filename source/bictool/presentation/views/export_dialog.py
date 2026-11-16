@@ -67,8 +67,10 @@ class ExportDialog(QDialog):
         *,
         study_available: bool = False,
         default_scope: str = SCOPE_SLICE,
+        plugin_formats: list[tuple[str, str]] = (),
         parent=None,
     ) -> None:
+        """`plugin_formats` = [(id, label)] of the study file formats plug-ins add."""
         super().__init__(parent)
         self.setWindowTitle("Export Results")
         self.setStyleSheet(_stylesheet())
@@ -94,7 +96,9 @@ class ExportDialog(QDialog):
         self._excel_cb.setChecked(True)
         self._csv_cb = QCheckBox("All numbers — CSV tables for analysis (.csv)")
         self._jpg_cb = QCheckBox("Charts — JPG images (MTF, NPS, PS, PS/MTF)")
-        for cb in (self._excel_cb, self._csv_cb, self._jpg_cb):
+        # Plug-in formats write the whole study, so they need the Whole study scope.
+        self._plugin_cbs = {format_id: QCheckBox(f"{label} — plug-in") for format_id, label in plugin_formats}
+        for cb in (self._excel_cb, self._csv_cb, self._jpg_cb, *self._plugin_cbs.values()):
             cb.toggled.connect(self._update_accept_enabled)
             layout.addWidget(cb)
         self._study_rb.toggled.connect(self._on_scope_toggled)
@@ -126,9 +130,15 @@ class ExportDialog(QDialog):
             self._jpg_cb.setChecked(False)
         self._jpg_cb.setEnabled(not study)
         self._jpg_cb.setToolTip("Charts are per slice - choose Current slice" if study else "")
+        for cb in self._plugin_cbs.values():
+            if not study:
+                cb.setChecked(False)
+            cb.setEnabled(study)
+            cb.setToolTip("" if study else "Plug-in formats write the whole study - choose Whole study")
 
     def _update_accept_enabled(self) -> None:
-        any_selected = self._excel_cb.isChecked() or self._csv_cb.isChecked() or self._jpg_cb.isChecked()
+        any_selected = self._excel_cb.isChecked() or self._csv_cb.isChecked() or self._jpg_cb.isChecked() \
+            or any(cb.isChecked() for cb in self._plugin_cbs.values())
         self._accept_btn.setEnabled(any_selected)
 
     def selected_items(self) -> set[str]:
@@ -139,6 +149,7 @@ class ExportDialog(QDialog):
             items.add("csv")
         if self._jpg_cb.isChecked():
             items.add("jpg")
+        items |= {format_id for format_id, cb in self._plugin_cbs.items() if cb.isChecked()}
         return items
 
     def scope(self) -> str:

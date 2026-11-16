@@ -20,6 +20,7 @@ MAIN_SPLITTER = "ui/main_splitter"        # viewer | sidebar widths
 TRACE_SPLITTER = "ui/trace_splitter"      # content | trace log heights
 EXPORT_FOLDER = "ui/export_folder"        # last folder an export was saved in
 HELP_LANGUAGE = "ui/help_language"        # language of the user manual in the help window
+PLUGINS_DISABLED = "plugins/disabled"     # plug-ins switched off in Settings > Plug-ins ("a,b")
 
 
 def section_key(name: str) -> str:

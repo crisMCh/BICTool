@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from bictool.domain.segmentation.segmentation_confidence import SegmentationConfidence
 from bictool.integration.segmentation_cache import cache_path, load_confidence, load_segmentation, save_segmentation
@@ -42,3 +43,15 @@ def test_the_cnn_confidence_is_stored_and_old_caches_have_none(tmp_path):
     assert load_confidence(tmp_path / "new.npz") == confidence
     assert load_confidence(tmp_path / "old.npz") == {}
     assert sorted(load_segmentation(tmp_path / "new.npz")) == [0, 1]
+
+
+def test_a_cache_written_for_another_series_is_refused(tmp_path):
+    from bictool.integration.segmentation_cache import CacheMismatch, series_key
+
+    path = tmp_path / "seg.npz"
+    masks = {0: {"Brain": np.ones((4, 4), dtype=bool)}}
+    save_segmentation(path, masks, key=series_key([Path("a/1.dcm"), Path("a/2.dcm")]))
+
+    assert list(load_segmentation(path, key=series_key([Path("moved/1.dcm"), Path("moved/2.dcm")]))) == [0]
+    with pytest.raises(CacheMismatch):
+        load_segmentation(path, key=series_key([Path("b/7.dcm")]))

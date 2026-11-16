@@ -7,27 +7,7 @@ and pass it to `crop_roi`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-import numpy as np
-
-
-@dataclass(frozen=True)
-class RoiRect:
-    """An ROI rectangle in image-pixel coordinates (x0 <= x1, y0 <= y1)."""
-
-    x0: int
-    y0: int
-    x1: int
-    y1: int
-
-    @property
-    def width(self) -> int:
-        return self.x1 - self.x0
-
-    @property
-    def height(self) -> int:
-        return self.y1 - self.y0
+from bictool.application.roi_store import RoiRect, candidate_to_rect, crop_roi  # noqa: F401 (re-exported)
 
 
 def normalize_rect(xa: int, ya: int, xb: int, yb: int, image_width: int, image_height: int) -> RoiRect:
@@ -39,17 +19,6 @@ def normalize_rect(xa: int, ya: int, xb: int, yb: int, image_width: int, image_h
     y0 = max(0, min(y0, image_height))
     y1 = max(0, min(y1, image_height))
     return RoiRect(x0, y0, x1, y1)
-
-
-def candidate_to_rect(candidate) -> RoiRect:
-    """A domain `roi_selection.structured_roi.RoiCandidate` (row/col corners)
-    as the View's `RoiRect` (x/y corners)."""
-    return RoiRect(candidate.col0, candidate.row0, candidate.col1, candidate.row1)
-
-
-def crop_roi(pixels: np.ndarray, rect: RoiRect) -> np.ndarray:
-    """Crops `pixels` (2D array, row-major: [y, x]) to `rect`."""
-    return pixels[rect.y0 : rect.y1, rect.x0 : rect.x1]
 
 
 def make_square(rect: RoiRect, image_width: int, image_height: int) -> RoiRect:

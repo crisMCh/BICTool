@@ -10,6 +10,5 @@ wires the individual metrics (MTF/NPS/contrast/PS-MTF-ratio) together and
 assembles the 7-element feature vector `classification` consumes - it
 captures that computational recipe from `funcImageQualityOctave.m` without
 translating the script itself (no DICOM I/O, ROI cropping, plotting, or
-file export - see its module docstring). Exposed to the Application Layer
-via `bictool.domain.core_api`.
+file export - see its module docstring). Called through `bictool.application.pipeline`.
 """

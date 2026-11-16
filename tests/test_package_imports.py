@@ -7,6 +7,7 @@ LAYER_MODULES = [
     "bictool.presentation",
     "bictool.presentation.views",
     "bictool.presentation.viewmodels",
+    "bictool.api",
     "bictool.application",
     "bictool.domain",
     "bictool.domain.preprocessing",

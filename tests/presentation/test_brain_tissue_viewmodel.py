@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import bictool.application.pipeline as steps
 import bictool.presentation.viewmodels.brain_tissue_viewmodel as module
 from bictool.presentation.viewmodels.brain_tissue_viewmodel import (
     DEFAULT_METHOD,
@@ -37,7 +38,7 @@ def _fake_classifier(monkeypatch, calls):
         return SimpleNamespace(masks={"White Matter": brain_mask})
 
     for name in ("classify_brain_tissue", "classify_brain_tissue_fcm", "classify_brain_tissue_adaptive"):
-        monkeypatch.setattr(module, name, lambda *a, n=name, **k: (calls.append(n), classify(*a, **k))[1])
+        monkeypatch.setattr(steps, name, lambda *a, n=name, **k: (calls.append(n), classify(*a, **k))[1])
 
 
 def test_results_are_computed_once_per_slice_and_carry_the_brain_mask(monkeypatch):

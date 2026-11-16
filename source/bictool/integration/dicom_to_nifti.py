@@ -115,10 +115,10 @@ def _convert_via_dicom2nifti(dicom_paths: list[Path]) -> np.ndarray:
         out_path = Path(tmpdir) / "converted.nii.gz"
         # `reorient_nifti=False` - deliberately NOT letting dicom2nifti
         # canonicalize the array axes to world-axis order. Confirmed as a
-        # real bug on a real gantry-tilted scan (2026-09-25,
-        # 20260131_164257_435458 "good 19yrs", 15 deg tilt): dicom2nifti's
-        # own axis-canonicalization heuristic (assign each array axis to
-        # whichever world axis its affine column is most aligned with) can
+        # real bug on a real gantry-tilted head CT (2026-09-25, 15 deg
+        # tilt): dicom2nifti's own axis-canonicalization heuristic
+        # (assign each array axis to whichever world axis its affine
+        # column is most aligned with) can
         # get confused by a tilted slice axis and swap the slice axis with
         # an in-plane axis entirely - producing a NIfTI shaped e.g.
         # (512, 37, 559) instead of the correct (512, 559, 37) for a

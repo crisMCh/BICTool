@@ -40,6 +40,15 @@ def test_shows_the_manual_in_the_chosen_language_and_the_english_reference():
     assert changes == ["en"] and view_model.documents()[0].language == "en"
 
 
+def test_the_developer_guide_comes_after_the_reference():
+    developer = _document("developer_guide", "en", [("dev-reference-hooks-reference-hooks", "Reference: Hooks", "bictool_slice_metrics")])
+    view_model = HelpViewModel(DOCUMENTS + [developer], "de")
+
+    assert [d.key for d in view_model.documents()] == ["user_guide", "technical_reference", "developer_guide"]
+    assert view_model.search("bictool_slice_metrics")[0].document.key == "developer_guide"
+    assert view_model.topic("", "developer_guide").document is developer
+
+
 def test_falls_back_to_english_and_to_the_start_of_a_document():
     view_model = HelpViewModel([DOCUMENTS[0], DOCUMENTS[2]], "de")
     assert view_model.documents()[0].language == "en"
